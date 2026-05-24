@@ -166,6 +166,11 @@ export interface ContractListParams {
     page_size?: number;
 }
 
+export interface ContractCodeAvailability {
+    available: boolean;
+    code: string;
+}
+
 // ── API ───────────────────────────────────────────────────────────────────────
 
 export const contractsApi = {

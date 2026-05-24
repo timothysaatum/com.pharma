@@ -1,0 +1,45 @@
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend.laso/**'   # Only triggers when backend code changes
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to server via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            # Go to your project folder on the server
+            cd /path/to/com.pharma
+
+            # Pull latest code
+            git pull origin main
+
+            # Go into backend folder
+            cd backend.laso
+
+            # Activate virtual environment (update path if different)
+            source venv/bin/activate
+
+            # Install any new dependencies
+            pip install -r requirements.txt
+
+            # Run database migrations
+            alembic upgrade head
+
+            # Restart the backend service
+            sudo systemctl restart ${{ secrets.SERVICE_NAME }}
+
+            echo "Backend deployed successfully!"
