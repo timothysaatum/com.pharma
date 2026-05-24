@@ -1,0 +1,120 @@
+# =========================
+#  PYTHON
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+hepenv/
+venv/
+ENV/
+env/
+conda_env/
+pip-wheel-metadata/
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+sdist/
+wheelhouse/
+*.egg-info/
+.eggs-info/
+.installed.cfg
+
+# =========================
+#  FASTAPI / UVICORN / GUNICORN
+# =========================
+# Uvicorn reload
+*.reload
+# PID / server runtime files
+*.pid
+
+# =========================
+#  ENVIRONMENT & SECRETS
+# =========================
+.env
+.env.*
+!env.example
+
+# =========================
+#  DATABASES
+# =========================
+# SQLite (local)
+*.db
+*.sqlite3
+*.sqlite
+
+# PostgreSQL dump files
+*.sql
+*.psql
+
+# Alembic migration cache
+alembic/versions/*.pyc
+alembic/versions/__pycache__/
+
+# =========================
+#  LOGS
+# =========================
+*.log
+logs/
+logging/
+uvicorn.log
+gunicorn.log
+
+# =========================
+#  TESTING
+# =========================
+pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# =========================
+#  EDITORS / IDEs
+# =========================
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm / JetBrains
+.idea/
+*.iml
+
+# Vim swaps
+*.swp
+*.swo
+
+# =========================
+#  CACHE / TEMP
+# =========================
+.cache/
+tmp/
+temp/
+*.temp
+*.bak
+
+# =========================
+#  STATIC / MEDIA (Optional)
+# =========================
+staticfiles/
+media/
+uploads/
+
+# =========================
+#  DOCKER
+# =========================
+docker-compose.override.yml
+docker-data/
+.docker/
+
+# =========================
+#  OTHER MISC
+# =========================
+*.DS_Store
+Thumbs.db
