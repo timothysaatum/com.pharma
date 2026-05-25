@@ -10,6 +10,9 @@ import {
 import { inventoryApi } from "@/api/inventory";
 import { drugApi } from "@/api/drugs";
 import { branchApi } from "@/api/branches";
+import { localRead } from "@/lib/localRead";
+import { cacheBranchInventoryRows } from "@/lib/localDb";
+import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { AddBatchForm } from "@/components/inventory/AddBatchForm";
@@ -64,14 +67,36 @@ function BatchViewerPanel({
         let cancelled = false;
         setLoading(true);
         setError(null);
-        inventoryApi
-            .getBatches(item.drug_id, {
-                branch_id: branchId,
-                include_expired: false,
-                include_empty: false,
-            })
-            .then((r) => { if (!cancelled) { setBatches(r.items); setLoading(false); } })
-            .catch((err) => { if (!cancelled) { setError(parseApiError(err)); setLoading(false); } });
+        const load = async () => {
+            try {
+                const r = !navigator.onLine || !isBackendReachable()
+                    ? await localRead.getBatchesForDrug(item.drug_id, {
+                        branch_id: branchId,
+                        include_expired: false,
+                        include_empty: false,
+                    })
+                    : await inventoryApi.getBatches(item.drug_id, {
+                        branch_id: branchId,
+                        include_expired: false,
+                        include_empty: false,
+                    });
+                if (!cancelled) setBatches(r.items);
+            } catch (err) {
+                if (!cancelled && isOfflineError(err)) {
+                    const r = await localRead.getBatchesForDrug(item.drug_id, {
+                        branch_id: branchId,
+                        include_expired: false,
+                        include_empty: false,
+                    });
+                    if (!cancelled) setBatches(r.items);
+                    return;
+                }
+                if (!cancelled) setError(parseApiError(err));
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        };
+        load();
         return () => { cancelled = true; };
     }, [item.drug_id, branchId]);
 
@@ -824,7 +849,29 @@ export default function InventoryPage() {
         abortRef.current = controller;
         setIsLoading(true);
         setError(null);
+        const loadLocal = async () => {
+            const result = await localRead.getBranchInventory(
+                activeBranchId,
+                {
+                    search: debouncedSearch || undefined,
+                    low_stock_only: lowStockOnly || undefined,
+                    include_zero_stock: includeZeroStock || undefined,
+                },
+                page,
+                PAGE_SIZE
+            );
+            if (!controller.signal.aborted) {
+                setInventory(result.items);
+                setTotalPages(result.total_pages);
+                setTotal(result.total);
+                void cacheBranchInventoryRows(result.items);
+            }
+        };
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                await loadLocal();
+                return;
+            }
             const result = await inventoryApi.getBranchInventory(
                 activeBranchId,
                 {
@@ -843,6 +890,14 @@ export default function InventoryPage() {
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
+            if (!controller.signal.aborted && isOfflineError(err)) {
+                try {
+                    await loadLocal();
+                } catch (localErr) {
+                    if (!controller.signal.aborted) setError(parseApiError(localErr));
+                }
+                return;
+            }
             if (!controller.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
@@ -852,15 +907,46 @@ export default function InventoryPage() {
     const fetchLowStock = useCallback(async () => {
         if (!activeBranchId) return;
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.getLowStock(activeBranchId);
+                setLowStockItems(result.items);
+                setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
+                return;
+            }
             const result = await inventoryApi.getLowStock(activeBranchId);
             setLowStockItems(result.items);
             setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
-        } catch { /* non-critical */ }
+        } catch (err: unknown) {
+            if (isOfflineError(err)) {
+                await fetchLowStockOffline();
+            }
+        }
+    }, [activeBranchId]);
+
+    const fetchLowStockOffline = useCallback(async () => {
+        if (!activeBranchId) return;
+        try {
+            const result = await localRead.getLowStock(activeBranchId);
+            setLowStockItems(result.items);
+            setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
+        } catch {
+            // ignore
+        }
     }, [activeBranchId]);
 
     const fetchExpiring = useCallback(async () => {
         if (!activeBranchId) return;
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.getExpiring(activeBranchId, 90);
+                setExpiringItems(result.items);
+                setExpiringCount(result.total_items);
+                setExpiringTotals({
+                    cost: Number(result.total_cost_value),
+                    selling: Number(result.total_selling_value),
+                });
+                return;
+            }
             const result = await inventoryApi.getExpiring(activeBranchId, 90);
             setExpiringItems(result.items);
             setExpiringCount(result.total_items);
@@ -868,7 +954,26 @@ export default function InventoryPage() {
                 cost: Number(result.total_cost_value),
                 selling: Number(result.total_selling_value),
             });
-        } catch { /* non-critical */ }
+        } catch (err: unknown) {
+            if (isOfflineError(err)) {
+                await fetchExpiringOffline();
+            }
+        }
+    }, [activeBranchId]);
+
+    const fetchExpiringOffline = useCallback(async () => {
+        if (!activeBranchId) return;
+        try {
+            const result = await localRead.getExpiring(activeBranchId, 90);
+            setExpiringItems(result.items);
+            setExpiringCount(result.total_items);
+            setExpiringTotals({
+                cost: Number(result.total_cost_value),
+                selling: Number(result.total_selling_value),
+            });
+        } catch {
+            // ignore
+        }
     }, [activeBranchId]);
 
     const fetchValuation = useCallback(async () => {
@@ -876,12 +981,38 @@ export default function InventoryPage() {
         setValuationLoading(true);
         setValuationError(null);
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.getValuation(activeBranchId);
+                setValuation(result);
+                valuationFetchedRef.current = true;
+                setValuationPage(1);
+                return;
+            }
             const result = await inventoryApi.getValuation(activeBranchId);
             setValuation(result);
             valuationFetchedRef.current = true;
             setValuationPage(1);
-        } catch (err) {
+        } catch (err: unknown) {
             setValuationError(parseApiError(err));
+            if (isOfflineError(err)) {
+                await fetchValuationOffline();
+            }
+        } finally {
+            setValuationLoading(false);
+        }
+    }, [activeBranchId]);
+
+    const fetchValuationOffline = useCallback(async () => {
+        if (!activeBranchId) return;
+        setValuationLoading(true);
+        setValuationError(null);
+        try {
+            const result = await localRead.getValuation(activeBranchId);
+            setValuation(result);
+            valuationFetchedRef.current = true;
+            setValuationPage(1);
+        } catch (err: unknown) {
+            setValuationError((err as Error)?.message ?? "Failed to load valuation report");
         } finally {
             setValuationLoading(false);
         }
@@ -892,7 +1023,13 @@ export default function InventoryPage() {
         return () => abortRef.current?.abort();
     }, [fetchInventory]);
 
-    useEffect(() => { fetchLowStock(); fetchExpiring(); }, [fetchLowStock, fetchExpiring]);
+    useEffect(() => {
+        const run = async () => {
+            await fetchLowStock();
+            await fetchExpiring();
+        };
+        run();
+    }, [fetchLowStock, fetchExpiring]);
 
     useEffect(() => {
         if (activeView === "valuation" && !valuationFetchedRef.current) fetchValuation();

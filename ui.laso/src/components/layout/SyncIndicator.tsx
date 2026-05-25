@@ -6,8 +6,10 @@
  * Also shows pending push count and manual-conflict badge.
  */
 
+import { useState } from "react";
 import { RefreshCw, WifiOff, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
+import { SyncConflictModal } from "@/components/layout/SyncConflictModal";
 
 function formatRelative(isoString: string | null): string {
     if (!isoString) return "Never";
@@ -24,6 +26,7 @@ interface SyncIndicatorProps {
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
     const { status, pendingCount, lastSyncAt, conflicts, syncNow } = useSyncStatus();
+    const [showConflictModal, setShowConflictModal] = useState(false);
 
     const hasConflicts = conflicts.length > 0;
 
@@ -52,13 +55,25 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
 
     if (collapsed) {
         return (
-            <button
-                onClick={syncNow}
-                title={`Sync: ${label}`}
-                className="w-full flex items-center justify-center py-2 text-white/40 hover:text-white transition-colors"
-            >
-                {icon}
-            </button>
+            <>
+                <button
+                    onClick={() => {
+                        if (hasConflicts) {
+                            setShowConflictModal(true);
+                        } else {
+                            syncNow();
+                        }
+                    }}
+                    title={`Sync: ${label}`}
+                    className="w-full flex items-center justify-center py-2 text-white/40 hover:text-white transition-colors"
+                >
+                    {icon}
+                </button>
+                <SyncConflictModal
+                    open={showConflictModal}
+                    onClose={() => setShowConflictModal(false)}
+                />
+            </>
         );
     }
 
@@ -91,10 +106,22 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
 
             {/* Conflict warning */}
             {hasConflicts && (
-                <p className="mt-1.5 text-xs text-red-400 leading-tight">
-                    {conflicts.length} record{conflicts.length > 1 ? "s need" : " needs"} manual review
-                </p>
+                <>
+                    <p className="mt-1.5 text-xs text-red-400 leading-tight">
+                        {conflicts.length} record{conflicts.length > 1 ? "s need" : " needs"} manual review
+                    </p>
+                    <button
+                        onClick={() => setShowConflictModal(true)}
+                        className="mt-2 inline-flex items-center gap-1 rounded-full border border-red-400/20 bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-200 hover:bg-red-500/20 transition"
+                    >
+                        Resolve conflicts
+                    </button>
+                </>
             )}
+            <SyncConflictModal
+                open={showConflictModal}
+                onClose={() => setShowConflictModal(false)}
+            />
         </div>
     );
 }

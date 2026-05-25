@@ -206,7 +206,7 @@ export const writeLocal = {
      * `items` column in SQLite.  The array is serialised as `items_json`.
      */
     purchaseOrder: async (
-        po: Omit<PurchaseOrder, "sync_status" | "sync_version"> & { id: string },
+        po: Omit<PurchaseOrder, "sync_status" | "sync_version"> & { id: string; items?: unknown[] },
         operation: "create" | "update" = "create"
     ): Promise<void> => {
         const { items, ...poData } = po;
@@ -234,7 +234,8 @@ export const writeLocal = {
      *     → SoftDeleteFields present on the type but not in the SQLite schema
      */
     customer: async (
-        customer: Omit<Customer, "sync_status" | "sync_version"> & { id: string }
+        customer: Omit<Customer, "sync_status" | "sync_version"> & { id: string },
+        operation: "create" | "update" = "create"
     ): Promise<void> => {
         const now = new Date().toISOString();
 
@@ -254,6 +255,6 @@ export const writeLocal = {
             ...customerData,
             updated_at: now,
             created_at: customerData.created_at ?? now,
-        }, "create");
+        }, operation);
     },
 };

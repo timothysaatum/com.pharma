@@ -14,6 +14,7 @@
  */
 
 import Database from "@tauri-apps/plugin-sql";
+import type { BranchInventoryWithDetails, PushConflict, Drug, Sale } from "@/types";
 
 const DB_PATH = "sqlite:laso.db";
 let _db: Database | null = null;
@@ -40,6 +41,10 @@ async function runMigrations(db: Database): Promise<void> {
   if (user_version < 2) await migrate_v2(db);
   if (user_version < 3) await migrate_v3(db);
   if (user_version < 4) await migrate_v4(db);
+  if (user_version < 5) await migrate_v5(db);
+  if (user_version < 6) await migrate_v6(db);
+  if (user_version < 7) await migrate_v7(db);
+  await ensureBranchInventorySchema(db);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,6 +324,7 @@ async function migrate_v1(db: Database): Promise<void> {
       attempts        INTEGER NOT NULL DEFAULT 0,
       last_attempt_at TEXT,
       error           TEXT,
+      conflict_json   TEXT,
       UNIQUE(table_name, record_id)
     )
   `);
@@ -439,6 +445,41 @@ async function migrate_v4(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 4");
 }
 
+async function migrate_v5(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE sync_queue ADD COLUMN conflict_json TEXT");
+  } catch {
+    /* already exists or unsupported; safe to ignore */
+  }
+
+  await db.execute("PRAGMA user_version = 5");
+}
+
+async function migrate_v6(db: Database): Promise<void> {
+  await ensureBranchInventorySchema(db);
+  await db.execute("PRAGMA user_version = 6");
+}
+
+async function migrate_v7(db: Database): Promise<void> {
+  await ensureBranchInventorySchema(db);
+  await db.execute(`
+    DELETE FROM branch_inventory
+    WHERE id LIKE '%:%'
+      AND quantity = 0
+      AND reserved_quantity = 0
+      AND sync_status = 'synced'
+  `);
+  await db.execute("PRAGMA user_version = 7");
+}
+
+async function ensureBranchInventorySchema(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
+  } catch {
+    /* already exists or table not created yet; safe to ignore */
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -475,6 +516,12 @@ export interface QueuedRecord {
   created_offline_at: string;
   attempts: number;
   error: string | null;
+  conflict_json?: string | null;
+}
+
+export interface QueuedConflict extends QueuedRecord {
+  conflict: PushConflict;
+  local_data: Record<string, unknown>;
 }
 
 /** Add or replace a record in the push queue. */
@@ -488,14 +535,15 @@ export async function enqueue(
   const db = await getDb();
   await db.execute(
     `INSERT INTO sync_queue
-       (table_name, record_id, operation, sync_version, payload_json, created_offline_at)
-     VALUES ($1, $2, $3, $4, $5, $6)
+       (table_name, record_id, operation, sync_version, payload_json, created_offline_at, conflict_json)
+     VALUES ($1, $2, $3, $4, $5, $6, NULL)
      ON CONFLICT(table_name, record_id) DO UPDATE SET
        operation    = excluded.operation,
        sync_version = excluded.sync_version,
        payload_json = excluded.payload_json,
        attempts     = 0,
-       error        = NULL`,
+       error        = NULL,
+       conflict_json = NULL`,
     [tableName, recordId, operation, syncVersion, JSON.stringify(payload), new Date().toISOString()]
   );
 }
@@ -504,7 +552,7 @@ export async function enqueue(
 export async function getPendingQueue(limit = 500): Promise<QueuedRecord[]> {
   const db = await getDb();
   return db.select<QueuedRecord[]>(
-    "SELECT * FROM sync_queue ORDER BY id ASC LIMIT $1",
+    "SELECT * FROM sync_queue WHERE conflict_json IS NULL ORDER BY id ASC LIMIT $1",
     [limit]
   );
 }
@@ -533,6 +581,66 @@ export async function markQueueError(
   );
 }
 
+export async function markQueueConflict(
+  tableName: string,
+  recordId: string,
+  error: string,
+  conflict: PushConflict
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `UPDATE sync_queue
+     SET attempts = attempts + 1,
+         last_attempt_at = $1,
+         error = $2,
+         conflict_json = $3
+     WHERE table_name = $4 AND record_id = $5`,
+    [new Date().toISOString(), error, JSON.stringify(conflict), tableName, recordId]
+  );
+}
+
+export async function clearQueueConflict(
+  tableName: string,
+  recordId: string
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `UPDATE sync_queue
+     SET error = NULL,
+         conflict_json = NULL
+     WHERE table_name = $1 AND record_id = $2`,
+    [tableName, recordId]
+  );
+}
+
+export async function getPendingConflicts(): Promise<QueuedConflict[]> {
+  const db = await getDb();
+  const rows = await db.select<QueuedRecord[] & { conflict_json: string }[]>(
+    "SELECT * FROM sync_queue WHERE conflict_json IS NOT NULL ORDER BY id ASC"
+  );
+
+  return rows.map((row) => {
+    let conflict: PushConflict = {
+      local_id: row.record_id,
+      table_name: row.table_name,
+      local_version: row.sync_version,
+      server_version: 0,
+      server_record: {},
+      resolution: "manual_required",
+    };
+    try {
+      conflict = JSON.parse(row.conflict_json ?? "{}");
+    } catch {
+      // keep fallback shape if parsing fails
+    }
+    return {
+      ...row,
+      conflict,
+      local_data: JSON.parse(row.payload_json),
+    };
+  });
+}
+
 /** Total number of records waiting to be pushed. */
 export async function getPendingCount(): Promise<number> {
   const db = await getDb();
@@ -540,4 +648,234 @@ export async function getPendingCount(): Promise<number> {
     "SELECT COUNT(*) as count FROM sync_queue"
   );
   return row?.count ?? 0;
+}
+
+export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails[]): Promise<void> {
+  if (items.length === 0) return;
+  const db = await getDb();
+  await ensureBranchInventorySchema(db);
+  for (const item of items) {
+    const now = item.updated_at ?? new Date().toISOString();
+    await db.execute(
+      `INSERT INTO drugs
+        (id, organization_id, name, generic_name, brand_name, sku, barcode,
+         category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+         requires_prescription, controlled_substance_schedule, ndc_code,
+         unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+         reorder_quantity, max_stock_level, unit_of_measure, description,
+         usage_instructions, side_effects, contraindications, storage_conditions,
+         is_active, is_deleted, sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1, '', $2, NULL, NULL, $3, NULL,
+         NULL, 'otc', NULL, NULL, NULL, NULL,
+         0, NULL, NULL,
+         $4, NULL, NULL, 0, $5,
+         50, NULL, 'unit', NULL,
+         NULL, NULL, NULL, NULL,
+         1, 0, 'synced', 1, NULL, $6, $6)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         sku = excluded.sku,
+         unit_price = excluded.unit_price,
+         reorder_level = excluded.reorder_level,
+         updated_at = excluded.updated_at`,
+      [
+        item.drug_id,
+        item.drug_name || item.drug_id,
+        item.drug_sku ?? null,
+        item.effective_unit_price ?? item.drug_unit_price ?? item.selling_price ?? 0,
+        item.drug_reorder_level ?? 0,
+        now,
+      ]
+    );
+
+    await db.execute(
+      `INSERT OR REPLACE INTO branch_inventory
+        (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+         sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+      [
+        item.id,
+        item.branch_id,
+        item.drug_id,
+        item.quantity,
+        item.reserved_quantity,
+        item.location,
+        item.selling_price,
+        item.sync_status ?? "synced",
+        item.sync_version ?? 1,
+        item.synced_at ?? null,
+        item.updated_at,
+        item.created_at,
+      ]
+    );
+  }
+}
+
+export async function cacheDrugs(items: Drug[]): Promise<void> {
+  if (items.length === 0) return;
+  const db = await getDb();
+  for (const item of items) {
+    await db.execute(
+      `INSERT OR REPLACE INTO drugs
+        (id, organization_id, name, generic_name, brand_name, sku, barcode,
+         category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+         requires_prescription, controlled_substance_schedule, ndc_code,
+         unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+         reorder_quantity, max_stock_level, unit_of_measure, description,
+         usage_instructions, side_effects, contraindications, storage_conditions,
+         is_active, is_deleted, sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+               $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28,
+               $29, $30, $31, $32, $33, $34, $35, $36)`,
+      [
+        item.id,
+        item.organization_id,
+        item.name,
+        item.generic_name ?? null,
+        item.brand_name ?? null,
+        item.sku ?? null,
+        item.barcode ?? null,
+        item.category_id ?? null,
+        item.drug_type ?? "otc",
+        item.dosage_form ?? null,
+        item.strength ?? null,
+        item.manufacturer ?? null,
+        item.supplier ?? null,
+        item.requires_prescription ? 1 : 0,
+        item.controlled_substance_schedule ?? null,
+        item.ndc_code ?? null,
+        item.unit_price,
+        item.cost_price ?? null,
+        item.markup_percentage ?? null,
+        item.tax_rate ?? 0,
+        item.reorder_level ?? 10,
+        item.reorder_quantity ?? 50,
+        item.max_stock_level ?? null,
+        item.unit_of_measure ?? "unit",
+        item.description ?? null,
+        item.usage_instructions ?? null,
+        item.side_effects ?? null,
+        item.contraindications ?? null,
+        item.storage_conditions ?? null,
+        item.is_active ? 1 : 0,
+        0,
+        "synced",
+        item.sync_version ?? 1,
+        item.synced_at ?? null,
+        item.updated_at,
+        item.created_at,
+      ]
+    );
+  }
+}
+
+export async function cacheBranchScopedDrugs(branchId: string, items: Drug[]): Promise<void> {
+  await cacheDrugs(items);
+  if (items.length === 0) return;
+
+  const db = await getDb();
+  await ensureBranchInventorySchema(db);
+  const now = new Date().toISOString();
+  for (const item of items) {
+    const raw = item as unknown as Record<string, unknown>;
+    const hasQuantityInfo =
+      raw.quantity !== undefined ||
+      raw.total_quantity !== undefined ||
+      raw.available_quantity !== undefined;
+    if (!hasQuantityInfo) continue;
+
+    const quantity = Number(raw.quantity ?? raw.total_quantity ?? raw.available_quantity ?? 0) || 0;
+    const reservedQuantity = Number(raw.reserved_quantity ?? 0) || 0;
+    const sellingPrice = Number(raw.effective_unit_price ?? raw.unit_price ?? item.unit_price);
+
+    await db.execute(
+      `INSERT INTO branch_inventory
+        (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+         sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, NULL, $6, 'synced', 1, NULL, $7, $7)
+       ON CONFLICT(branch_id, drug_id) DO UPDATE SET
+         quantity = CASE
+           WHEN excluded.quantity > 0 THEN excluded.quantity
+           ELSE branch_inventory.quantity
+         END,
+         reserved_quantity = CASE
+           WHEN excluded.quantity > 0 THEN excluded.reserved_quantity
+           ELSE branch_inventory.reserved_quantity
+         END,
+         selling_price = excluded.selling_price,
+         updated_at = excluded.updated_at`,
+      [
+        `${branchId}:${item.id}`,
+        branchId,
+        item.id,
+        quantity,
+        reservedQuantity,
+        Number.isFinite(sellingPrice) ? sellingPrice : item.unit_price,
+        item.updated_at ?? now,
+      ]
+    );
+  }
+}
+
+export async function cacheSales(items: Sale[]): Promise<void> {
+  if (items.length === 0) return;
+  const db = await getDb();
+  for (const item of items) {
+    await db.execute(
+      `INSERT OR REPLACE INTO sales
+        (id, organization_id, branch_id, sale_number, customer_id, customer_name,
+         subtotal, discount_amount, tax_amount, total_amount, price_contract_id,
+         contract_name, contract_discount_percentage, payment_method, payment_status,
+         amount_paid, change_amount, payment_reference, prescription_id,
+         prescription_number, prescriber_name, cashier_id, pharmacist_id,
+         insurance_claim_number, patient_copay_amount, insurance_covered_amount,
+         insurance_verified, insurance_verified_at, insurance_verified_by,
+         notes, status, receipt_printed, receipt_emailed, items_json,
+         sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+               $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
+               $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)`,
+      [
+        item.id,
+        item.organization_id,
+        item.branch_id,
+        item.sale_number,
+        item.customer_id ?? null,
+        item.customer_name ?? null,
+        item.subtotal,
+        item.discount_amount,
+        item.tax_amount,
+        item.total_amount,
+        item.price_contract_id ?? null,
+        item.contract_name ?? null,
+        item.contract_discount_percentage ?? null,
+        item.payment_method,
+        item.payment_status,
+        item.amount_paid ?? null,
+        item.change_amount ?? null,
+        item.payment_reference ?? null,
+        item.prescription_id ?? null,
+        item.prescription_number ?? null,
+        item.prescriber_name ?? null,
+        item.cashier_id,
+        item.pharmacist_id ?? null,
+        item.insurance_claim_number ?? null,
+        item.patient_copay_amount ?? null,
+        item.insurance_covered_amount ?? null,
+        item.insurance_verified ? 1 : 0,
+        item.insurance_verified_at ?? null,
+        item.insurance_verified_by ?? null,
+        item.notes ?? null,
+        item.status,
+        item.receipt_printed ? 1 : 0,
+        item.receipt_emailed ? 1 : 0,
+        JSON.stringify(item.items ?? []),
+        "synced",
+        item.sync_version ?? 1,
+        item.synced_at ?? null,
+        item.updated_at,
+        item.created_at,
+      ]
+    );
+  }
 }

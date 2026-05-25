@@ -54,6 +54,8 @@ export type ContractType =
 export type ContractStatus = "draft" | "active" | "suspended" | "expired" | "cancelled";
 
 export interface ContractResponse extends PriceContract {
+    requires_approval?: boolean;
+    daily_usage_limit?: number | null;
     usage_count: number;
     total_sales_amount: number;
     total_discount_given: number;
@@ -239,5 +241,13 @@ export const contractsApi = {
      */
     getAvailableForPos(branchId: string, signal?: AbortSignal): Promise<AvailableContract[]> {
         return get<AvailableContract[]>(`/contracts/available/${branchId}`, { signal });
+    },
+
+    /**
+     * GET /contracts/check-code/{contract_code}
+     * Check if a contract code is available (not already used).
+     */
+    checkCode(code: string): Promise<ContractCodeAvailability> {
+        return get<ContractCodeAvailability>(`/contracts/check-code/${encodeURIComponent(code)}`);
     },
 };

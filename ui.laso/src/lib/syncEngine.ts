@@ -21,15 +21,29 @@ import { syncApi } from "@/api/sync";
 import {
     getDb,
     getLastSyncAt, setLastSyncAt,
-    getPendingQueue, dequeue, markQueueError, getPendingCount,
+    getPendingQueue, getPendingConflicts,
+    dequeue, markQueueError, markQueueConflict, clearQueueConflict,
+    getPendingCount,
 } from "@/lib/localDb";
+import { isOfflineError } from "@/api/client";
 import type {
     PullResponse,
     PushRecord,
     PushResponse,
-    PushConflict,
     SyncStatus,
 } from "@/types";
+import type { QueuedConflict } from "@/lib/localDb";
+
+const DEFAULT_SYNC_TABLES = [
+    "drugs",
+    "drug_categories",
+    "price_contracts",
+    "customers",
+    "branch_inventory",
+    "drug_batches",
+    "sales",
+    "purchase_orders",
+];
 
 // Re-export SyncStatus so existing callers that import it from this module
 // do not need to update their import paths.
@@ -63,16 +77,22 @@ class SyncEngine {
     private readonly _onOffline = () => this.onOffline();
 
     // Pending conflict records that need manual resolution
-    pendingConflicts: PushConflict[] = [];
+    pendingConflicts: QueuedConflict[] = [];
 
     // ── Lifecycle ────────────────────────────────────────────────────
 
     /** Call once after login with the active branch. */
     start(branchId: string, intervalMs = 30_000): void {
+        if (this.branchId === branchId && this.intervalId) {
+            return;
+        }
+        this.stop();
         this.branchId = branchId;
 
         window.addEventListener("online", this._onOnline);
         window.addEventListener("offline", this._onOffline);
+
+        void this.loadPersistedConflicts();
 
         if (navigator.onLine) {
             this.sync();
@@ -123,7 +143,12 @@ class SyncEngine {
             this.setStatus("idle");
         } catch (err) {
             console.error("[SyncEngine] Sync failed:", err);
-            this.setStatus("error");
+            this.logError(err, "Sync failed");
+            if (isOfflineError(err)) {
+                this.setStatus("offline");
+            } else {
+                this.setStatus("error");
+            }
         } finally {
             this._isSyncing = false;
         }
@@ -152,7 +177,11 @@ class SyncEngine {
             });
         } catch (err) {
             console.warn("[SyncEngine] Push network error:", err);
-            return null;
+            this.logError(err, "Push network error");
+            if (isOfflineError(err)) {
+                this.setStatus("offline");
+            }
+            throw err;
         }
 
         // Accepted → remove from queue, mark local record as synced
@@ -168,14 +197,18 @@ class SyncEngine {
                 await dequeue(conflict.table_name, conflict.local_id);
                 await this.markSynced(conflict.table_name, conflict.local_id);
             } else {
-                // manual_required — surface to the user via pendingConflicts
-                this.pendingConflicts.push(conflict);
-                await markQueueError(
+                // manual_required — persist conflict for later review
+                await markQueueConflict(
                     conflict.table_name,
                     conflict.local_id,
-                    "Conflict: manual resolution required"
+                    "Conflict: manual resolution required",
+                    conflict
                 );
             }
+        }
+
+        if (response.total_conflicts > 0) {
+            await this.loadPersistedConflicts();
         }
 
         // Failed → increment attempt counter, will retry next cycle
@@ -202,25 +235,42 @@ class SyncEngine {
 
         let hasMore = true;
         let since: string | null = lastSyncAt;
+        let totalRecords = 0;
 
         while (hasMore) {
             let response: PullResponse;
             try {
+                console.log(`[SyncEngine] Pulling since: ${since || "initial"}`);
                 response = await syncApi.pull({
                     branch_id: this.branchId!,
                     last_sync_at: since,
+                    tables: DEFAULT_SYNC_TABLES,
                 });
+                console.log(
+                    `[SyncEngine] Pull response: drugs=${response.drugs.length}, ` +
+                    `categories=${response.drug_categories.length}, contracts=${response.price_contracts.length}, ` +
+                    `customers=${response.customers.length}, inventory=${response.branch_inventory.length}, ` +
+                    `batches=${response.drug_batches.length}, sales=${response.sales.length}, ` +
+                    `orders=${response.purchase_orders.length}, total=${response.total_records}`
+                );
             } catch (err) {
                 console.warn("[SyncEngine] Pull failed:", err);
+                this.logError(err, "Pull failed");
+                if (isOfflineError(err)) {
+                    this.setStatus("offline");
+                }
                 throw err;
             }
 
             await this.applyPullResponse(response);
             await setLastSyncAt(response.sync_timestamp);
+            totalRecords += response.total_records;
 
             hasMore = response.has_more;
             since = response.sync_timestamp;
         }
+
+        console.log(`[SyncEngine] Pull completed. Total records synced: ${totalRecords}`);
     }
 
     // ── Apply pull response to local SQLite ──────────────────────────
@@ -233,8 +283,21 @@ class SyncEngine {
             rows: unknown[],
             columns: string[]
         ) => {
+            if (rows.length === 0) return;
+            
             for (const row of rows) {
                 const r = row as Record<string, unknown>;
+                const localId = r.id;
+                if (typeof localId === "string") {
+                    const existing = await db.select<{ sync_status: string }[]>(
+                        `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
+                        [localId]
+                    );
+                    const localStatus = existing[0]?.sync_status;
+                    if (localStatus === "pending" || localStatus === "conflict") {
+                        continue;
+                    }
+                }
                 const vals = columns.map((c) => {
                     const v = r[c];
                     if (typeof v === "boolean") return v ? 1 : 0;
@@ -266,6 +329,8 @@ class SyncEngine {
                     vals
                 );
             }
+            
+            console.log(`[SyncEngine] Upserted ${rows.length} rows into ${table}`);
         };
 
         // ── Org-level (pull-only) ──────────────────────────────────────
@@ -400,6 +465,46 @@ class SyncEngine {
         }
     }
 
+    private async loadPersistedConflicts(): Promise<void> {
+        this.pendingConflicts = await getPendingConflicts();
+        this.notify(await getPendingCount(), await getLastSyncAt());
+    }
+
+    async resolveConflict(
+        conflict: QueuedConflict,
+        resolution: "server_wins" | "local_wins"
+    ): Promise<void> {
+        const serverId = conflict.conflict.server_record?.id as string | undefined;
+
+        if (resolution === "server_wins") {
+            if (conflict.table_name === "customers") {
+                const db = await getDb();
+                await db.execute(
+                    "DELETE FROM customers WHERE id = $1",
+                    [conflict.record_id]
+                );
+                if (serverId) {
+                    await this.applyServerRecord(conflict.table_name, conflict.conflict.server_record);
+                    await db.execute(
+                        "UPDATE sales SET customer_id = $1 WHERE customer_id = $2",
+                        [serverId, conflict.record_id]
+                    );
+                }
+            } else {
+                await this.applyServerRecord(conflict.table_name, conflict.conflict.server_record);
+            }
+            await dequeue(conflict.table_name, conflict.record_id);
+            await clearQueueConflict(conflict.table_name, conflict.record_id);
+        } else {
+            await clearQueueConflict(conflict.table_name, conflict.record_id);
+        }
+
+        await this.loadPersistedConflicts();
+        if (navigator.onLine && !this._isSyncing) {
+            this.sync();
+        }
+    }
+
     private async applyServerRecord(
         table: string,
         serverRecord: Record<string, unknown>
@@ -436,6 +541,15 @@ class SyncEngine {
     private notify(pendingCount = 0, lastSync: string | null = null): void {
         for (const fn of this.listeners) {
             fn(this._status, pendingCount, lastSync);
+        }
+    }
+
+    private logError(err: unknown, context: string): void {
+        try {
+            const serialized = JSON.stringify(err, Object.getOwnPropertyNames(err), 2);
+            console.error(`[SyncEngine] ${context} details:`, serialized);
+        } catch (_) {
+            console.error(`[SyncEngine] ${context} details (non-serializable error):`, err);
         }
     }
 }

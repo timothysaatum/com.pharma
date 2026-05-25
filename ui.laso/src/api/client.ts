@@ -2,6 +2,19 @@ import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { authStorage } from "@/lib/storage";
 
 const BASE_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+let backendReachable = true;
+
+export function isBackendReachable(): boolean {
+    return backendReachable;
+}
+
+export function markBackendOffline(): void {
+    backendReachable = false;
+}
+
+export function markBackendOnline(): void {
+    backendReachable = true;
+}
 
 export const apiClient = axios.create({
     baseURL: `${BASE_URL}/api/v1`,
@@ -34,8 +47,14 @@ apiClient.interceptors.request.use(async (config: InternalAxiosRequestConfig) =>
 
 // ── Response interceptor: handle 401 → refresh → retry ───
 apiClient.interceptors.response.use(
-    (response) => response,
+    (response) => {
+        markBackendOnline();
+        return response;
+    },
     async (error: AxiosError) => {
+        if (isOfflineError(error)) {
+            markBackendOffline();
+        }
         const original = error.config as InternalAxiosRequestConfig & {
             _retry?: boolean;
         };
@@ -84,6 +103,10 @@ apiClient.interceptors.response.use(
             original.headers!.Authorization = `Bearer ${newAccessToken}`;
             return apiClient(original);
         } catch (refreshError) {
+            if (isOfflineError(refreshError)) {
+                flushQueue(null, refreshError);
+                return Promise.reject(refreshError);
+            }
             flushQueue(null, refreshError);
             await authStorage.clearTokens();
             // Broadcast logout event so App.tsx can redirect
@@ -142,4 +165,42 @@ export function parseApiError(err: unknown): string {
     }
     if (err instanceof Error) return err.message;
     return "An unexpected error occurred";
+}
+
+export function isOfflineError(err: unknown): boolean {
+    // Axios errors without a response usually indicate network problems.
+    if (axios.isAxiosError(err)) {
+        if (!err.response) {
+            if (err.code === "ERR_CANCELED" || err.code === "ECONNABORTED") return false;
+            return true;
+        }
+        return false;
+    }
+
+    // Non-axios errors — inspect message and name for common network-related phrases.
+    if (err instanceof Error) {
+        const msg = (err.message || "").toLowerCase();
+        const name = ((err as any).name || "").toLowerCase();
+        if (name === "aborterror") return false; // user cancelled or abort
+        const networkPatterns = [
+            "network error",
+            "failed to fetch",
+            "network request failed",
+            "econnrefused",
+            "econnreset",
+            "enotfound",
+            "ehostunreach",
+            "socket",
+            "connect",
+            "timeout",
+            "timed out",
+            "networkrequestfailed",
+            "networkrequestfailed",
+        ];
+        for (const p of networkPatterns) {
+            if (msg.includes(p) || name.includes(p)) return true;
+        }
+    }
+
+    return false;
 }

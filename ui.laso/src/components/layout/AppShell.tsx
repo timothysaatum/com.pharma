@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
+import { offlineCache } from "@/lib/storage";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 
 interface NavItem {
@@ -75,7 +76,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         branchApi
             .getById(activeBranchId)
             .then((b) => { if (!cancelled) setBranchName(b.name); })
-            .catch(() => { if (!cancelled) setBranchName(null); });
+            .catch(async () => {
+                const cachedName = await offlineCache.getBranchName(activeBranchId);
+                if (!cancelled) setBranchName(cachedName);
+            });
         return () => { cancelled = true; };
     }, [activeBranchId]);
 

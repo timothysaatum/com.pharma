@@ -6,6 +6,8 @@
  * plugin-store v2 changed API: use load() instead of new Store()
  */
 
+import type { BranchListItem, PaginatedResponse, UserResponse } from "@/types";
+
 const IS_TAURI =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -79,6 +81,24 @@ const KEYS = {
     BRANCH: "session.branch_id",
 } as const;
 
+type CachedUserPage = PaginatedResponse<UserResponse>;
+
+const CACHE_KEYS = {
+    BRANCHES: "cache.branches",
+    USERS: "cache.users",
+} as const;
+
+export const offlineCache = {
+    setBranches: (branches: BranchListItem[]) => storageSet(CACHE_KEYS.BRANCHES, branches),
+    getBranches: () => storageGet<BranchListItem[]>(CACHE_KEYS.BRANCHES),
+    async getBranchName(id: string): Promise<string | null> {
+        const branches = await storageGet<BranchListItem[]>(CACHE_KEYS.BRANCHES);
+        return branches?.find((branch) => String(branch.id) === String(id))?.name ?? null;
+    },
+    setUsers: (users: CachedUserPage) => storageSet(CACHE_KEYS.USERS, users),
+    getUsers: () => storageGet<CachedUserPage>(CACHE_KEYS.USERS),
+};
+
 export const authStorage = {
     getAccessToken: () => storageGet<string>(KEYS.ACCESS_TOKEN),
     getRefreshToken: () => storageGet<string>(KEYS.REFRESH_TOKEN),
@@ -94,6 +114,8 @@ export const authStorage = {
             storageDel(KEYS.REFRESH_TOKEN),
             storageDel(KEYS.USER),
             storageDel(KEYS.BRANCH),
+            storageDel(CACHE_KEYS.BRANCHES),
+            storageDel(CACHE_KEYS.USERS),
         ]);
     },
 

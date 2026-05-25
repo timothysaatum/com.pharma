@@ -20,6 +20,8 @@ import {
     ShieldCheck, Zap,
 } from "lucide-react";
 import { contractsApi, type ContractResponse, type ContractListParams } from "@/api/contracts";
+import { localRead } from "@/lib/localRead";
+import { isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -122,6 +124,32 @@ export default function ContractsPage() {
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
+            if (!ctrl.signal.aborted && isOfflineError(err)) {
+                try {
+                    const result = await localRead.searchContracts(
+                        {
+                            search: debouncedSearch || undefined,
+                            contract_type: filterType || undefined,
+                            status: filterStatus || undefined,
+                        },
+                        page,
+                        20
+                    );
+                    if (!ctrl.signal.aborted) {
+                        setContracts(result.items);
+                        setTotal(result.total);
+                        setTotalPages(result.total_pages);
+                        setStatsBar({
+                            active: result.items.filter((c) => c.status === "active").length,
+                            suspended: result.items.filter((c) => c.status === "suspended").length,
+                            expired: result.items.filter((c) => c.status === "expired").length,
+                        });
+                    }
+                } catch (localErr) {
+                    if (!ctrl.signal.aborted) setError(parseApiError(localErr));
+                }
+                return;
+            }
             if (!ctrl.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!ctrl.signal.aborted) setIsLoading(false);

@@ -1,5 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { drugApi } from "@/api/drugs";
+import { localRead } from "@/lib/localRead";
+import { isOfflineError } from "@/api/client";
 import type { DrugCategory, DrugCategoryTree } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -43,7 +45,10 @@ export function useCategories() {
         }
 
         if (!flatInflight) {
-            flatInflight = drugApi.listCategories();
+            flatInflight = drugApi.listCategories().catch(async (err) => {
+                if (isOfflineError(err)) return localRead.getDrugCategories();
+                throw err;
+            });
         }
 
         flatInflight
@@ -82,6 +87,23 @@ export function useCategories() {
                 }
             })
             .catch((err) => {
+                if (isOfflineError(err)) {
+                    localRead.getDrugCategories()
+                        .then((data) => {
+                            flatCache = data;
+                            if (mounted.current) {
+                                setCategories(data);
+                                setIsLoading(false);
+                            }
+                        })
+                        .catch(() => {
+                            if (mounted.current) {
+                                setError(err?.message ?? "Failed to load categories");
+                                setIsLoading(false);
+                            }
+                        });
+                    return;
+                }
                 if (mounted.current) {
                     setError(err?.message ?? "Failed to load categories");
                     setIsLoading(false);
@@ -119,7 +141,10 @@ export function useCategoryTree() {
         }
 
         if (!treeInflight) {
-            treeInflight = drugApi.listCategoriesTree();
+            treeInflight = drugApi.listCategoriesTree().catch(async (err) => {
+                if (isOfflineError(err)) return localRead.getDrugCategoryTree();
+                throw err;
+            });
         }
 
         treeInflight
@@ -160,6 +185,23 @@ export function useCategoryTree() {
                 }
             })
             .catch((err) => {
+                if (isOfflineError(err)) {
+                    localRead.getDrugCategoryTree()
+                        .then((data) => {
+                            treeCache = data;
+                            if (mounted.current) {
+                                setTree(data);
+                                setIsLoading(false);
+                            }
+                        })
+                        .catch(() => {
+                            if (mounted.current) {
+                                setError(err?.message ?? "Failed to load category tree");
+                                setIsLoading(false);
+                            }
+                        });
+                    return;
+                }
                 if (mounted.current) {
                     setError(err?.message ?? "Failed to load category tree");
                     setIsLoading(false);

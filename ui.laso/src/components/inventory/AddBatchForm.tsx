@@ -6,7 +6,9 @@ import type { Resolver } from "react-hook-form";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Package, AlertTriangle, Loader2, CalendarDays, ChevronDown, Search, ShoppingCart } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
-import { get, parseApiError } from "@/api/client";
+import { get, isOfflineError, parseApiError } from "@/api/client";
+import { localRead } from "@/lib/localRead";
+import { writeLocal } from "@/lib/localWrite";
 import type { Drug, DrugBatch, PurchaseOrderResponse, PaginatedResponse } from "@/types";
 
 const today = new Date().toISOString().split("T")[0];
@@ -85,7 +87,18 @@ export function AddBatchForm({ drug, branchId, onSuccess, onCancel }: AddBatchFo
                     setPoList(merged);
                 }
             } catch (err) {
-                if (!cancelled) setPoError(parseApiError(err));
+                if (!cancelled && isOfflineError(err)) {
+                    const [approved, ordered] = await Promise.all([
+                        localRead.searchPurchaseOrders({ branch_id: branchId, status: "approved" }, 1, 100),
+                        localRead.searchPurchaseOrders({ branch_id: branchId, status: "ordered" }, 1, 100),
+                    ]);
+                    const merged = [...approved.items, ...ordered.items].sort((a, b) =>
+                        b.po_number.localeCompare(a.po_number)
+                    );
+                    setPoList(merged);
+                } else if (!cancelled) {
+                    setPoError(parseApiError(err));
+                }
             } finally {
                 if (!cancelled) setPoLoading(false);
             }
@@ -158,6 +171,33 @@ export function AddBatchForm({ drug, branchId, onSuccess, onCancel }: AddBatchFo
     const onSubmit = async (values: BatchFormValues) => {
         setIsSubmitting(true);
         setError(null);
+        const now = new Date().toISOString();
+        const offlineBatch: DrugBatch = {
+            id: crypto.randomUUID(),
+            branch_id: branchId,
+            drug_id: drug.id,
+            batch_number: values.batch_number,
+            quantity: values.quantity,
+            remaining_quantity: values.quantity,
+            manufacturing_date: values.manufacturing_date || null,
+            expiry_date: values.expiry_date,
+            cost_price: values.cost_price ?? null,
+            selling_price: values.selling_price ?? null,
+            supplier: values.supplier || null,
+            purchase_order_id: values.purchase_order_id || null,
+            sync_status: "pending",
+            sync_version: 1,
+            synced_at: null,
+            created_at: now,
+            updated_at: now,
+        };
+
+        const saveOffline = async () => {
+            await writeLocal.drugBatch(offlineBatch);
+            await writeLocal.inventory(branchId, drug.id, values.quantity);
+            onSuccess(offlineBatch);
+        };
+
         try {
             const result = await inventoryApi.createBatch({
                 branch_id: branchId,
@@ -174,7 +214,11 @@ export function AddBatchForm({ drug, branchId, onSuccess, onCancel }: AddBatchFo
             });
             onSuccess(result);
         } catch (err) {
-            setError(parseApiError(err));
+            if (isOfflineError(err)) {
+                await saveOffline();
+            } else {
+                setError(parseApiError(err));
+            }
         } finally {
             setIsSubmitting(false);
         }

@@ -79,6 +79,20 @@ from app.schemas.sync_schemas import (
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# Sync table definitions
+# ---------------------------------------------------------------------------
+SYNC_TABLES: tuple[str, ...] = (
+    "drugs",
+    "drug_categories",
+    "price_contracts",
+    "customers",
+    "branch_inventory",
+    "drug_batches",
+    "sales",
+    "purchase_orders",
+)
+
+# ---------------------------------------------------------------------------
 # Conflict resolution rules per table
 # ---------------------------------------------------------------------------
 CONFLICT_RESOLUTION: Dict[str, str] = {
@@ -209,7 +223,7 @@ class SyncService:
         which would create an infinite sync loop.
         """
         branch_id = request.branch_id
-        tables    = set(request.tables)
+        tables    = set(request.tables or SYNC_TABLES)
 
         # Capture now BEFORE opening the transaction so the client's next
         # last_sync_at is slightly behind the snapshot point, guaranteeing

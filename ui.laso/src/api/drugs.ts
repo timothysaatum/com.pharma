@@ -35,15 +35,15 @@ export const drugApi = {
         return get<PaginatedResponse<Drug>>(`${BASE}?${qs}`, { signal });
     },
 
-    /** GET /drugs/{id} */
-    getById(id: string, signal?: AbortSignal): Promise<Drug> {
-        return get<Drug>(`${BASE}/${id}`, { signal });
-    },
-
     /**
-     * GET /drugs/{id}/with-inventory
-     * Returns the drug with aggregated inventory summary across branches.
-     * Optionally scoped to a specific branch via `branch_id` query param.
+     * GET /drugs/{id}
+     * Optionally pass branchId to get branch-specific selling price.
+     */
+    getById(id: string, branchId?: string, signal?: AbortSignal): Promise<Drug> {
+        const qs = branchId ? `?branch_id=${branchId}` : "";
+        return get<Drug>(`${BASE}/${id}${qs}`, { signal });
+    },
+     /** Optionally scoped to a specific branch via `branch_id` query param.
      */
     getWithInventory(
         id: string,

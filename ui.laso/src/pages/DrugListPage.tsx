@@ -6,6 +6,9 @@ import {
     ToggleRight, RefreshCw, X, FolderTree,
 } from "lucide-react";
 import { drugApi } from "@/api/drugs";
+import { localRead } from "@/lib/localRead";
+import { cacheBranchScopedDrugs } from "@/lib/localDb";
+import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useCategoryTree } from "@/hooks/useCategories";
@@ -112,6 +115,25 @@ export default function DrugListPage() {
         setError(null);
 
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.searchDrugs(
+                    {
+                        search: debouncedSearch || undefined,
+                        drug_type: filterType || undefined,
+                        category_id: filterCategory || undefined,
+                        is_active: filterActive === "" ? undefined : filterActive === "true",
+                        branch_id: activeBranchId || undefined,
+                    },
+                    page,
+                    PAGE_SIZE
+                );
+                if (!controller.signal.aborted) {
+                    setDrugs(result.items);
+                    setTotalPages(result.total_pages);
+                    setTotal(result.total);
+                }
+                return;
+            }
             const result = await drugApi.list(
                 {
                     page,
@@ -120,6 +142,7 @@ export default function DrugListPage() {
                     drug_type: filterType || undefined,
                     category_id: filterCategory || undefined,
                     is_active: filterActive === "" ? undefined : filterActive === "true",
+                    branch_id: activeBranchId || undefined,
                 },
                 controller.signal
             );
@@ -128,14 +151,38 @@ export default function DrugListPage() {
                 setDrugs(result.items);
                 setTotalPages(result.total_pages);
                 setTotal(result.total);
+                if (activeBranchId) void cacheBranchScopedDrugs(activeBranchId, result.items);
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
+            if (!controller.signal.aborted && isOfflineError(err)) {
+                try {
+                    const result = await localRead.searchDrugs(
+                        {
+                            search: debouncedSearch || undefined,
+                            drug_type: filterType || undefined,
+                            category_id: filterCategory || undefined,
+                            is_active: filterActive === "" ? undefined : filterActive === "true",
+                            branch_id: activeBranchId || undefined,
+                        },
+                        page,
+                        PAGE_SIZE
+                    );
+                    if (!controller.signal.aborted) {
+                        setDrugs(result.items);
+                        setTotalPages(result.total_pages);
+                        setTotal(result.total);
+                    }
+                } catch (localErr) {
+                    if (!controller.signal.aborted) setError(parseApiError(localErr));
+                }
+                return;
+            }
             if (!controller.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
         }
-    }, [page, debouncedSearch, filterType, filterCategory, filterActive]);
+    }, [page, debouncedSearch, filterType, filterCategory, filterActive, activeBranchId]);
 
     useEffect(() => {
         fetchDrugs();

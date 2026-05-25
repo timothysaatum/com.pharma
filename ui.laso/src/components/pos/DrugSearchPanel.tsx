@@ -15,11 +15,14 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, Plus, X, ShieldAlert, Package } from "lucide-react";
-import { drugApi } from "@/api/drugs";
+import { inventoryApi } from "@/api/inventory";
+import { localRead } from "@/lib/localRead";
+import { cacheBranchInventoryRows } from "@/lib/localDb";
+import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
-import type { Drug, DrugType } from "@/types";
+import type { BranchInventoryWithDetails, Drug, DrugType } from "@/types";
 
 interface DrugSearchPanelProps {
     onAdd: (drug: Drug) => void;
@@ -42,6 +45,63 @@ const TYPE_COLORS: Record<string, string> = {
     herbal: "bg-green-50 text-green-700",
     supplement: "bg-amber-50 text-amber-700",
 };
+
+function inventoryItemToDrug(item: BranchInventoryWithDetails): Drug {
+    const now = item.updated_at || new Date().toISOString();
+    const row = item as unknown as Record<string, unknown>;
+    const unitPrice = Number(
+        item.effective_unit_price ??
+        item.selling_price ??
+        item.drug_unit_price ??
+        row.unit_price ??
+        0
+    );
+    const taxRate = Number(row.tax_rate ?? 0);
+    const reorderLevel = Number(item.drug_reorder_level ?? 0);
+    const reorderQuantity = Number(row.reorder_quantity ?? 0);
+    return {
+        id: item.drug_id,
+        organization_id: String(row.organization_id ?? ""),
+        name: item.drug_name || item.drug_id,
+        generic_name: null,
+        brand_name: null,
+        sku: item.drug_sku,
+        barcode: null,
+        category_id: null,
+        drug_type: (row.drug_type as DrugType | undefined) ?? "otc",
+        dosage_form: null,
+        strength: null,
+        manufacturer: null,
+        supplier: null,
+        ndc_code: null,
+        requires_prescription: Boolean(row.requires_prescription),
+        controlled_substance_schedule: null,
+        unit_price: Number.isFinite(unitPrice) ? unitPrice : 0,
+        cost_price: null,
+        markup_percentage: null,
+        tax_rate: Number.isFinite(taxRate) ? taxRate : 0,
+        reorder_level: Number.isFinite(reorderLevel) ? reorderLevel : 0,
+        reorder_quantity: Number.isFinite(reorderQuantity) ? reorderQuantity : 0,
+        max_stock_level: null,
+        unit_of_measure: "unit",
+        description: null,
+        usage_instructions: null,
+        side_effects: null,
+        contraindications: null,
+        storage_conditions: null,
+        image_url: null,
+        is_active: true,
+        profit_margin: null,
+        is_deleted: false,
+        deleted_at: null,
+        deleted_by: null,
+        sync_status: item.sync_status,
+        sync_version: item.sync_version,
+        synced_at: item.synced_at,
+        created_at: item.created_at || now,
+        updated_at: now,
+    };
+}
 
 export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps) {
     const [query, setQuery] = useState("");
@@ -66,22 +126,64 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
         setFocusedIndex(-1);
 
         try {
-            const result = await drugApi.list(
+            if (!activeBranchId) {
+                setDrugs([]);
+                return;
+            }
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.getBranchInventory(
+                    activeBranchId,
+                    {
+                        search: debouncedQuery || undefined,
+                        include_zero_stock: false,
+                    },
+                    1,
+                    30
+                );
+                if (!controller.signal.aborted) {
+                    setDrugs(result.items.map(inventoryItemToDrug));
+                }
+                return;
+            }
+            const result = await inventoryApi.getBranchInventory(
+                activeBranchId,
                 {
-                    search: debouncedQuery || undefined,
-                    drug_type: typeFilter || undefined,
-                    is_active: true,
                     page: 1,
                     page_size: 30,
-                    branch_id: activeBranchId || undefined,
+                    search: debouncedQuery || undefined,
+                    include_zero_stock: false,
                 },
                 controller.signal
             );
             if (!controller.signal.aborted) {
-                setDrugs(result.items);
+                setDrugs(result.items.map(inventoryItemToDrug));
+                void cacheBranchInventoryRows(result.items);
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
+            if (!controller.signal.aborted && isOfflineError(err)) {
+                try {
+                    if (!activeBranchId) {
+                        setDrugs([]);
+                        return;
+                    }
+                    const result = await localRead.getBranchInventory(
+                        activeBranchId,
+                        {
+                            search: debouncedQuery || undefined,
+                            include_zero_stock: false,
+                        },
+                        1,
+                        30
+                    );
+                    if (!controller.signal.aborted) {
+                        setDrugs(result.items.map(inventoryItemToDrug));
+                    }
+                } catch (localErr) {
+                    if (!controller.signal.aborted) setError(parseApiError(localErr));
+                }
+                return;
+            }
             if (!controller.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
@@ -173,6 +275,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                         {drugs.map((drug, idx) => {
                             const isDisabled = disabledDrugIds?.has(drug.id);
                             const isFocused = idx === focusedIndex;
+                            const unitPrice = Number(drug.unit_price);
                             return (
                                 <button
                                     key={drug.id}
@@ -211,7 +314,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                                     </div>
                                     <div className="flex items-center gap-2 flex-shrink-0 ml-2">
                                         <span className="text-sm font-bold text-ink">
-                                            ₵{drug.unit_price.toFixed(2)}
+                                            ₵{(Number.isFinite(unitPrice) ? unitPrice : 0).toFixed(2)}
                                         </span>
                                         {isDisabled ? (
                                             <span className="text-xs text-brand-600 font-semibold">In cart</span>

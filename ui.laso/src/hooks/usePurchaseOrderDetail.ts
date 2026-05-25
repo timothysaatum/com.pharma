@@ -10,7 +10,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { purchaseOrdersApi } from "@/api/purchases";
-import { parseApiError } from "@/api/client";
+import { parseApiError, isOfflineError } from "@/api/client";
+import { localRead } from "@/lib/localRead";
 import type {
     PurchaseOrderWithDetails,
     PurchaseOrderItemCreate,
@@ -35,7 +36,16 @@ export function usePurchaseOrderDetail(poId: string | null) {
             const data = await purchaseOrdersApi.get(poId);
             setPo(data);
         } catch (err) {
-            setError(parseApiError(err));
+            if (isOfflineError(err)) {
+                const local = await localRead.getPurchaseOrderById(poId);
+                if (local) {
+                    setPo(local);
+                } else {
+                    setError(parseApiError(err));
+                }
+            } else {
+                setError(parseApiError(err));
+            }
         } finally {
             setLoading(false);
         }

@@ -15,7 +15,8 @@ import { motion } from "framer-motion";
 import { X, User, AlertCircle, Shield, Building2 } from "lucide-react";
 import { customersApi, type CustomerCreate, type CustomerUpdate, type CustomerWithDetails } from "@/api/customers";
 import { useAuthStore } from "@/stores/authStore";
-import { parseApiError } from "@/api/client";
+import { isOfflineError, parseApiError } from "@/api/client";
+import { writeLocal } from "@/lib/localWrite";
 import { useState } from "react";
 
 // ── Zod schema ────────────────────────────────────────────────────────────────
@@ -86,7 +87,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [apiError, setApiError] = useState<string | null>(null);
 
-    const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
+    const { register, handleSubmit, watch, formState: { errors } } = useForm<FormValues>({
         resolver: zodResolver(schema),
         defaultValues: {
             customer_type: (customer?.customer_type as FormValues["customer_type"]) ?? "walk_in",
@@ -119,6 +120,46 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
         const address = (values.street || values.city || values.country)
             ? { street: clean(values.street), city: clean(values.city), country: clean(values.country) ?? "Ghana" }
             : undefined;
+        const now = new Date().toISOString();
+        const buildLocalCustomer = (id: string): CustomerWithDetails => ({
+            id,
+            organization_id: user.organization_id,
+            customer_type: values.customer_type,
+            first_name: clean(values.first_name) ?? null,
+            last_name: clean(values.last_name) ?? null,
+            phone: clean(values.phone) ?? null,
+            email: clean(values.email) ?? null,
+            date_of_birth: clean(values.date_of_birth) ?? null,
+            address: address ?? null,
+            allergies: customer?.allergies ?? [],
+            chronic_conditions: customer?.chronic_conditions ?? [],
+            loyalty_points: customer?.loyalty_points ?? 0,
+            loyalty_tier: customer?.loyalty_tier ?? "bronze",
+            total_orders: customer?.total_orders ?? 0,
+            total_value: customer?.total_value ?? 0,
+            preferred_contact_method: values.preferred_contact_method,
+            marketing_consent: values.marketing_consent,
+            is_active: customer?.is_active ?? true,
+            insurance_provider_id: clean(values.insurance_provider_id) ?? null,
+            insurance_member_id: clean(values.insurance_member_id) ?? null,
+            insurance_card_image_url: customer?.insurance_card_image_url ?? null,
+            preferred_contract_id: clean(values.preferred_contract_id) ?? null,
+            is_deleted: false,
+            deleted_at: null,
+            deleted_by: null,
+            sync_status: "pending",
+            sync_version: customer?.sync_version ?? 1,
+            synced_at: customer?.synced_at ?? null,
+            created_at: customer?.created_at ?? now,
+            updated_at: now,
+            insurance_provider_name: customer?.insurance_provider_name ?? null,
+            insurance_provider_code: customer?.insurance_provider_code ?? null,
+            preferred_contract_name: customer?.preferred_contract_name ?? null,
+            preferred_contract_discount: customer?.preferred_contract_discount ?? null,
+            total_purchases: customer?.total_purchases ?? 0,
+            total_spent: customer?.total_spent ?? 0,
+            last_purchase_date: customer?.last_purchase_date ?? null,
+        });
 
         try {
             let saved: CustomerWithDetails;
@@ -157,7 +198,14 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
             }
             onSuccess(saved);
         } catch (err) {
-            setApiError(parseApiError(err));
+            if (isOfflineError(err)) {
+                const id = customer?.id ?? crypto.randomUUID();
+                const saved = buildLocalCustomer(id);
+                await writeLocal.customer(saved, isEdit ? "update" : "create");
+                onSuccess(saved);
+            } else {
+                setApiError(parseApiError(err));
+            }
         } finally {
             setIsSubmitting(false);
         }

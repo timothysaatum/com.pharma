@@ -210,7 +210,7 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
     // Load branches for the branch selector
     useEffect(() => {
         if (!user?.organization_id) return;
-        branchApi.list().then((res) => setBranches(res.items ?? [])).catch(() => { });
+        branchApi.list().then((res) => setBranches((res.items ?? []) as any)).catch(() => { });
     }, [user?.organization_id]);
 
     // When type changes to default-compatible, auto-set constraints

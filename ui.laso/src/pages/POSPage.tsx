@@ -33,11 +33,12 @@ import { WifiOff, AlertTriangle } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
-import { parseApiError } from "@/api/client";
+import { isOfflineError, parseApiError } from "@/api/client";
 import { writeLocal } from "@/lib/localWrite";
 import { appEvents } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
+import { localRead } from "@/lib/localRead";
 import { DrugSearchPanel } from "@/components/pos/DrugSearchPanel";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { SaleSuccessModal } from "@/components/pos/SaleSuccessModal";
@@ -63,7 +64,8 @@ export default function POSPage() {
             setContracts(data);
         } catch {
             // Non-blocking — cashier can still proceed with empty list
-            setContracts([]);
+            const fallback = await localRead.getAvailableContractsForPos(activeBranchId);
+            setContracts(fallback);
         } finally {
             setContractsLoading(false);
         }
@@ -85,150 +87,147 @@ export default function POSPage() {
         setCheckoutError(null);
 
         const payload = cart.buildSaleCreate(activeBranchId);
+        const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
+            const saleId = crypto.randomUUID();
+            const saleNumber = `OFFLINE-${Date.now()}`;
+            const now = new Date().toISOString();
+            const totals = cart.totals;
+
+            const offlineSale = {
+                id: saleId,
+                sale_number: saleNumber,
+                organization_id: user?.organization_id ?? "",
+                branch_id: activeBranchId,
+                customer_id: payload.customer_id ?? null,
+                customer_name: payload.customer_name ?? null,
+                subtotal: totals.subtotal,
+                discount_amount: totals.discountAmount,
+                contract_discount_amount: totals.discountAmount,
+                additional_discount_amount: 0,
+                total_discount_amount: totals.discountAmount,
+                tax_amount: totals.taxAmount,
+                total_amount: totals.total,
+                price_contract_id: payload.price_contract_id,
+                contract_name: cart.state.contract?.name ?? null,
+                contract_type: cart.state.contract?.type ?? null,
+                contract_discount_percentage: cart.state.contract?.discount_percentage ?? 0,
+                payment_method: payload.payment_method,
+                payment_status: "completed" as const,
+                amount_paid: payload.amount_paid ?? totals.total,
+                change_amount: Math.max(0, (payload.amount_paid ?? 0) - totals.total),
+                payment_reference: payload.payment_reference ?? null,
+                split_payment_details: null,
+                prescription_id: payload.prescription_id ?? null,
+                prescription_number: null,
+                prescriber_name: null,
+                cashier_id: user?.id ?? "",
+                pharmacist_id: null,
+                insurance_claim_number: payload.insurance_claim_number ?? null,
+                insurance_preauth_number: null,
+                patient_copay_amount: null,
+                insurance_covered_amount: null,
+                insurance_verified: payload.insurance_verified,
+                insurance_verified_at: null,
+                insurance_verified_by: null,
+                notes: payload.notes ?? null,
+                status: "completed" as const,
+                cancelled_at: null,
+                cancelled_by: null,
+                cancellation_reason: null,
+                refund_amount: null,
+                refunded_at: null,
+                receipt_printed: false,
+                receipt_emailed: false,
+                sync_status: "pending" as const,
+                sync_version: 1,
+                synced_at: null,
+                updated_at: now,
+                created_at: now,
+                items: cart.state.items.map((item) => {
+                    const lineSubtotal = item.drug.unit_price * item.quantity;
+                    const discountPct = cart.state.contract?.discount_percentage ?? 0;
+                    const contractDiscountAmt = parseFloat(((lineSubtotal * discountPct) / 100).toFixed(2));
+                    const taxAmt = parseFloat(((lineSubtotal * item.drug.tax_rate) / 100).toFixed(2));
+                    return {
+                        id: crypto.randomUUID(),
+                        sale_id: saleId,
+                        drug_id: item.drug.id,
+                        drug_name: item.drug.name,
+                        drug_sku: item.drug.sku,
+                        drug_generic_name: item.drug.generic_name,
+                        quantity: item.quantity,
+                        batch_id: item.batchId,
+                        batch_number: null,
+                        batch_expiry_date: null,
+                        unit_price: item.drug.unit_price,
+                        subtotal: lineSubtotal,
+                        discount_percentage: discountPct,
+                        discount_amount: contractDiscountAmt,
+                        contract_discount_percentage: discountPct,
+                        contract_discount_amount: contractDiscountAmt,
+                        additional_discount_amount: 0,
+                        total_discount_amount: contractDiscountAmt,
+                        tax_rate: item.drug.tax_rate,
+                        tax_amount: taxAmt,
+                        total_price: lineSubtotal - contractDiscountAmt + taxAmt,
+                        applied_contract_id: payload.price_contract_id,
+                        applied_contract_name: cart.state.contract?.name ?? null,
+                        insurance_covered: false,
+                        patient_copay: null,
+                        requires_prescription: item.requiresPrescription,
+                        prescription_verified: item.prescriptionVerified,
+                        prescription_id: null,
+                        allergy_check_performed: false,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                }),
+            };
+
+            await writeLocal.sale(offlineSale as unknown as Parameters<typeof writeLocal.sale>[0]);
+            for (const item of cart.state.items) {
+                await writeLocal.inventory(activeBranchId, item.drug.id, -item.quantity);
+            }
+
+            return {
+                sale: {
+                    ...offlineSale,
+                    customer_full_name: payload.customer_name ?? null,
+                    customer_phone: null,
+                    customer_email: null,
+                    customer_loyalty_tier: null,
+                    branch_name: "",
+                    branch_address: null,
+                    organization_name: "",
+                    organization_tax_id: null,
+                    cashier_name: user?.full_name ?? null,
+                    pharmacist_name: null,
+                    manager_approval_user_id: null,
+                    insurance_preauth_number: null,
+                    items_count: offlineSale.items.length,
+                },
+                inventory_updated: cart.state.items.length,
+                batches_updated: 0,
+                loyalty_points_awarded: 0,
+                loyalty_tier_upgraded: false,
+                new_loyalty_tier: null,
+                low_stock_alerts_created: 0,
+                expiry_alerts_created: 0,
+                contract_applied: cart.state.contract?.name ?? "Standard",
+                contract_discount_given: totals.discountAmount,
+                estimated_savings: totals.discountAmount,
+                success: true,
+                message: "Sale recorded offline - will sync when connection is restored",
+                warnings: ["Sale recorded offline and will be synced when back online"],
+            };
+        };
 
         try {
             let result: ProcessSaleResponse;
 
-            if (isOffline) {
+            if (isOffline || !navigator.onLine) {
                 // ── Offline path ─────────────────────────────────────────────
-                // Build a local sale record and queue it for sync.
-                // We construct a synthetic ProcessSaleResponse so the UI flow
-                // is identical — the "sale" object uses client-computed totals.
-                const saleId = crypto.randomUUID();
-                const saleNumber = `OFFLINE-${Date.now()}`;
-                const now = new Date().toISOString();
-                const totals = cart.totals;
-
-                const offlineSale = {
-                    id: saleId,
-                    sale_number: saleNumber,
-                    organization_id: user?.organization_id ?? "",
-                    branch_id: activeBranchId,
-                    customer_id: payload.customer_id ?? null,
-                    customer_name: payload.customer_name ?? null,
-                    subtotal: totals.subtotal,
-                    discount_amount: totals.discountAmount,
-                    contract_discount_amount: totals.discountAmount,
-                    additional_discount_amount: 0,
-                    total_discount_amount: totals.discountAmount,
-                    tax_amount: totals.taxAmount,
-                    total_amount: totals.total,
-                    price_contract_id: payload.price_contract_id,
-                    contract_name: cart.state.contract?.name ?? null,
-                    contract_type: cart.state.contract?.type ?? null,
-                    contract_discount_percentage: cart.state.contract?.discount_percentage ?? 0,
-                    payment_method: payload.payment_method,
-                    payment_status: "completed" as const,
-                    amount_paid: payload.amount_paid ?? totals.total,
-                    change_amount: Math.max(0, (payload.amount_paid ?? 0) - totals.total),
-                    payment_reference: payload.payment_reference ?? null,
-                    split_payment_details: null,
-                    prescription_id: payload.prescription_id ?? null,
-                    prescription_number: null,
-                    prescriber_name: null,
-                    cashier_id: user?.id ?? "",
-                    pharmacist_id: null,
-                    insurance_claim_number: payload.insurance_claim_number ?? null,
-                    insurance_preauth_number: null,
-                    patient_copay_amount: null,
-                    insurance_covered_amount: null,
-                    insurance_verified: payload.insurance_verified,
-                    insurance_verified_at: null,
-                    insurance_verified_by: null,
-                    notes: payload.notes ?? null,
-                    status: "completed" as const,
-                    cancelled_at: null,
-                    cancelled_by: null,
-                    cancellation_reason: null,
-                    refund_amount: null,
-                    refunded_at: null,
-                    receipt_printed: false,
-                    receipt_emailed: false,
-                    sync_status: "pending" as const,
-                    sync_version: 1,
-                    synced_at: null,
-                    updated_at: now,
-                    created_at: now,
-                    items: cart.state.items.map((item) => {
-                        const lineSubtotal = item.drug.unit_price * item.quantity;
-                        const discountPct = cart.state.contract?.discount_percentage ?? 0;
-                        const contractDiscountAmt = parseFloat(((lineSubtotal * discountPct) / 100).toFixed(2));
-                        const taxAmt = parseFloat(((lineSubtotal * item.drug.tax_rate) / 100).toFixed(2));
-                        return {
-                            id: crypto.randomUUID(),
-                            sale_id: saleId,
-                            drug_id: item.drug.id,
-                            drug_name: item.drug.name,
-                            drug_sku: item.drug.sku,
-                            drug_generic_name: item.drug.generic_name,
-                            quantity: item.quantity,
-                            batch_id: item.batchId,
-                            batch_number: null,
-                            batch_expiry_date: null,
-                            unit_price: item.drug.unit_price,
-                            subtotal: lineSubtotal,
-                            discount_percentage: discountPct,
-                            discount_amount: contractDiscountAmt,
-                            contract_discount_percentage: discountPct,
-                            contract_discount_amount: contractDiscountAmt,
-                            additional_discount_amount: 0,
-                            total_discount_amount: contractDiscountAmt,
-                            tax_rate: item.drug.tax_rate,
-                            tax_amount: taxAmt,
-                            total_price: lineSubtotal - contractDiscountAmt + taxAmt,
-                            applied_contract_id: payload.price_contract_id,
-                            applied_contract_name: cart.state.contract?.name ?? null,
-                            insurance_covered: false,
-                            patient_copay: null,
-                            requires_prescription: item.requiresPrescription,
-                            prescription_verified: item.prescriptionVerified,
-                            prescription_id: null,
-                            allergy_check_performed: false,
-                            created_at: now,
-                            updated_at: now,
-                        };
-                    }),
-                };
-
-                // The offline object is a superset of what writeLocal needs
-                await writeLocal.sale(offlineSale as unknown as Parameters<typeof writeLocal.sale>[0]);
-
-                // Update local inventory for each item
-                for (const item of cart.state.items) {
-                    await writeLocal.inventory(activeBranchId, item.drug.id, -item.quantity);
-                }
-
-                result = {
-                    sale: {
-                        ...offlineSale,
-                        // SaleWithDetails extra fields
-                        customer_full_name: payload.customer_name ?? null,
-                        customer_phone: null,
-                        customer_email: null,
-                        customer_loyalty_tier: null,
-                        branch_name: "",
-                        branch_address: null,
-                        organization_name: "",
-                        organization_tax_id: null,
-                        cashier_name: user?.full_name ?? null,
-                        pharmacist_name: null,
-                        manager_approval_user_id: null,
-                        insurance_preauth_number: null,
-                    },
-                    inventory_updated: cart.state.items.length,
-                    batches_updated: 0,
-                    loyalty_points_awarded: 0,
-                    loyalty_tier_upgraded: false,
-                    new_loyalty_tier: null,
-                    low_stock_alerts_created: 0,
-                    expiry_alerts_created: 0,
-                    contract_applied: cart.state.contract?.name ?? "Standard",
-                    contract_discount_given: totals.discountAmount,
-                    estimated_savings: totals.discountAmount,
-                    success: true,
-                    message: "Sale recorded offline — will sync when connection is restored",
-                    warnings: ["⚠ Sale recorded offline and will be synced when back online"],
-                };
+                result = await recordOfflineSale();
             } else {
                 // ── Online path ──────────────────────────────────────────────
                 result = await salesApi.processSale(payload);
@@ -239,7 +238,14 @@ export default function POSPage() {
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
         } catch (err) {
-            setCheckoutError(parseApiError(err));
+            if (!isOffline && isOfflineError(err)) {
+                const result = await recordOfflineSale();
+                setSuccessResult(result);
+                appEvents.emit("inventory:changed");
+                appEvents.emit("sales:changed");
+            } else {
+                setCheckoutError(parseApiError(err));
+            }
         } finally {
             setIsSubmitting(false);
         }

@@ -28,10 +28,14 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { salesApi } from "@/api/sales";
-import { parseApiError } from "@/api/client";
+import { isBackendReachable, parseApiError, isOfflineError } from "@/api/client";
+import { localRead } from "@/lib/localRead";
+import { cacheSales } from "@/lib/localDb";
+import { appEvents } from "@/lib/events";
 import type { Sale, SaleWithDetails } from "@/types";
 import type { ReceiptData } from "@/api/sales";
 import { useDebounce } from "@/hooks/useDebounce";
+import { useSyncStatus } from "@/hooks/useSyncStatus";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -121,16 +125,35 @@ function SaleDetailPanel({
     saleId,
     onClose,
     canRefund,
+    currentUserId,
 }: {
     saleId: string;
     onClose: () => void;
     canRefund: boolean;
+    currentUserId?: string;
 }) {
     const [sale, setSale] = useState<SaleWithDetails | null>(null);
     const [receipt, setReceipt] = useState<ReceiptData | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [view, setView] = useState<"detail" | "receipt">("detail");
+    const [refundOpen, setRefundOpen] = useState(false);
+    const [refundReason, setRefundReason] = useState("");
+    const [refundMethod, setRefundMethod] = useState<"original" | "cash" | "store_credit">("original");
+    const [refundQuantities, setRefundQuantities] = useState<Record<string, number>>({});
+    const [refundSubmitting, setRefundSubmitting] = useState(false);
+    const [refundError, setRefundError] = useState<string | null>(null);
+    const [refundSuccessMessage, setRefundSuccessMessage] = useState<string | null>(null);
+
+    // ── Refund defaults ────────────────────────────────────────────────
+    useEffect(() => {
+        if (!sale || !sale.items) return;
+        const initialQuantities: Record<string, number> = {};
+        sale.items.forEach((item) => {
+            initialQuantities[item.id] = item.quantity;
+        });
+        setRefundQuantities(initialQuantities);
+    }, [sale]);
 
     // ── FIX: ref to scope the print output to just the receipt content ──
     const receiptRef = useRef<HTMLDivElement>(null);
@@ -143,9 +166,31 @@ function SaleDetailPanel({
         setReceipt(null);
         setView("detail");
 
-        salesApi.getById(saleId)
-            .then((data) => { if (!cancelled) { setSale(data); setLoading(false); } })
-            .catch((err) => { if (!cancelled) { setError(parseApiError(err)); setLoading(false); } });
+        const loadSale = async () => {
+            try {
+                const data = await salesApi.getById(saleId);
+                if (!cancelled) {
+                    setSale(data);
+                }
+            } catch (err) {
+                if (!cancelled) {
+                    if (isOfflineError(err)) {
+                        const localSale = await localRead.getSaleById(saleId);
+                        if (localSale) {
+                            setSale(localSale);
+                        } else {
+                            setError(parseApiError(err));
+                        }
+                    } else {
+                        setError(parseApiError(err));
+                    }
+                }
+            } finally {
+                if (!cancelled) setLoading(false);
+            }
+        };
+
+        void loadSale();
 
         return () => { cancelled = true; };
     }, [saleId]);
@@ -157,9 +202,80 @@ function SaleDetailPanel({
             setReceipt(data);
             setView("receipt");
         } catch (err) {
+            if (isOfflineError(err)) {
+                const localReceipt = await localRead.getSaleReceipt(saleId);
+                if (localReceipt) {
+                    setReceipt(localReceipt);
+                    setView("receipt");
+                    return;
+                }
+            }
             setError(parseApiError(err));
         }
     }, [saleId, receipt]);
+
+    const handleRefundSubmit = async () => {
+        if (!sale) return;
+        setRefundError(null);
+        setRefundSuccessMessage(null);
+
+        const items_to_refund = (sale.items ?? [])
+            .map((item) => {
+                const quantity = refundQuantities[item.id] ?? 0;
+                if (quantity <= 0 || quantity > item.quantity) return null;
+                return {
+                    sale_item_id: item.id,
+                    quantity,
+                    reason: refundReason.trim() || `Refund for ${item.drug_name}`,
+                    restock: true,
+                };
+            })
+            .filter((value): value is { sale_item_id: string; quantity: number; reason: string; restock: boolean } => value !== null);
+
+        if (items_to_refund.length === 0) {
+            setRefundError("Select at least one item quantity to refund.");
+            return;
+        }
+
+        const refund_amount = items_to_refund.reduce((sum, refundItem) => {
+            const item = sale.items?.find((i) => i.id === refundItem.sale_item_id);
+            if (!item || item.quantity === 0) return sum;
+            const unitPrice = item.total_price / item.quantity;
+            return sum + unitPrice * refundItem.quantity;
+        }, 0);
+
+        if (refund_amount <= 0) {
+            setRefundError("Refund amount must be greater than zero.");
+            return;
+        }
+
+        if (!currentUserId) {
+            setRefundError("Unable to determine current user for refund approval.");
+            return;
+        }
+
+        setRefundSubmitting(true);
+
+        try {
+            const result = await salesApi.refund(sale.id, {
+                reason: refundReason.trim() || "Refund processed",
+                items_to_refund,
+                refund_amount: Number(refund_amount.toFixed(2)),
+                refund_method: refundMethod,
+                manager_approval_user_id: currentUserId,
+            });
+
+            setSale(result.sale);
+            setRefundOpen(false);
+            setRefundSuccessMessage(`Refund processed. Inventory restored: ${result.inventory_restored}.`);
+            appEvents.emit("inventory:changed");
+            appEvents.emit("sales:changed");
+        } catch (err) {
+            setRefundError(parseApiError(err));
+        } finally {
+            setRefundSubmitting(false);
+        }
+    };
 
     // Print via a hidden iframe — avoids popup blockers and the race condition
     // where win.close() killed the window before the print dialog opened.
@@ -233,17 +349,62 @@ function SaleDetailPanel({
         const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
         if (!iframeDoc) { document.body.removeChild(iframe); return; }
 
-        iframeDoc.open();
-        iframeDoc.write(html);
-        iframeDoc.close();
-
-        // Wait for iframe content to fully render before printing
-        iframe.onload = () => {
-            iframe.contentWindow?.focus();
-            iframe.contentWindow?.print();
-            // Remove iframe after a short delay so the print dialog can open
-            setTimeout(() => document.body.removeChild(iframe), 1000);
+        const doPrint = () => {
+            try {
+                iframe.contentWindow?.focus();
+                iframe.contentWindow?.print();
+            } catch (e) {
+                // ignore
+            } finally {
+                setTimeout(() => { try { document.body.removeChild(iframe); } catch (_) {} }, 1000);
+            }
         };
+
+        let printed = false;
+        const ensurePrint = () => {
+            if (printed) return;
+            printed = true;
+            doPrint();
+        };
+
+        iframe.onload = ensurePrint;
+
+        // Modern approach: use srcdoc when available and provide a polling fallback
+        try {
+            // Some browsers prefer srcdoc — set it first
+            // @ts-ignore - srcdoc exists on HTMLIFrameElement in browsers
+            iframe.srcdoc = html;
+        } catch (e) {
+            const iframeDoc2 = iframe.contentDocument ?? iframe.contentWindow?.document;
+            if (iframeDoc2) {
+                iframeDoc2.open();
+                iframeDoc2.write(html);
+                iframeDoc2.close();
+            }
+        }
+
+        // Poll fallback: wait until iframe document has body content
+        let attempts = 0;
+        const poll = setInterval(() => {
+            attempts += 1;
+            if (attempts > 25) {
+                clearInterval(poll);
+                return;
+            }
+
+            try {
+                const doc = iframe.contentDocument ?? iframe.contentWindow?.document;
+                if (!doc) return;
+                const ready = doc.readyState;
+                const bodyText = doc.body?.innerText?.trim();
+                if ((ready === 'complete' || ready === 'interactive') && bodyText && bodyText.length > 10) {
+                    ensurePrint();
+                    clearInterval(poll);
+                }
+            } catch (e) {
+                // access denied or not ready
+            }
+        }, 200);
     };
 
     return (
@@ -425,6 +586,92 @@ function SaleDetailPanel({
                             </div>
                         )}
 
+                        {refundSuccessMessage && (
+                            <div className="rounded-xl bg-emerald-50 border border-emerald-100 p-3 text-sm text-emerald-800">
+                                {refundSuccessMessage}
+                            </div>
+                        )}
+
+                        {refundOpen && sale && (
+                            <div className="rounded-xl bg-slate-50 border border-slate-200 p-4 space-y-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <p className="text-sm font-semibold text-ink">Process Refund</p>
+                                        <p className="text-xs text-slate-500">Select quantities and submit to refund items.</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        className="text-xs font-semibold text-slate-500 hover:text-slate-700"
+                                        onClick={() => setRefundOpen(false)}
+                                    >
+                                        Cancel
+                                    </button>
+                                </div>
+
+                                <div className="space-y-3">
+                                    {(sale.items ?? []).map((item) => (
+                                        <div key={item.id} className="grid grid-cols-[1fr_auto] gap-3 items-center rounded-xl bg-white border border-slate-200 p-3">
+                                            <div>
+                                                <p className="text-sm font-semibold text-ink">{item.drug_name}</p>
+                                                <p className="text-xs text-slate-500">
+                                                    Available: {item.quantity} · Unit: {fmtGHS(item.total_price / Math.max(1, item.quantity))}
+                                                </p>
+                                            </div>
+                                            <input
+                                                type="number"
+                                                min={0}
+                                                max={item.quantity}
+                                                value={refundQuantities[item.id] ?? 0}
+                                                onChange={(e) => {
+                                                    const value = Math.max(0, Math.min(item.quantity, Number(e.target.value) || 0));
+                                                    setRefundQuantities((prev) => ({ ...prev, [item.id]: value }));
+                                                }}
+                                                className="w-20 h-10 rounded-xl border border-slate-200 px-3 text-sm"
+                                            />
+                                        </div>
+                                    ))}
+
+                                    <div className="space-y-2">
+                                        <label className="block text-xs font-semibold text-slate-600">Refund reason</label>
+                                        <textarea
+                                            value={refundReason}
+                                            onChange={(e) => setRefundReason(e.target.value)}
+                                            rows={3}
+                                            className="w-full rounded-xl border border-slate-200 bg-white p-3 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500/20"
+                                        />
+                                    </div>
+
+                                    <div className="space-y-2">
+                                        <label className="block text-xs font-semibold text-slate-600">Refund method</label>
+                                        <select
+                                            value={refundMethod}
+                                            onChange={(e) => setRefundMethod(e.target.value as "original" | "cash" | "store_credit")}
+                                            className="w-full h-10 rounded-xl border border-slate-200 bg-white px-3 text-sm"
+                                        >
+                                            <option value="original">Original payment method</option>
+                                            <option value="cash">Cash</option>
+                                            <option value="store_credit">Store credit</option>
+                                        </select>
+                                    </div>
+
+                                    {refundError && (
+                                        <div className="rounded-xl bg-red-50 border border-red-100 p-3 text-sm text-red-600">
+                                            {refundError}
+                                        </div>
+                                    )}
+
+                                    <button
+                                        onClick={handleRefundSubmit}
+                                        type="button"
+                                        disabled={refundSubmitting}
+                                        className="w-full rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-amber-700 disabled:opacity-50 transition-colors"
+                                    >
+                                        {refundSubmitting ? "Processing refund…" : "Submit Refund"}
+                                    </button>
+                                </div>
+                            </div>
+                        )}
+
                         {/* Actions */}
                         <div className="flex gap-2 pt-1">
                             <button
@@ -438,6 +685,7 @@ function SaleDetailPanel({
                             {canRefund && sale.status === "completed" && (
                                 <button
                                     type="button"
+                                    onClick={() => setRefundOpen(true)}
                                     className="flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold text-amber-700 border border-amber-200 bg-amber-50 hover:bg-amber-100 rounded-xl transition-colors"
                                 >
                                     <RotateCcw className="w-4 h-4" />
@@ -580,6 +828,7 @@ export default function SalesHistoryPage() {
 
     // ── Selected sale (detail panel) ──────────────────────────
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const { status: syncStatus } = useSyncStatus();
 
     const abortRef = useRef<AbortController | null>(null);
 
@@ -593,6 +842,28 @@ export default function SalesHistoryPage() {
         setError(null);
 
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const local = await localRead.searchSales(
+                    {
+                        page: targetPage,
+                        page_size: PAGE_SIZE,
+                        branch_id: activeBranchId ?? undefined,
+                        status: statusFilter || undefined,
+                        payment_method: paymentFilter || undefined,
+                        start_date: startDate || undefined,
+                        end_date: endDate || undefined,
+                    },
+                    targetPage,
+                    PAGE_SIZE,
+                );
+                if (!controller.signal.aborted) {
+                    setSales(local.items);
+                    setTotal(local.total);
+                    setTotalPages(local.total_pages);
+                    setPage(targetPage);
+                }
+                return;
+            }
             const data = await salesApi.list(
                 {
                     page: targetPage,
@@ -606,14 +877,36 @@ export default function SalesHistoryPage() {
                 controller.signal,
             );
             if (!controller.signal.aborted) {
-                setSales(data.items);
+                const items = data.items || [];
+                setSales(items);
                 setTotal(data.total);
                 setTotalPages(data.total_pages);
                 setPage(targetPage);
+                void cacheSales(items);
             }
         } catch (err: unknown) {
             if (!controller.signal.aborted) {
-                setError(parseApiError(err));
+                if (isOfflineError(err)) {
+                    const data = await localRead.searchSales(
+                        {
+                            page: targetPage,
+                            page_size: PAGE_SIZE,
+                            branch_id: activeBranchId ?? undefined,
+                            status: statusFilter || undefined,
+                            payment_method: paymentFilter || undefined,
+                            start_date: startDate || undefined,
+                            end_date: endDate || undefined,
+                        },
+                        targetPage,
+                        PAGE_SIZE,
+                    );
+                    setSales(data.items);
+                    setTotal(data.total);
+                    setTotalPages(data.total_pages);
+                    setPage(targetPage);
+                } else {
+                    setError(parseApiError(err));
+                }
             }
         } finally {
             if (!controller.signal.aborted) setLoading(false);
@@ -746,6 +1039,15 @@ export default function SalesHistoryPage() {
             {/* ── Main body ────────────────────────────────────── */}
             <div className="flex flex-1 min-h-0 overflow-hidden">
 
+                {/* Offline banner */}
+                {syncStatus === "offline" && (
+                    <div className="absolute left-0 right-0 mt-20 z-20 flex justify-center">
+                        <div className="mx-5 p-3 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-800">
+                            You are offline — showing cached data. Some information may be unavailable until you reconnect.
+                        </div>
+                    </div>
+                )}
+
                 {/* Left: Table ───────────────────────────────── */}
                 <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
 
@@ -867,6 +1169,7 @@ export default function SalesHistoryPage() {
                             saleId={selectedId}
                             onClose={() => setSelectedId(null)}
                             canRefund={canRefund}
+                            currentUserId={user?.id}
                         />
                     </div>
                 )}

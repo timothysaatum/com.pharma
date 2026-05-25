@@ -10,6 +10,7 @@ import { BranchSelector } from "@/components/auth/BranchSelector";
 import { useAuthStore } from "@/stores/authStore";
 import { Input, Button } from "@/components/ui";
 import { branchApi } from "@/api/branches";
+import { offlineCache } from "@/lib/storage";
 import type { BranchListItem } from "@/types";
 
 export default function LoginPage() {
@@ -35,6 +36,7 @@ export default function LoginPage() {
             setFetchingBranches(true);
             try {
                 const fetched = await branchApi.listMine();
+                await offlineCache.setBranches(fetched);
                 setBranches(fetched);
 
                 if (fetched.length === 1) {

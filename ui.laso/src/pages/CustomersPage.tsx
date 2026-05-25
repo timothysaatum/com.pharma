@@ -21,6 +21,8 @@ import {
     ShoppingBag, Phone, Mail, Award,
 } from "lucide-react";
 import { customersApi, type CustomerWithDetails } from "@/api/customers";
+import { localRead } from "@/lib/localRead";
+import { isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -99,6 +101,27 @@ export default function CustomersPage() {
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
+            if (!ctrl.signal.aborted && isOfflineError(err)) {
+                try {
+                    const result = await localRead.searchCustomers(
+                        {
+                            search: debouncedSearch || undefined,
+                            customer_type: filterType || undefined,
+                            loyalty_tier: filterTier || undefined,
+                        },
+                        page,
+                        25
+                    );
+                    if (!ctrl.signal.aborted) {
+                        setCustomers(result.customers as CustomerWithDetails[]);
+                        setTotal(result.total);
+                        setTotalPages(result.total_pages);
+                    }
+                } catch (localErr) {
+                    if (!ctrl.signal.aborted) setError(parseApiError(localErr));
+                }
+                return;
+            }
             if (!ctrl.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!ctrl.signal.aborted) setIsLoading(false);

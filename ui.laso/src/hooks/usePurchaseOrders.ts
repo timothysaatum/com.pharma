@@ -13,7 +13,10 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { purchaseOrdersApi, suppliersApi, type ListPurchaseOrdersParams } from "@/api/purchases";
-import { parseApiError } from "@/api/client";
+import { parseApiError, isOfflineError } from "@/api/client";
+import { localRead } from "@/lib/localRead";
+import { writeLocal } from "@/lib/localWrite";
+import { useAuthStore } from "@/stores/authStore";
 import type {
     PurchaseOrder,
     PurchaseOrderCreate,
@@ -34,6 +37,7 @@ interface ActionState {
 
 export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
     const { branch_id, pageSize = 20 } = options;
+    const { user } = useAuthStore();
 
     // ── List state ────────────────────────────────────────────
     const [orders, setOrders] = useState<PurchaseOrder[]>([]);
@@ -85,7 +89,24 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
             setPage(targetPage);
         } catch (err: unknown) {
             const name = (err as { name?: string }).name;
-            if (name !== "AbortError" && name !== "CanceledError") {
+            if (name === "AbortError" || name === "CanceledError") {
+                return;
+            }
+            if (isOfflineError(err)) {
+                const data = await localRead.searchPurchaseOrders(
+                    {
+                        branch_id: branch_id ?? undefined,
+                        status: statusFilter || undefined,
+                        supplier_id: supplierFilter || undefined,
+                    },
+                    targetPage,
+                    pageSize,
+                );
+                setOrders(data.items);
+                setTotal(data.total);
+                setTotalPages(data.total_pages);
+                setPage(targetPage);
+            } else {
                 setListError(parseApiError(err));
             }
         } finally {
@@ -106,7 +127,12 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
             const data = await suppliersApi.list({ active_only: true, page_size: 200 });
             setSuppliers(data.items);
         } catch (err) {
-            setSuppliersError(parseApiError(err));
+            if (isOfflineError(err)) {
+                const cached = await localRead.getCachedSuppliers(branch_id);
+                setSuppliers(cached);
+            } else {
+                setSuppliersError(parseApiError(err));
+            }
         } finally {
             setSuppliersLoading(false);
         }
@@ -196,13 +222,66 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
                 await fetchOrders(1); // refresh list
                 return po;
             } catch (err) {
+                if (isOfflineError(err)) {
+                    const now = new Date().toISOString();
+                    const subtotal = data.items.reduce(
+                        (sum, item) => sum + item.quantity_ordered * item.unit_cost,
+                        0,
+                    );
+                    const po: PurchaseOrder & { items: unknown[] } = {
+                        id: crypto.randomUUID(),
+                        organization_id: user?.organization_id ?? "",
+                        branch_id: data.branch_id,
+                        po_number: `OFFLINE-PO-${Date.now()}`,
+                        supplier_id: data.supplier_id,
+                        subtotal,
+                        tax_amount: 0,
+                        shipping_cost: data.shipping_cost ?? 0,
+                        total_amount: subtotal + (data.shipping_cost ?? 0),
+                        status: "draft",
+                        ordered_by: user?.id ?? "offline",
+                        approved_by: null,
+                        approved_at: null,
+                        expected_delivery_date: data.expected_delivery_date ?? null,
+                        received_date: null,
+                        notes: data.notes ?? null,
+                        sync_status: "pending",
+                        sync_version: 1,
+                        synced_at: null,
+                        created_at: now,
+                        updated_at: now,
+                        items: data.items.map((item) => ({
+                            id: crypto.randomUUID(),
+                            purchase_order_id: "",
+                            drug_id: item.drug_id,
+                            quantity_ordered: item.quantity_ordered,
+                            quantity_received: 0,
+                            unit_cost: item.unit_cost,
+                            total_cost: item.quantity_ordered * item.unit_cost,
+                            batch_number: null,
+                            expiry_date: null,
+                            is_fully_received: false,
+                            remaining_quantity: item.quantity_ordered,
+                            created_at: now,
+                            updated_at: now,
+                        })),
+                    };
+                    po.items = po.items.map((item) => ({
+                        ...(item as Record<string, unknown>),
+                        purchase_order_id: po.id,
+                    }));
+                    await writeLocal.purchaseOrder(po);
+                    setOrders((prev) => [po, ...prev]);
+                    setTotal((prev) => prev + 1);
+                    return po;
+                }
                 setCreateError(parseApiError(err));
                 return null;
             } finally {
                 setCreating(false);
             }
         },
-        [fetchOrders],
+        [fetchOrders, user],
     );
 
     // ── Append a newly created supplier to local list ────────

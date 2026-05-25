@@ -25,7 +25,6 @@ export function DuplicateContractModal({
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    const codeValid = /^[A-Z0-9][A-Z0-9\-]*[A-Z0-9]$/.test(newCode) || newCode.length === 1;
     const inputCls = "w-full h-10 px-3 rounded-xl border border-slate-200 text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500";
 
     const handleSubmit = async () => {

@@ -10,7 +10,7 @@ vi.mock("../client", () => ({
 import { statsApi } from "../stats";
 import { get as mockedGet } from "../client";
 
-const typedGet = mockedGet as unknown as Mock<any, any>;
+const typedGet = mockedGet as unknown as Mock;
 
 describe("statsApi", () => {
     beforeEach(() => {

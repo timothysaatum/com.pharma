@@ -15,7 +15,8 @@ import { toast } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
 import { usersApi } from "@/api/users";
 import { branchApi } from "@/api/branches";
-import { parseApiError } from "@/api/client";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
 import type { UserResponse, UserRole, BranchListItem } from "@/types";
 
@@ -618,7 +619,21 @@ export default function UsersPage() {
 
     // ── Load branches once ──────────────────────────────────
     useEffect(() => {
-        branchApi.listMine().then(setBranches).catch(() => { });
+        if (!isBackendReachable()) {
+            offlineCache.getBranches().then((cached) => setBranches(cached ?? []));
+            return;
+        }
+        branchApi
+            .listMine()
+            .then((items) => {
+                setBranches(items);
+                offlineCache.setBranches(items);
+            })
+            .catch(async (err) => {
+                if (isOfflineError(err)) {
+                    setBranches((await offlineCache.getBranches()) ?? []);
+                }
+            });
     }, []);
 
     // ── Fetch users ─────────────────────────────────────────
@@ -629,6 +644,25 @@ export default function UsersPage() {
 
         setIsLoading(true);
         try {
+            if (!isBackendReachable()) {
+                const cached = await offlineCache.getUsers();
+                const source = cached?.items ?? (currentUser ? [currentUser] : []);
+                const filtered = source.filter((item) => {
+                    const text = `${item.full_name} ${item.username} ${item.email}`.toLowerCase();
+                    const matchesSearch = !search || text.includes(search.toLowerCase());
+                    const matchesRole = !roleFilter || item.role === roleFilter;
+                    const matchesStatus =
+                        !statusFilter ||
+                        (statusFilter === "active" ? item.is_active : !item.is_active);
+                    return matchesSearch && matchesRole && matchesStatus;
+                });
+                const start = (page - 1) * PAGE_SIZE;
+                const pageItems = filtered.slice(start, start + PAGE_SIZE);
+                setUsers(pageItems);
+                setTotal(filtered.length);
+                setTotalPages(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
+                return;
+            }
             const result = await usersApi.list(
                 {
                     page,
@@ -642,19 +676,37 @@ export default function UsersPage() {
             setUsers(result.items);
             setTotal(result.total);
             setTotalPages(result.total_pages);
+            await offlineCache.setUsers(result);
         } catch (err: unknown) {
             // Axios aborts throw code "ERR_CANCELED"; the fetch API throws name "AbortError".
             // Both must be silently swallowed — they are not user-facing errors.
             const isAbort =
                 (err as { name?: string })?.name === "AbortError" ||
                 (err as { code?: string })?.code === "ERR_CANCELED";
-            if (!isAbort) {
+            if (!isAbort && isOfflineError(err)) {
+                const cached = await offlineCache.getUsers();
+                const source = cached?.items ?? (currentUser ? [currentUser] : []);
+                const filtered = source.filter((item) => {
+                    const text = `${item.full_name} ${item.username} ${item.email}`.toLowerCase();
+                    const matchesSearch = !search || text.includes(search.toLowerCase());
+                    const matchesRole = !roleFilter || item.role === roleFilter;
+                    const matchesStatus =
+                        !statusFilter ||
+                        (statusFilter === "active" ? item.is_active : !item.is_active);
+                    return matchesSearch && matchesRole && matchesStatus;
+                });
+                const start = (page - 1) * PAGE_SIZE;
+                const pageItems = filtered.slice(start, start + PAGE_SIZE);
+                setUsers(pageItems);
+                setTotal(filtered.length);
+                setTotalPages(Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)));
+            } else if (!isAbort) {
                 toast.error(parseApiError(err));
             }
         } finally {
             setIsLoading(false);
         }
-    }, [page, search, roleFilter, statusFilter]);
+    }, [page, search, roleFilter, statusFilter, currentUser]);
 
     useEffect(() => {
         fetchUsers();

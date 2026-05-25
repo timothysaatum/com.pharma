@@ -32,12 +32,125 @@ const PAYMENT_METHOD_LABELS: Record<string, string> = {
     split: "Split Payment",
 };
 
+const formatBranchAddress = (address: unknown): string => {
+    if (address === null || address === undefined) return "";
+    if (typeof address === "string") return address.trim();
+    if (typeof address === "number" || typeof address === "boolean") return String(address);
+    if (Array.isArray(address)) {
+        return address.map(formatBranchAddress).filter(Boolean).join(", ");
+    }
+    if (typeof address === "object") {
+        return Object.values(address)
+            .map(formatBranchAddress)
+            .filter(Boolean)
+            .join(", ");
+    }
+    return String(address);
+};
+
 export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModalProps) {
     const { sale } = result;
     const change = sale.change_amount ?? 0;
+    const branchName = sale.branch_name ?? "Branch";
+    const branchAddress = formatBranchAddress(sale.branch_address);
     const hasLoyalty = result.loyalty_points_awarded > 0;
     const hasWarnings = result.warnings.length > 0;
     const hasSavings = result.estimated_savings > 0;
+
+        const handlePrint = () => {
+                const html = `<!DOCTYPE html>
+<html>
+<head>
+    <title>Receipt - ${sale.sale_number}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: monospace; font-size: 12px; padding: 20px; color: #111827; }
+        .center { text-align: center; }
+        .small { font-size: 11px; color: #6b7280; }
+        .muted { color: #4b5563; }
+        .section { margin-bottom: 14px; }
+        .bold { font-weight: 700; }
+        .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
+        .divider { border-top: 1px dashed #d1d5db; margin: 10px 0; }
+        .line-item { display: flex; justify-content: space-between; margin-bottom: 6px; }
+        .text-right { text-align: right; }
+    </style>
+</head>
+<body>
+    <div class="center section">
+        <div class="bold">${branchName}</div>
+        <div class="small">${branchAddress}</div>
+        <div class="small">${sale.cashier_name ? `Cashier: ${sale.cashier_name}` : ""}</div>
+        <div class="small">${new Date().toLocaleString()}</div>
+        <div class="bold" style="margin-top:10px;">${sale.sale_number}</div>
+    </div>
+    <div class="section">
+        ${(sale.items ?? []).map((item) => `
+            <div class="line-item">
+                <span>${item.drug_name} x${item.quantity}</span>
+                <span>₵${Number(item.total_price).toFixed(2)}</span>
+            </div>
+        `).join("")}
+    </div>
+    <div class="divider"></div>
+    <div class="section">
+        <div class="row"><span>Subtotal</span><span>₵${Number(sale.subtotal).toFixed(2)}</span></div>
+        ${Number(sale.total_discount_amount) > 0 ? `<div class="row"><span>Discount</span><span>−₵${Number(sale.total_discount_amount).toFixed(2)}</span></div>` : ""}
+        ${Number(sale.tax_amount) > 0 ? `<div class="row"><span>Tax</span><span>₵${Number(sale.tax_amount).toFixed(2)}</span></div>` : ""}
+        <div class="row bold"><span>Total</span><span>₵${Number(sale.total_amount).toFixed(2)}</span></div>
+        <div class="row"><span>Paid</span><span>₵${Number(sale.amount_paid ?? 0).toFixed(2)}</span></div>
+        <div class="row"><span>Change</span><span>₵${Number(change).toFixed(2)}</span></div>
+        <div class="row"><span>Payment</span><span>${PAYMENT_METHOD_LABELS[sale.payment_method] ?? sale.payment_method}</span></div>
+    </div>
+    <div class="section small center">Thank you for shopping with us.</div>
+</body>
+</html>`;
+
+                // Use the same robust iframe-print approach used elsewhere to avoid popup blockers
+                const iframe = document.createElement("iframe");
+                iframe.style.cssText = "position:fixed;top:0;left:0;width:0;height:0;border:none;visibility:hidden;";
+                document.body.appendChild(iframe);
+
+                const iframeDoc = iframe.contentDocument ?? iframe.contentWindow?.document;
+                if (!iframeDoc) { document.body.removeChild(iframe); return; }
+
+                const doPrint = () => {
+                    try {
+                        iframe.contentWindow?.focus();
+                        iframe.contentWindow?.print();
+                    } catch (e) {
+                        // ignore print errors — user can always use browser print
+                    } finally {
+                        setTimeout(() => { try { document.body.removeChild(iframe); } catch (_) {} }, 1000);
+                    }
+                };
+
+                let printed = false;
+                const ensurePrint = () => {
+                    if (printed) return;
+                    printed = true;
+                    doPrint();
+                };
+
+                iframe.onload = ensurePrint;
+
+                try {
+                    // @ts-ignore - `srcdoc` is supported in browsers and avoids extra write timing issues.
+                    iframe.srcdoc = html;
+                } catch (e) {
+                    iframeDoc.open();
+                    iframeDoc.write(html);
+                    iframeDoc.close();
+                }
+
+                // Fallback: sometimes onload does not fire in embedded iframes.
+                setTimeout(() => {
+                    const ready = iframe.contentWindow?.document.readyState;
+                    if (!printed && (ready === "complete" || ready === "interactive")) {
+                        ensurePrint();
+                    }
+                }, 500);
+        };
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
@@ -76,10 +189,10 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
                                 ₵{Number(sale.total_amount).toFixed(2)}
                             </span>
                         </div>
-                        {sale.amount_paid > 0 && (
+                        {(sale.amount_paid ?? 0) > 0 && (
                             <div className="flex justify-between text-sm text-green-600">
                                 <span>Amount tendered</span>
-                                <span>₵{Number(sale.amount_paid).toFixed(2)}</span>
+                                <span>₵{Number(sale.amount_paid ?? 0).toFixed(2)}</span>
                             </div>
                         )}
                         {change > 0 && (
@@ -193,7 +306,7 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
                     {/* Actions */}
                     <div className="flex gap-2 pt-1">
                         <button
-                            onClick={onClose}
+                            onClick={handlePrint}
                             type="button"
                             className="flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium text-ink-secondary border border-slate-200 bg-white hover:bg-slate-50 rounded-xl transition-colors"
                         >
