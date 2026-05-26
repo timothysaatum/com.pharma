@@ -10,7 +10,8 @@
  *   - Audit trail for offline transactions
  */
 
-import { getDb, enqueue } from "@/lib/localDb";
+import { getDb } from "@/lib/localDb";
+import { writeLocal } from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
 
 export interface OfflineSaleRecord {
@@ -47,101 +48,83 @@ class OfflineSalesManager {
     const now = new Date().toISOString();
 
     try {
-      // Begin transaction
-      await db.execute("BEGIN TRANSACTION");
+      const existing = await db.select<Array<{ id: string; sync_status: string }>>(
+        "SELECT id, sync_status FROM offline_sales WHERE idempotency_key = $1",
+        [idempotencyKey]
+      );
 
-      try {
-        // 1. Check for duplicate using idempotency key
-        const existing = await db.select<
-          Array<{ id: string; sync_status: string }>
-        >(
-          "SELECT id, sync_status FROM offline_sales WHERE idempotency_key = ?",
-          [idempotencyKey]
-        );
-
-        if (existing.length > 0) {
-          await db.execute("ROLLBACK");
-          // Duplicate detected - return the existing sale ID but mark as duplicate
-          return {
-            success: true,
-            saleId: existing[0].id,
-          };
-        }
-
-        // 2. Record the sale transaction
-        const { items: saleItems, ...saleData } = sale;
-        const offlineRecord: OfflineSaleRecord = {
-          id: sale.id,
-          sale_data: {
-            ...saleData,
-            items_json: JSON.stringify(saleItems ?? []),
-          },
-          sale_items: items,
-          inventory_updates: inventoryDeltas,
-          recorded_at: now,
-          sync_status: "pending",
-          retry_count: 0,
-          last_retry_at: null,
-          next_retry_at: null,
-          error_message: null,
-          idempotency_key: idempotencyKey,
-          created_at: now,
-          updated_at: now,
-        };
-
-        const cols = Object.keys(offlineRecord);
-        const vals = cols.map((c) => {
-          const v = offlineRecord[c as keyof OfflineSaleRecord];
-          if (typeof v === "boolean") return v ? 1 : 0;
-          if (v === null) return null;
-          if (Array.isArray(v) || (typeof v === "object"))
-            return JSON.stringify(v);
-          return v;
-        });
-        const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-
-        await db.execute(
-          `INSERT INTO offline_sales (${cols.join(", ")}) VALUES (${placeholders})`,
-          vals
-        );
-
-        // 3. Update local inventory (best-effort, non-blocking)
-        for (const { drug_id, delta } of inventoryDeltas) {
-          try {
-            await db.execute(
-              `UPDATE branch_inventory
-               SET quantity = MAX(0, quantity + $1), updated_at = $2, sync_status = 'pending'
-               WHERE drug_id = $3`,
-              [delta, now, drug_id]
-            );
-          } catch (invErr) {
-            console.warn(`[OfflineSalesManager] Inventory update failed for drug ${drug_id}:`, invErr);
-            // Continue — the sale is still recorded
-          }
-        }
-
-        // 4. Enqueue the sale for sync
-        await enqueue(
-          "sales",
-          sale.id,
-          "create",
-          1,
-          saleData as Record<string, unknown>
-        );
-
-        // Commit transaction
-        await db.execute("COMMIT");
-        return { success: true, saleId: sale.id };
-      } catch (innerErr) {
-        await db.execute("ROLLBACK");
-        throw innerErr;
+      if (existing.length > 0) {
+        return { success: true, saleId: existing[0].id };
       }
+
+      await writeLocal.sale({ ...sale, items } as Parameters<typeof writeLocal.sale>[0]);
+
+      for (const { drug_id, delta } of inventoryDeltas) {
+        try {
+          await writeLocal.inventory(sale.branch_id, drug_id, delta);
+        } catch (invErr) {
+          console.warn(`[OfflineSalesManager] Inventory update failed for drug ${drug_id}:`, invErr);
+        }
+      }
+
+      await this.recordAuditRow(db, sale, items, inventoryDeltas, idempotencyKey, now);
+      return { success: true, saleId: sale.id };
     } catch (err) {
       console.error("[OfflineSalesManager] Transaction failed:", err);
       return {
         success: false,
         error: err instanceof Error ? err.message : "Failed to record sale transaction",
       };
+    }
+  }
+
+  private async recordAuditRow(
+    db: Awaited<ReturnType<typeof getDb>>,
+    sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
+    items: SaleItem[],
+    inventoryDeltas: Array<{ drug_id: string; delta: number }>,
+    idempotencyKey: string,
+    now: string
+  ): Promise<void> {
+    try {
+      const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
+      const offlineRecord: OfflineSaleRecord = {
+        id: sale.id,
+        sale_data: saleData,
+        sale_items: items.map((item) => ({
+          drug_id: item.drug_id,
+          quantity: item.quantity,
+          unit_price: item.unit_price,
+          discount_percentage: (item as any).discount_percentage || 0,
+        })),
+        inventory_updates: inventoryDeltas,
+        recorded_at: now,
+        sync_status: "pending",
+        retry_count: 0,
+        last_retry_at: null,
+        next_retry_at: null,
+        error_message: null,
+        idempotency_key: idempotencyKey,
+        created_at: now,
+        updated_at: now,
+      };
+
+      const cols = Object.keys(offlineRecord);
+      const vals = cols.map((c) => {
+        const v = offlineRecord[c as keyof OfflineSaleRecord];
+        if (typeof v === "boolean") return v ? 1 : 0;
+        if (v === null) return null;
+        if (Array.isArray(v) || typeof v === "object") return JSON.stringify(v);
+        return v;
+      });
+      const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+
+      await db.execute(
+        `INSERT OR REPLACE INTO offline_sales (${cols.join(", ")}) VALUES (${placeholders})`,
+        vals
+      );
+    } catch (err) {
+      console.warn("[OfflineSalesManager] Offline sale audit row failed:", err);
     }
   }
 

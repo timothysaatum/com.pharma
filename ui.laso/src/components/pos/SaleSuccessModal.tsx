@@ -48,6 +48,22 @@ const formatBranchAddress = (address: unknown): string => {
     return String(address);
 };
 
+const escapeHtml = (value: unknown): string =>
+    String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+
+const receiptLine = (label: string, value: string, className = "") => `
+    <div class="leader-row ${className}">
+        <span class="leader-label">${escapeHtml(label)}</span>
+        <span class="leader-dots"></span>
+        <span class="leader-value">${escapeHtml(value)}</span>
+    </div>
+`;
+
 export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModalProps) {
     const { sale } = result;
     const change = sale.change_amount ?? 0;
@@ -64,45 +80,49 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
     <title>Receipt - ${sale.sale_number}</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: monospace; font-size: 12px; padding: 20px; color: #111827; }
+        body { font-family: monospace; font-size: 12px; padding: 16px; color: #111827; }
+        .receipt { width: 300px; max-width: 100%; margin: 0 auto; }
         .center { text-align: center; }
         .small { font-size: 11px; color: #6b7280; }
         .muted { color: #4b5563; }
         .section { margin-bottom: 14px; }
         .bold { font-weight: 700; }
-        .row { display: flex; justify-content: space-between; margin-bottom: 6px; }
         .divider { border-top: 1px dashed #d1d5db; margin: 10px 0; }
-        .line-item { display: flex; justify-content: space-between; margin-bottom: 6px; }
-        .text-right { text-align: right; }
+        .leader-row { display: flex; align-items: baseline; gap: 5px; margin-bottom: 6px; line-height: 1.35; }
+        .leader-label { max-width: 175px; overflow-wrap: anywhere; }
+        .leader-dots { flex: 1; min-width: 16px; border-bottom: 1px dotted #9ca3af; transform: translateY(-3px); }
+        .leader-value { font-weight: 700; white-space: nowrap; text-align: right; }
+        .item-meta { margin: -3px 0 7px; color: #6b7280; font-size: 11px; }
+        .total-row { font-size: 14px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #d1d5db; }
     </style>
 </head>
 <body>
+<div class="receipt">
     <div class="center section">
-        <div class="bold">${branchName}</div>
-        <div class="small">${branchAddress}</div>
-        <div class="small">${sale.cashier_name ? `Cashier: ${sale.cashier_name}` : ""}</div>
-        <div class="small">${new Date().toLocaleString()}</div>
-        <div class="bold" style="margin-top:10px;">${sale.sale_number}</div>
+        <div class="bold">${escapeHtml(branchName)}</div>
+        <div class="small">${escapeHtml(branchAddress)}</div>
+        <div class="small">${sale.cashier_name ? `Cashier: ${escapeHtml(sale.cashier_name)}` : ""}</div>
+        <div class="small">${escapeHtml(new Date().toLocaleString())}</div>
+        <div class="bold" style="margin-top:10px;">${escapeHtml(sale.sale_number)}</div>
     </div>
     <div class="section">
         ${(sale.items ?? []).map((item) => `
-            <div class="line-item">
-                <span>${item.drug_name} x${item.quantity}</span>
-                <span>₵${Number(item.total_price).toFixed(2)}</span>
-            </div>
+            ${receiptLine(`${item.drug_name} x${item.quantity}`, `₵${Number(item.total_price).toFixed(2)}`)}
+            <div class="item-meta">₵${Number(item.unit_price).toFixed(2)} each${item.batch_number ? ` · Batch ${escapeHtml(item.batch_number)}` : ""}</div>
         `).join("")}
     </div>
     <div class="divider"></div>
     <div class="section">
-        <div class="row"><span>Subtotal</span><span>₵${Number(sale.subtotal).toFixed(2)}</span></div>
-        ${Number(sale.total_discount_amount) > 0 ? `<div class="row"><span>Discount</span><span>−₵${Number(sale.total_discount_amount).toFixed(2)}</span></div>` : ""}
-        ${Number(sale.tax_amount) > 0 ? `<div class="row"><span>Tax</span><span>₵${Number(sale.tax_amount).toFixed(2)}</span></div>` : ""}
-        <div class="row bold"><span>Total</span><span>₵${Number(sale.total_amount).toFixed(2)}</span></div>
-        <div class="row"><span>Paid</span><span>₵${Number(sale.amount_paid ?? 0).toFixed(2)}</span></div>
-        <div class="row"><span>Change</span><span>₵${Number(change).toFixed(2)}</span></div>
-        <div class="row"><span>Payment</span><span>${PAYMENT_METHOD_LABELS[sale.payment_method] ?? sale.payment_method}</span></div>
+        ${receiptLine("Subtotal", `₵${Number(sale.subtotal).toFixed(2)}`)}
+        ${Number(sale.total_discount_amount) > 0 ? receiptLine("Discount", `-₵${Number(sale.total_discount_amount).toFixed(2)}`) : ""}
+        ${Number(sale.tax_amount) > 0 ? receiptLine("Tax", `₵${Number(sale.tax_amount).toFixed(2)}`) : ""}
+        ${receiptLine("Total", `₵${Number(sale.total_amount).toFixed(2)}`, "bold total-row")}
+        ${receiptLine("Paid", `₵${Number(sale.amount_paid ?? 0).toFixed(2)}`)}
+        ${receiptLine("Change", `₵${Number(change).toFixed(2)}`)}
+        ${receiptLine("Payment", PAYMENT_METHOD_LABELS[sale.payment_method] ?? sale.payment_method)}
     </div>
     <div class="section small center">Thank you for shopping with us.</div>
+</div>
 </body>
 </html>`;
 

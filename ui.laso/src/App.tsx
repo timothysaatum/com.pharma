@@ -8,17 +8,14 @@ import { AppShell } from "@/components/layout/AppShell";
 import OnboardingPage from "@/pages/OnboardingPage";
 import LoginPage from "@/pages/LoginPage";
 import SetupRequiredPage from "@/pages/SetupRequiredPage";
-import DrugListPage from "@/pages/DrugListPage";
-import InventoryPage from "@/pages/InventoryPage";
 import POSPage from "@/pages/POSPage";
-import ContractsPage from "@/pages/ContractsPage";
 import CustomersPage from "@/pages/CustomersPage";
-import PurchasesPage from "@/pages/PurchasesPage";
 import SalesHistoryPage from "@/pages/SalesHistoryPage";
 import SettingsPage from "@/pages/SettingsPage";
 import UsersPage from "@/pages/UsersPage";
 import ReportsPage from "@/pages/ReportsPage";
 import AdminPage from "@/pages/AdminPage";
+import { getHomePathForRole } from "@/lib/routes";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -58,7 +55,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
   if (!user || !["admin", "super_admin"].includes(user.role)) {
-    return <Navigate to="/drugs" replace />;
+    return <Navigate to={getHomePathForRole(user?.role)} replace />;
   }
   return <>{children}</>;
 }
@@ -70,7 +67,7 @@ function RequireAdmin({ children }: { children: React.ReactNode }) {
 function RequireManager({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
   if (!user || !["admin", "super_admin", "manager"].includes(user.role)) {
-    return <Navigate to="/drugs" replace />;
+    return <Navigate to={getHomePathForRole(user?.role)} replace />;
   }
   return <>{children}</>;
 }
@@ -82,10 +79,10 @@ function RequireManager({ children }: { children: React.ReactNode }) {
  * to /setup automatically.  Keeping the redirect tight here prevents loops.
  */
 function RequireUnauthenticated({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, setupState } = useAuthStore();
+  const { isAuthenticated, setupState, user } = useAuthStore();
 
   if (isAuthenticated && setupState === "ready") {
-    return <Navigate to="/drugs" replace />;
+    return <Navigate to={getHomePathForRole(user?.role)} replace />;
   }
   return <>{children}</>;
 }
@@ -97,11 +94,11 @@ function RequireUnauthenticated({ children }: { children: React.ReactNode }) {
  * who skipped) through — they legitimately need to be here.
  */
 function RequireSetupAccess({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, setupState } = useAuthStore();
+  const { isAuthenticated, setupState, user } = useAuthStore();
 
   // Fully authenticated + all set up — nothing to do here
   if (isAuthenticated && setupState === "ready") {
-    return <Navigate to="/drugs" replace />;
+    return <Navigate to={getHomePathForRole(user?.role)} replace />;
   }
   return <>{children}</>;
 }
@@ -177,7 +174,7 @@ function SyncGate({ children }: { children: React.ReactNode }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AppRoutes() {
-  const { isAuthenticated, setupState, isLoading, initialize } = useAuthStore();
+  const { isAuthenticated, setupState, isLoading, initialize, user } = useAuthStore();
 
   useEffect(() => {
     initialize();
@@ -243,28 +240,12 @@ function AppRoutes() {
 
         {/* ── Protected app routes ── */}
         <Route
-          path="/drugs"
-          element={<RequireAuth><AppShell><DrugListPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/inventory"
-          element={<RequireAuth><AppShell><InventoryPage /></AppShell></RequireAuth>}
-        />
-        <Route
           path="/pos"
           element={<RequireAuth><AppShell><POSPage /></AppShell></RequireAuth>}
         />
         <Route
           path="/customers"
           element={<RequireAuth><AppShell><CustomersPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/contracts"
-          element={<RequireAuth><AppShell><ContractsPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/purchases"
-          element={<RequireAuth><AppShell><PurchasesPage /></AppShell></RequireAuth>}
         />
         <Route
           path="/sales"
@@ -322,12 +303,30 @@ function AppRoutes() {
             </RequireAuth>
           }
         />
+        <Route
+          path="/admin/:tab"
+          element={
+            <RequireAuth>
+              <RequireManager>
+                <AppShell><AdminPage /></AppShell>
+              </RequireManager>
+            </RequireAuth>
+          }
+        />
+
+        <Route path="/drugs" element={<Navigate to="/admin/drugs" replace />} />
+        <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
+        <Route path="/purchases" element={<Navigate to="/admin/purchases" replace />} />
+        <Route path="/contracts" element={<Navigate to="/admin/contracts" replace />} />
+        <Route path="/organization-stats" element={<Navigate to="/settings/organization" replace />} />
+        <Route path="/branches" element={<Navigate to="/settings/branches" replace />} />
+        <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />
 
         {/* ── Redirects ── */}
-        <Route path="/dashboard" element={<Navigate to="/drugs" replace />} />
+        <Route path="/dashboard" element={<Navigate to={getHomePathForRole(user?.role)} replace />} />
         <Route
           path="/"
-          element={<Navigate to={isReady ? "/drugs" : "/login"} replace />}
+          element={<Navigate to={isReady ? getHomePathForRole(user?.role) : "/login"} replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

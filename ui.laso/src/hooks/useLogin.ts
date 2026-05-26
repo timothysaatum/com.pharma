@@ -6,6 +6,7 @@ import type { Resolver } from "react-hook-form";
 import { useNavigate } from "react-router-dom";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
+import { getHomePathForRole } from "@/lib/routes";
 
 export const loginSchema = z.object({
     username: z
@@ -75,7 +76,7 @@ export function useLogin(options: UseLoginOptions = {}) {
 
             switch (state) {
                 case "ready":
-                    navigate("/drugs", { replace: true });
+                    navigate(getHomePathForRole(useAuthStore.getState().user?.role), { replace: true });
                     break;
                 case "needs_branch":
                     navigate("/setup", { replace: true });
@@ -84,7 +85,7 @@ export function useLogin(options: UseLoginOptions = {}) {
                     navigate("/onboarding", { replace: true });
                     break;
                 default:
-                    navigate("/drugs", { replace: true });
+                    navigate(getHomePathForRole(useAuthStore.getState().user?.role), { replace: true });
             }
         } catch (err) {
             const message = parseApiError(err);

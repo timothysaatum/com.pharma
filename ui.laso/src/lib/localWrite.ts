@@ -21,6 +21,62 @@ import type {
     PurchaseOrder, Customer,
 } from "@/types";
 
+const SALE_COLUMNS = new Set([
+    "id",
+    "organization_id",
+    "branch_id",
+    "sale_number",
+    "customer_id",
+    "customer_name",
+    "subtotal",
+    "discount_amount",
+    "tax_amount",
+    "total_amount",
+    "price_contract_id",
+    "contract_name",
+    "contract_discount_percentage",
+    "payment_method",
+    "payment_status",
+    "amount_paid",
+    "change_amount",
+    "payment_reference",
+    "prescription_id",
+    "prescription_number",
+    "prescriber_name",
+    "cashier_id",
+    "pharmacist_id",
+    "insurance_claim_number",
+    "patient_copay_amount",
+    "insurance_covered_amount",
+    "insurance_verified",
+    "insurance_verified_at",
+    "insurance_verified_by",
+    "notes",
+    "status",
+    "cancelled_at",
+    "cancelled_by",
+    "cancellation_reason",
+    "refund_amount",
+    "refunded_at",
+    "receipt_printed",
+    "receipt_emailed",
+    "items_json",
+    "sync_status",
+    "sync_version",
+    "synced_at",
+    "updated_at",
+    "created_at",
+]);
+
+function pickColumns(
+    record: Record<string, unknown>,
+    columns: Set<string>
+): Record<string, unknown> {
+    return Object.fromEntries(
+        Object.entries(record).filter(([key]) => columns.has(key))
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL — upsert a row and enqueue it
 // ─────────────────────────────────────────────────────────────────────────────
@@ -82,10 +138,15 @@ export const writeLocal = {
         sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string }
     ): Promise<void> => {
         const { items, ...saleData } = sale;
-        const payload = {
+        const rawPayload = {
             ...saleData,
+            discount_amount:
+                (saleData as Record<string, unknown>).discount_amount ??
+                (saleData as Record<string, unknown>).total_discount_amount ??
+                0,
             items_json: JSON.stringify(items ?? []),
         };
+        const payload = pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
         await upsertAndEnqueue("sales", payload as Record<string, unknown>, "create");
     },
 

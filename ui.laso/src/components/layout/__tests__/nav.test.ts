@@ -9,5 +9,13 @@ describe('AppShell navigation', () => {
     expect(paths).not.toContain('/inventory');
     expect(paths).not.toContain('/purchases');
     expect(paths).not.toContain('/contracts');
+    expect(paths).not.toContain('/organization-stats');
+    expect(paths).not.toContain('/branches');
+    expect(paths).not.toContain('/drug-management');
+  });
+
+  it('keeps organization and branch management under settings', () => {
+    const settings = NAV_ITEMS.find((i) => i.to === '/settings');
+    expect(settings?.roles).toEqual(['admin', 'super_admin']);
   });
 });

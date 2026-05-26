@@ -128,4 +128,9 @@ export const drugApi = {
     updateCategory(id: string, data: DrugCategoryUpdate): Promise<DrugCategory> {
         return patch<DrugCategory>(`${BASE}/categories/${id}`, data);
     },
+
+    /** DELETE /drugs/categories/{id} */
+    removeCategory(id: string): Promise<void> {
+        return del<void>(`${BASE}/categories/${id}`);
+    },
 };

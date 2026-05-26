@@ -34,7 +34,6 @@ import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { isOfflineError, parseApiError } from "@/api/client";
-import { writeLocal } from "@/lib/localWrite";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import { appEvents } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
@@ -82,7 +81,15 @@ export default function POSPage() {
     const [successResult, setSuccessResult] = useState<ProcessSaleResponse | null>(null);
 
     const handleCheckout = useCallback(async () => {
-        if (!cart.isValid || !activeBranchId) return;
+        if (!activeBranchId) {
+            setCheckoutError("Select an active branch before completing a sale.");
+            return;
+        }
+
+        if (!cart.isValid) {
+            setCheckoutError(cart.validationErrors[0]?.message ?? "Complete the required checkout fields.");
+            return;
+        }
 
         setIsSubmitting(true);
         setCheckoutError(null);

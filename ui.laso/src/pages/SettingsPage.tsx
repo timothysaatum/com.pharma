@@ -8,15 +8,15 @@
  * the nav item's roles filter in AppShell).
  */
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 import { GitBranch, Building2, ChevronRight } from "lucide-react";
 import { BranchesTab } from "@/components/settings/BranchesTab";
 import { OrganizationTab } from "@/components/settings/OrganizationTab";
-
-type TabId = "branches" | "organization";
+import { parseSettingsTab, type SettingsTabId } from "@/lib/routes";
 
 interface Tab {
-    id: TabId;
+    id: SettingsTabId;
     label: string;
     icon: React.ElementType;
     description: string;
@@ -38,7 +38,22 @@ const TABS: Tab[] = [
 ];
 
 export default function SettingsPage() {
-    const [activeTab, setActiveTab] = useState<TabId>("organization");
+    const navigate = useNavigate();
+    const { tab } = useParams();
+    const [activeTab, setActiveTab] = useState<SettingsTabId>(() => parseSettingsTab(tab));
+
+    useEffect(() => {
+        const nextTab = parseSettingsTab(tab);
+        setActiveTab(nextTab);
+        if (tab && tab !== nextTab) {
+            navigate(`/settings/${nextTab}`, { replace: true });
+        }
+    }, [navigate, tab]);
+
+    const selectTab = (nextTab: SettingsTabId) => {
+        setActiveTab(nextTab);
+        navigate(nextTab === "organization" ? "/settings" : `/settings/${nextTab}`);
+    };
 
     const active = TABS.find((t) => t.id === activeTab)!;
 
@@ -69,7 +84,7 @@ export default function SettingsPage() {
                         return (
                             <button
                                 key={tab.id}
-                                onClick={() => setActiveTab(tab.id)}
+                                onClick={() => selectTab(tab.id)}
                                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors ${isActive
                                         ? "bg-brand-50 text-brand-700"
                                         : "text-ink-secondary hover:bg-slate-50 hover:text-ink"

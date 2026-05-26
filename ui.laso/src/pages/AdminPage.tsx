@@ -4,9 +4,11 @@
  * Renders the full existing page components in a tabbed layout
  */
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import { AlertCircle } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
+import { ADMIN_TABS, parseAdminTab, type AdminTabId } from '@/lib/routes';
 import DrugListPage from './DrugListPage';
 import InventoryPage from './InventoryPage';
 import PurchasesPage from './PurchasesPage';
@@ -14,7 +16,17 @@ import ContractsPage from './ContractsPage';
 
 export default function AdminPage() {
   const user = useAuthStore((state) => state.user);
-  const [activeTab, setActiveTab] = useState<'drugs' | 'inventory' | 'purchases' | 'contracts'>('drugs');
+  const navigate = useNavigate();
+  const { tab } = useParams();
+  const [activeTab, setActiveTab] = useState<AdminTabId>(() => parseAdminTab(tab));
+
+  useEffect(() => {
+    const nextTab = parseAdminTab(tab);
+    setActiveTab(nextTab);
+    if (tab && tab !== nextTab) {
+      navigate(`/admin/${nextTab}`, { replace: true });
+    }
+  }, [navigate, tab]);
 
   // Check authorization - allow managers to access consolidated admin view
   if (!user || !['admin', 'super_admin', 'manager'].includes(user.role)) {
@@ -31,34 +43,39 @@ export default function AdminPage() {
     );
   }
 
-  const tabs = [
-    { id: 'drugs', label: 'Drugs' },
-    { id: 'inventory', label: 'Inventory' },
-    { id: 'purchases', label: 'Purchases' },
-    { id: 'contracts', label: 'Contracts' },
-  ];
+  const labels: Record<AdminTabId, string> = {
+    drugs: 'Drugs',
+    inventory: 'Inventory',
+    purchases: 'Purchases',
+    contracts: 'Contracts',
+  };
+
+  const selectTab = (nextTab: AdminTabId) => {
+    setActiveTab(nextTab);
+    navigate(nextTab === 'drugs' ? '/admin' : `/admin/${nextTab}`);
+  };
 
   return (
-    <div className="space-y-4">
+    <div className="flex flex-col h-full min-h-0 bg-surface">
       {/* Tabs */}
-      <div className="flex gap-2 border-b border-gray-200 px-4">
-        {tabs.map(tab => (
+      <div className="flex gap-2 border-b border-gray-200 px-4 bg-white flex-shrink-0">
+        {ADMIN_TABS.map(tab => (
           <button
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id as any)}
+            key={tab}
+            onClick={() => selectTab(tab)}
             className={`py-2 px-4 font-medium transition-colors whitespace-nowrap ${
-              activeTab === tab.id
+              activeTab === tab
                 ? 'border-b-2 border-blue-600 text-blue-600'
                 : 'text-gray-600 hover:text-gray-900'
             }`}
           >
-            {tab.label}
+            {labels[tab]}
           </button>
         ))}
       </div>
 
       {/* Tab Content - Render full existing components */}
-      <div>
+      <div className="flex-1 min-h-0 overflow-auto">
         {activeTab === 'drugs' && <DrugListPage />}
         {activeTab === 'inventory' && <InventoryPage />}
         {activeTab === 'purchases' && <PurchasesPage />}

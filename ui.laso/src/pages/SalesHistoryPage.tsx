@@ -96,6 +96,25 @@ function fmtGHS(n: number | string | null | undefined) {
     return `₵${Number(n ?? 0).toFixed(2)}`;
 }
 
+function escapeReceiptHtml(value: unknown): string {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+}
+
+function receiptLeader(label: string, value: string, className = "") {
+    return `
+      <div class="leader-row ${className}">
+        <span class="leader-label">${escapeReceiptHtml(label)}</span>
+        <span class="leader-dots"></span>
+        <span class="leader-value">${escapeReceiptHtml(value)}</span>
+      </div>
+    `;
+}
+
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
 function StatusBadge({ status }: { status: string }) {
@@ -290,55 +309,63 @@ function SaleDetailPanel({
   <title>Receipt – ${receipt.receipt_number}</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: monospace; font-size: 12px; padding: 20px; max-width: 380px; color: #1a1a1a; }
-    .center { text-align: center; }
-    .bold { font-weight: 700; }
-    .semibold { font-weight: 600; }
-    .row { display: flex; justify-content: space-between; margin-bottom: 3px; }
-    .muted { color: #64748b; }
-    .small { font-size: 11px; }
-    .large { font-size: 15px; }
-    .section { border-bottom: 1px dashed #ccc; padding-bottom: 10px; margin-bottom: 10px; }
-    .green { color: #16a34a; }
-    .emerald { color: #047857; }
-    @media print { body { padding: 0; } }
-  </style>
-</head>
-<body>
-  <div class="section center">
-    <p class="bold large">${receipt.organization.name}</p>
-    ${receipt.branch.name ? `<p class="muted">${receipt.branch.name}</p>` : ""}
-    ${receipt.branch.phone ? `<p class="muted">${receipt.branch.phone}</p>` : ""}
-    <p class="muted small" style="margin-top:6px">${new Date(receipt.receipt_date).toLocaleString("en-GH")}</p>
-    <p class="bold">${receipt.receipt_number}</p>
-  </div>
-  ${receipt.customer.name ? `
-  <div class="section small">
-    <div class="row"><span class="muted">Customer</span><span class="semibold">${receipt.customer.name}</span></div>
-    ${receipt.customer.phone ? `<div class="row"><span class="muted">Phone</span><span>${receipt.customer.phone}</span></div>` : ""}
-  </div>` : ""}
-  <div class="section">
-    ${receipt.items.map(item => `
-      <div style="margin-bottom:6px">
-        <div class="row"><span class="semibold" style="flex:1;margin-right:8px">${item.name}</span><span>${Number(item.total).toFixed(2)}</span></div>
-        <div class="row small muted"><span>${item.quantity} × ${Number(item.unit_price).toFixed(2)}</span>${item.total_discount > 0 ? `<span class="green">−${Number(item.total_discount).toFixed(2)}</span>` : ""}</div>
-      </div>`).join("")}
-  </div>
-  <div class="section">
-    <div class="row muted small"><span>Subtotal</span><span>${Number(receipt.subtotal).toFixed(2)}</span></div>
-    ${receipt.total_discount > 0 ? `<div class="row green small"><span>Discount</span><span>−${Number(receipt.total_discount).toFixed(2)}</span></div>` : ""}
-    ${receipt.tax > 0 ? `<div class="row muted small"><span>Tax</span><span>${Number(receipt.tax).toFixed(2)}</span></div>` : ""}
-    <div class="row bold large" style="margin-top:6px;padding-top:6px;border-top:1px solid #ccc"><span>TOTAL</span><span>₵${Number(receipt.total).toFixed(2)}</span></div>
-    <div class="row muted small" style="margin-top:4px"><span>Paid (${receipt.payment_method})</span><span>₵${Number(receipt.amount_paid).toFixed(2)}</span></div>
-    ${receipt.change > 0 ? `<div class="row emerald semibold"><span>Change</span><span>₵${Number(receipt.change).toFixed(2)}</span></div>` : ""}
-  </div>
-  ${receipt.contract ? `<div class="section small center muted"><p>${receipt.contract.name} — ${receipt.contract.discount_percentage}% discount</p></div>` : ""}
-  <div class="center muted small" style="margin-top:8px">
-    ${receipt.cashier ? `<p>Served by: ${receipt.cashier}</p>` : ""}
-    <p style="margin-top:6px;font-weight:600;color:#1a1a1a">Thank you for your purchase!</p>
-  </div>
-</body>
-</html>`;
+	    body { font-family: monospace; font-size: 12px; padding: 16px; color: #1a1a1a; }
+	    .receipt { width: 300px; max-width: 100%; margin: 0 auto; }
+	    .center { text-align: center; }
+	    .bold { font-weight: 700; }
+	    .semibold { font-weight: 600; }
+	    .leader-row { display: flex; align-items: baseline; gap: 5px; margin-bottom: 6px; line-height: 1.35; }
+	    .leader-label { max-width: 175px; overflow-wrap: anywhere; }
+	    .leader-dots { flex: 1; min-width: 16px; border-bottom: 1px dotted #94a3b8; transform: translateY(-3px); }
+	    .leader-value { font-weight: 700; white-space: nowrap; text-align: right; }
+	    .muted { color: #64748b; }
+	    .small { font-size: 11px; }
+	    .large { font-size: 15px; }
+	    .section { border-bottom: 1px dashed #ccc; padding-bottom: 10px; margin-bottom: 10px; }
+	    .item-meta { margin: -3px 0 7px; color: #64748b; font-size: 11px; }
+	    .total-row { margin-top: 8px; padding-top: 8px; border-top: 1px dashed #ccc; }
+	    .green { color: #16a34a; }
+	    .emerald { color: #047857; }
+	    @media print { body { padding: 0; } }
+	  </style>
+	</head>
+	<body>
+	  <div class="receipt">
+	  <div class="section center">
+	    <p class="bold large">${escapeReceiptHtml(receipt.organization.name)}</p>
+	    ${receipt.branch.name ? `<p class="muted">${escapeReceiptHtml(receipt.branch.name)}</p>` : ""}
+	    ${receipt.branch.phone ? `<p class="muted">${escapeReceiptHtml(receipt.branch.phone)}</p>` : ""}
+	    <p class="muted small" style="margin-top:6px">${escapeReceiptHtml(new Date(receipt.receipt_date).toLocaleString("en-GH"))}</p>
+	    <p class="bold">${escapeReceiptHtml(receipt.receipt_number)}</p>
+	  </div>
+	  ${receipt.customer.name ? `
+	  <div class="section small">
+	    ${receiptLeader("Customer", receipt.customer.name)}
+	    ${receipt.customer.phone ? receiptLeader("Phone", receipt.customer.phone) : ""}
+	  </div>` : ""}
+	  <div class="section">
+	    ${receipt.items.map(item => `
+	      <div style="margin-bottom:6px">
+	        ${receiptLeader(item.name, Number(item.total).toFixed(2), "semibold")}
+	        <div class="item-meta">${item.quantity} x ${Number(item.unit_price).toFixed(2)}${item.total_discount > 0 ? ` · discount ${Number(item.total_discount).toFixed(2)}` : ""}</div>
+	      </div>`).join("")}
+	  </div>
+	  <div class="section">
+	    ${receiptLeader("Subtotal", Number(receipt.subtotal).toFixed(2), "muted small")}
+	    ${receipt.total_discount > 0 ? receiptLeader("Discount", `-${Number(receipt.total_discount).toFixed(2)}`, "green small") : ""}
+	    ${receipt.tax > 0 ? receiptLeader("Tax", Number(receipt.tax).toFixed(2), "muted small") : ""}
+	    ${receiptLeader("TOTAL", `₵${Number(receipt.total).toFixed(2)}`, "bold large total-row")}
+	    ${receiptLeader(`Paid (${PAYMENT_LABEL[receipt.payment_method] ?? receipt.payment_method})`, `₵${Number(receipt.amount_paid).toFixed(2)}`, "muted small")}
+	    ${receipt.change > 0 ? receiptLeader("Change", `₵${Number(receipt.change).toFixed(2)}`, "emerald semibold") : ""}
+	  </div>
+	  ${receipt.contract ? `<div class="section small center muted"><p>${escapeReceiptHtml(receipt.contract.name)} — ${receipt.contract.discount_percentage}% discount</p></div>` : ""}
+	  <div class="center muted small" style="margin-top:8px">
+	    ${receipt.cashier ? `<p>Served by: ${escapeReceiptHtml(receipt.cashier)}</p>` : ""}
+	    <p style="margin-top:6px;font-weight:600;color:#1a1a1a">Thank you for your purchase!</p>
+	  </div>
+	  </div>
+	</body>
+	</html>`;
 
         // Inject a hidden iframe, write the HTML, print, then remove it.
         // This never triggers popup blockers and has no race condition.
