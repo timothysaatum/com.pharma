@@ -12,19 +12,23 @@ Reports Support:
 """
 
 from __future__ import annotations
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Dict, List, Optional, Any
 import uuid
 
-from sqlalchemy import select, func, case, literal
+from fastapi import HTTPException, status
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.sales.sales_model import Sale, SaleItem
-from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
+from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug
-from app.models.pharmacy.pharmacy_model import Branch
+from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.customer.customer_model import Customer
 from app.models.pricing.pricing_model import PriceContract
+from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import User
 
 
@@ -60,22 +64,17 @@ class ReportsService:
                 Sale.price_contract_id,
                 PriceContract.contract_name,
                 Sale.cashier_id,
-                User.username.label("cashier_name"),
-                func.count(func.distinct(Sale.id)).label("transaction_count"),
+                User.user_name.label("cashier_name"),
+                func.count(Sale.id).label("transaction_count"),
                 func.sum(Sale.subtotal).label("gross_revenue"),
                 func.sum(Sale.discount_amount).label("total_discount"),
                 func.sum(Sale.tax_amount).label("total_tax"),
                 func.sum(Sale.total_amount).label("net_revenue"),
-                func.sum(SaleItem.quantity).label("total_items"),
-                func.sum(
-                    case(
-                        (Sale.status == "refunded", 1),
-                        else_=0,
-                    )
+                func.count(
+                    func.if_(Sale.status == "refunded", 1, None)
                 ).label("refund_count"),
             )
             .join(Branch, Sale.branch_id == Branch.id)
-            .join(SaleItem, SaleItem.sale_id == Sale.id)
             .join(User, Sale.cashier_id == User.id)
             .outerjoin(
                 PriceContract,
@@ -103,7 +102,7 @@ class ReportsService:
             Sale.price_contract_id,
             PriceContract.contract_name,
             Sale.cashier_id,
-            User.full_name,
+            User.user_name,
         ).order_by(func.date(Sale.created_at).desc())
 
         result = await db.execute(stmt)
@@ -123,7 +122,6 @@ class ReportsService:
                 "total_discount": float(row.total_discount or 0),
                 "total_tax": float(row.total_tax or 0),
                 "net_revenue": float(row.net_revenue or 0),
-                "total_items": int(row.total_items or 0),
                 "refund_count": row.refund_count,
             }
             for row in rows
@@ -213,11 +211,11 @@ class ReportsService:
                     BranchInventory.branch_id,
                     Branch.name.label("branch_name"),
                     Drug.id.label("drug_id"),
-                    Drug.name.label("drug_name"),
+                    Drug.drug_name,
                     Drug.sku,
                     Drug.reorder_level,
                     BranchInventory.quantity,
-                    literal("LOW_STOCK").label("alert_type"),
+                    func.literal("LOW_STOCK").label("alert_type"),
                 )
                 .join(Branch, BranchInventory.branch_id == Branch.id)
                 .join(Drug, BranchInventory.drug_id == Drug.id)
@@ -256,25 +254,24 @@ class ReportsService:
                     DrugBatch.branch_id,
                     Branch.name.label("branch_name"),
                     Drug.id.label("drug_id"),
-                    Drug.name.label("drug_name"),
+                    Drug.drug_name,
                     Drug.sku,
                     DrugBatch.batch_number,
-                    DrugBatch.expiry_date,
+                    DrugBatch.batch_expiry_date,
                     DrugBatch.remaining_quantity,
-                    case(
-                        (DrugBatch.expiry_date < today, "EXPIRED"),
+                    func.case(
+                        (DrugBatch.batch_expiry_date < today, "EXPIRED"),
                         (
-                            DrugBatch.expiry_date <= thirty_days_later,
+                            DrugBatch.batch_expiry_date <= thirty_days_later,
                             "EXPIRING_SOON",
                         ),
-                        else_="UNKNOWN",
                     ).label("alert_type"),
                 )
                 .join(Drug, DrugBatch.drug_id == Drug.id)
                 .join(Branch, DrugBatch.branch_id == Branch.id)
                 .where(
                     Drug.organization_id == organization_id,
-                    DrugBatch.expiry_date <= thirty_days_later,
+                    DrugBatch.batch_expiry_date <= thirty_days_later,
                 )
             )
             if branch_id:
@@ -292,7 +289,7 @@ class ReportsService:
                             "drug_name": row.drug_name,
                             "drug_sku": row.sku,
                             "batch_number": row.batch_number,
-                            "expiry_date": str(row.expiry_date),
+                            "expiry_date": str(row.batch_expiry_date),
                             "remaining_quantity": row.remaining_quantity,
                             "alert_type": row.alert_type,
                         }
@@ -374,9 +371,9 @@ class ReportsService:
         stmt = (
             select(
                 Drug.id.label("drug_id"),
-                Drug.name.label("drug_name"),
+                Drug.drug_name,
                 Drug.sku,
-                Drug.drug_type.label("category"),
+                Drug.category,
                 func.sum(SaleItem.quantity).label("units_sold"),
                 func.sum(SaleItem.total_price).label("revenue"),
                 func.count(func.distinct(Sale.id)).label("transaction_count"),
@@ -398,9 +395,9 @@ class ReportsService:
         stmt = (
             stmt.group_by(
                 Drug.id,
-                Drug.name,
+                Drug.drug_name,
                 Drug.sku,
-                Drug.drug_type,
+                Drug.category,
             )
             .order_by(func.sum(SaleItem.quantity).desc().nullsfirst())
             .limit(limit)

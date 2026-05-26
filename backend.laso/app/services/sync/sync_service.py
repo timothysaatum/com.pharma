@@ -53,8 +53,10 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
 from sqlalchemy import and_, or_, select, text
+from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
@@ -222,8 +224,32 @@ class SyncService:
         still pending don't get pulled to the client and pushed right back,
         which would create an infinite sync loop.
         """
+        # Auth dependencies may already have used the request-scoped session to
+        # load the current user. PostgreSQL requires SET TRANSACTION ISOLATION
+        # LEVEL to be the first statement in a transaction, so take the sync
+        # snapshot with a fresh session when this one is already active.
+        if db.in_transaction() and SyncService._supports_repeatable_read(db):
+            async with AsyncSessionLocal() as snapshot_db:
+                return await SyncService._pull_with_snapshot(
+                    snapshot_db,
+                    request,
+                    organization_id,
+                )
+
+        return await SyncService._pull_with_snapshot(db, request, organization_id)
+
+    @staticmethod
+    def _supports_repeatable_read(db: AsyncSession) -> bool:
+        return db.get_bind().dialect.name != "sqlite"
+
+    @staticmethod
+    async def _pull_with_snapshot(
+        db: AsyncSession,
+        request: PullRequest,
+        organization_id: uuid.UUID,
+    ) -> PullResponse:
         branch_id = request.branch_id
-        tables    = set(request.tables or SYNC_TABLES)
+        tables = set(request.tables or SYNC_TABLES)
 
         # Capture now BEFORE opening the transaction so the client's next
         # last_sync_at is slightly behind the snapshot point, guaranteeing
@@ -232,16 +258,23 @@ class SyncService:
         since = request.last_sync_at
 
         # Request a consistent snapshot so all table queries see the same DB state.
-        # PostgreSQL: SET TRANSACTION ISOLATION LEVEL REPEATABLE READ
-        # SQLite:     default isolation is already SERIALIZABLE (stronger than
-        #             REPEATABLE READ) — the SET syntax does not exist and is not
-        #             needed.  We catch OperationalError so the same code works in
-        #             both development (SQLite/aiosqlite) and production (PostgreSQL).
-        from sqlalchemy.exc import OperationalError as SA_OperationalError
-        try:
-            await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
-        except SA_OperationalError:
-            pass  # SQLite — default isolation is already sufficient
+        # SQLite's default transaction isolation is already sufficient and it
+        # does not support this PostgreSQL statement.
+        if SyncService._supports_repeatable_read(db):
+            try:
+                await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
+            except (SA_OperationalError, DBAPIError) as exc:
+                if (
+                    isinstance(exc, DBAPIError)
+                    and "SET TRANSACTION ISOLATION LEVEL must be called before any query"
+                    not in str(exc)
+                ):
+                    raise
+                logger.warning(
+                    "Could not set repeatable-read isolation for sync pull; "
+                    "continuing with the current transaction isolation.",
+                    exc_info=True,
+                )
 
         result = PullResponse(sync_timestamp=now)
         total  = 0

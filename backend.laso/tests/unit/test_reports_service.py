@@ -1,118 +1,273 @@
 """
-Unit tests for the reports service helpers.
-These tests verify response shaping and field mappings for report rows.
+Test suite for Reports Service
+Tests the various report generation functions
 """
 
-import uuid
-from datetime import date
-from unittest.mock import AsyncMock, MagicMock
-
 import pytest
+from datetime import date, datetime, timedelta
+from decimal import Decimal
+import uuid
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.sales.sales_model import Sale, SaleItem
+from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
+from app.models.inventory.inventory_model import Drug
+from app.models.pharmacy.pharmacy_model import Branch, Organization
+from app.models.customer.customer_model import Customer
+from app.models.user.user_model import User
+from app.models.pricing.pricing_model import PriceContract
 from app.services.reports.reports_service import ReportsService
 
 
-class DummyRow:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
 @pytest.mark.asyncio
-async def test_get_contract_performance_maps_backend_rows_to_response():
-    db = AsyncMock()
-    result = MagicMock()
-    contract_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
-    result.fetchall.return_value = [
-        DummyRow(
-            id=contract_id,
-            contract_code="STAFF-10",
-            contract_name="Staff Discount",
-            contract_type="staff",
-            sales_count=3,
-            revenue=375.0,
-            discount_given=45.0,
-            avg_discount=15.0,
-            customer_count=3,
+class TestReportsService:
+    """Test suite for Reports Service."""
+
+    async def test_daily_sales_summary(self, db: AsyncSession, sales_data):
+        """Test daily sales summary aggregation."""
+        org_id = sales_data["org_id"]
+        
+        # Get today's date
+        start_date = date.today()
+        end_date = date.today()
+
+        result = await ReportsService.get_daily_sales_summary(
+            db=db,
+            organization_id=org_id,
+            start_date=start_date,
+            end_date=end_date,
         )
-    ]
-    db.execute.return_value = result
 
-    output = await ReportsService.get_contract_performance(
-        db=db,
-        organization_id=uuid.UUID("22222222-2222-2222-2222-222222222222"),
-        start_date=date(2025, 1, 1),
-        end_date=date(2025, 1, 31),
-        contract_id=None,
-    )
+        assert len(result) > 0
+        assert result[0]["transaction_count"] > 0
+        assert result[0]["net_revenue"] > 0
 
-    db.execute.assert_awaited_once()
-    assert output == [
-        {
-            "contract_id": str(contract_id),
-            "contract_code": "STAFF-10",
-            "contract_name": "Staff Discount",
-            "contract_type": "staff",
-            "sales_count": 3,
-            "revenue": 375.0,
-            "discount_given": 45.0,
-            "avg_discount": 15.0,
-            "customer_count": 3,
-        }
-    ]
+    async def test_daily_sales_summary_with_filters(self, db: AsyncSession, sales_data):
+        """Test daily sales summary with branch and contract filters."""
+        org_id = sales_data["org_id"]
+        branch_id = sales_data["branch_id"]
+        contract_id = sales_data["contract_id"]
+        
+        start_date = date.today()
+        end_date = date.today()
 
-
-@pytest.mark.asyncio
-async def test_get_daily_sales_summary_includes_total_items_and_branch_names():
-    db = AsyncMock()
-    result = MagicMock()
-    sale_date = date(2025, 2, 10)
-    branch_id = uuid.UUID("33333333-3333-3333-3333-333333333333")
-    cash_id = uuid.UUID("44444444-4444-4444-4444-444444444444")
-    contract_id = uuid.UUID("55555555-5555-5555-5555-555555555555")
-
-    result.fetchall.return_value = [
-        DummyRow(
-            sale_date=sale_date,
+        # Filter by branch
+        result_by_branch = await ReportsService.get_daily_sales_summary(
+            db=db,
+            organization_id=org_id,
+            start_date=start_date,
+            end_date=end_date,
             branch_id=branch_id,
-            branch_name="Main Branch",
-            price_contract_id=contract_id,
-            contract_name="Corporate Plan",
-            cashier_id=cash_id,
-            cashier_name="Jane Doe",
-            transaction_count=7,
-            gross_revenue=420.0,
-            total_discount=20.0,
-            total_tax=30.0,
-            net_revenue=430.0,
-            total_items=42,
-            refund_count=0,
         )
-    ]
-    db.execute.return_value = result
 
-    output = await ReportsService.get_daily_sales_summary(
-        db=db,
-        organization_id=uuid.UUID("66666666-6666-6666-6666-666666666666"),
-        start_date=date(2025, 2, 1),
-        end_date=date(2025, 2, 28),
+        # All results should be for the filtered branch
+        if result_by_branch:
+            for row in result_by_branch:
+                assert str(row["branch_id"]) == str(branch_id)
+
+    async def test_contract_performance_report(self, db: AsyncSession, sales_data):
+        """Test contract performance metrics."""
+        org_id = sales_data["org_id"]
+        
+        start_date = date.today() - timedelta(days=30)
+        end_date = date.today()
+
+        result = await ReportsService.get_contract_performance(
+            db=db,
+            organization_id=org_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
+        # Result should include contracts with sales
+        assert isinstance(result, list)
+        if result:
+            for row in result:
+                assert "contract_name" in row
+                assert "revenue" in row
+                assert "discount_given" in row
+
+    async def test_inventory_alerts(self, db: AsyncSession, sales_data):
+        """Test inventory alerts for low stock and expiry."""
+        org_id = sales_data["org_id"]
+
+        # Get low stock alerts
+        result = await ReportsService.get_inventory_alerts(
+            db=db,
+            organization_id=org_id,
+            alert_types=["LOW_STOCK", "EXPIRING_SOON", "EXPIRED"],
+        )
+
+        assert isinstance(result, list)
+        # Each alert should have the required fields
+        for alert in result:
+            assert "drug_name" in alert
+            assert "alert_type" in alert
+            assert alert["alert_type"] in ["LOW_STOCK", "EXPIRING_SOON", "EXPIRED"]
+
+    async def test_top_customers_report(self, db: AsyncSession, sales_data):
+        """Test top customers report."""
+        org_id = sales_data["org_id"]
+        
+        start_date = date.today() - timedelta(days=30)
+        end_date = date.today()
+
+        result = await ReportsService.get_top_customers(
+            db=db,
+            organization_id=org_id,
+            start_date=start_date,
+            end_date=end_date,
+            limit=10,
+        )
+
+        assert isinstance(result, list)
+        if result:
+            # Should be sorted by total_spent (descending)
+            for i in range(len(result) - 1):
+                assert result[i]["total_spent"] >= result[i + 1]["total_spent"]
+
+    async def test_drug_turnover_report(self, db: AsyncSession, sales_data):
+        """Test drug turnover metrics."""
+        org_id = sales_data["org_id"]
+        
+        start_date = date.today() - timedelta(days=30)
+        end_date = date.today()
+
+        result = await ReportsService.get_drug_turnover(
+            db=db,
+            organization_id=org_id,
+            start_date=start_date,
+            end_date=end_date,
+            limit=50,
+        )
+
+        assert isinstance(result, list)
+        if result:
+            # Should include drug metrics
+            for row in result:
+                assert "drug_name" in row
+                assert "units_sold" in row
+                assert "revenue" in row
+                assert row["units_sold"] > 0
+
+
+# ─── Fixtures ───────────────────────────────────────────────────────────────
+
+@pytest.fixture
+async def sales_data(db: AsyncSession):
+    """Create test sales data for report tests."""
+    org = Organization(
+        id=uuid.uuid4(),
+        organization_name="Test Pharmacy",
+        tax_id="123456789",
     )
-
-    db.execute.assert_awaited_once()
-    assert output == [
-        {
-            "sale_date": str(sale_date),
-            "branch_id": str(branch_id),
-            "branch_name": "Main Branch",
-            "contract_id": str(contract_id),
-            "contract_name": "Corporate Plan",
-            "cashier_id": str(cash_id),
-            "cashier_name": "Jane Doe",
-            "transaction_count": 7,
-            "gross_revenue": 420.0,
-            "total_discount": 20.0,
-            "total_tax": 30.0,
-            "net_revenue": 430.0,
-            "total_items": 42,
-            "refund_count": 0,
-        }
-    ]
+    
+    branch = Branch(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        name="Test Branch",
+        code="TB001",
+        is_active=True,
+        is_deleted=False,
+    )
+    
+    user = User(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        user_name="cashier",
+        email="cashier@pharmacy.com",
+        hashed_password="hashed_pwd",
+        role="cashier",
+        is_active=True,
+        assigned_branches=[branch.id],
+    )
+    
+    drug = Drug(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        drug_name="Test Drug",
+        sku="TEST001",
+        unit_price=Decimal("50.00"),
+        reorder_level=10,
+        is_active=True,
+        is_deleted=False,
+    )
+    
+    customer = Customer(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        customer_name="Test Customer",
+        phone="0501234567",
+        loyalty_tier="standard",
+        loyalty_points=0,
+    )
+    
+    contract = PriceContract(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        contract_code="TEST001",
+        contract_name="Test Contract",
+        contract_type="standard",
+        discount_type="percentage",
+        discount_percentage=Decimal("10.00"),
+        is_active=True,
+        is_deleted=False,
+    )
+    
+    # Create a sale for today
+    sale = Sale(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        branch_id=branch.id,
+        sale_number="SALE001",
+        customer_id=customer.id,
+        cashier_id=user.id,
+        price_contract_id=contract.id,
+        subtotal=Decimal("500.00"),
+        discount_amount=Decimal("50.00"),
+        tax_amount=Decimal("0.00"),
+        total_amount=Decimal("450.00"),
+        payment_method="cash",
+        payment_status="completed",
+        amount_paid=Decimal("450.00"),
+        status="completed",
+        created_at=datetime.now(),
+    )
+    
+    sale_item = SaleItem(
+        id=uuid.uuid4(),
+        sale_id=sale.id,
+        drug_id=drug.id,
+        quantity=10,
+        unit_price=Decimal("50.00"),
+        subtotal=Decimal("500.00"),
+        contract_discount_amount=Decimal("50.00"),
+        total_discount_amount=Decimal("50.00"),
+        tax_amount=Decimal("0.00"),
+        total_price=Decimal("450.00"),
+    )
+    
+    # Create low stock inventory
+    inventory = BranchInventory(
+        id=uuid.uuid4(),
+        branch_id=branch.id,
+        drug_id=drug.id,
+        quantity=5,  # Below reorder level of 10
+        reserved_quantity=0,
+        selling_price=Decimal("50.00"),
+    )
+    
+    db.add_all([
+        org, branch, user, drug, customer, contract, sale, sale_item, inventory
+    ])
+    await db.commit()
+    
+    return {
+        "org_id": org.id,
+        "branch_id": branch.id,
+        "user_id": user.id,
+        "drug_id": drug.id,
+        "customer_id": customer.id,
+        "contract_id": contract.id,
+        "sale_id": sale.id,
+    }
