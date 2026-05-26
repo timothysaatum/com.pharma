@@ -55,6 +55,7 @@ import uuid
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from dateutil.parser import isoparse
 
 from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
@@ -197,6 +198,38 @@ def _clean(data: Dict[str, Any]) -> Dict[str, Any]:
 def _whitelist(data: Dict[str, Any], allowed: frozenset[str]) -> Dict[str, Any]:
     """Return only the keys present in ``allowed``, after stripping meta keys."""
     return {k: v for k, v in _clean(data).items() if k in allowed}
+
+
+def _parse_datetime_fields(data: Dict[str, Any]) -> None:
+    """In-place parse ISO datetime/date strings for common timestamp/date keys.
+
+    This converts string values like '2026-05-26T13:42:34.616Z' into
+    `datetime` objects so SQLAlchemy/asyncpg accept them for DateTime columns.
+    Non-parseable values are left untouched.
+    """
+    if not data:
+        return
+
+    # Candidate keys: anything ending with _at or _date, plus some common names
+    extra_keys = {"date_of_birth", "manufacturing_date", "expiry_date", "expected_delivery_date", "received_date"}
+    keys = [k for k in data.keys() if k.endswith("_at") or k.endswith("_date") or k in extra_keys]
+    for k in keys:
+        v = data.get(k)
+        if v is None or isinstance(v, (int, float)):
+            continue
+        if isinstance(v, str):
+            try:
+                parsed = isoparse(v)
+                data[k] = parsed
+            except Exception:
+                # Best-effort: try stdlib isoformat fallback for Z -> +00:00
+                try:
+                    from datetime import datetime
+
+                    data[k] = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                except Exception:
+                    # leave value as-is if parsing fails
+                    pass
 
 
 class SyncService:
@@ -532,6 +565,7 @@ class SyncService:
             ), None
 
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
+        _parse_datetime_fields(safe_data)
         safe_data["organization_id"] = str(organization_id)
         safe_data["branch_id"]       = str(branch_id)
 
@@ -586,12 +620,14 @@ class SyncService:
                     local_id=record.local_id, table_name="drug_batches", success=False
                 ), conflict
             safe = _whitelist(record.data, _BATCH_WRITABLE)
+            _parse_datetime_fields(safe)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status  = "synced"
             existing.sync_version += 1
         else:
             safe = _whitelist(record.data, _BATCH_WRITABLE)
+            _parse_datetime_fields(safe)
             safe["branch_id"] = str(branch_id)
             existing = DrugBatch(**safe)
             existing.sync_status = "synced"
@@ -637,6 +673,7 @@ class SyncService:
 
         # Persist the adjustment record
         safe = _whitelist(record.data, _ADJUSTMENT_WRITABLE)
+        _parse_datetime_fields(safe)
         safe["branch_id"]   = str(branch_id)
         safe["adjusted_by"] = str(pushed_by)
         adj = StockAdjustment(**safe)
@@ -728,12 +765,14 @@ class SyncService:
                     local_id=record.local_id, table_name="branch_inventory", success=False
                 ), conflict
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
+            _parse_datetime_fields(safe)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status  = "synced"
             existing.sync_version += 1
         else:
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
+            _parse_datetime_fields(safe)
             safe["branch_id"] = str(branch_id)
             existing = BranchInventory(**safe)
             existing.sync_status = "synced"
@@ -770,11 +809,13 @@ class SyncService:
                     local_id=record.local_id, table_name="purchase_orders", success=False
                 ), conflict
             safe = _whitelist(record.data, _PO_WRITABLE)
+            _parse_datetime_fields(safe)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status = "synced"
         else:
             safe = _whitelist(record.data, _PO_WRITABLE)
+            _parse_datetime_fields(safe)
             safe["organization_id"] = str(organization_id)
             safe["branch_id"]       = str(branch_id)
             safe["ordered_by"]      = str(pushed_by)
@@ -849,6 +890,7 @@ class SyncService:
                 )
 
         safe = _whitelist(record.data, _CUSTOMER_WRITABLE)
+        _parse_datetime_fields(safe)
         safe["organization_id"] = str(organization_id)
         customer = Customer(**safe)
         customer.sync_status = "synced"
