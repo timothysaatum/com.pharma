@@ -35,6 +35,7 @@ import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { isOfflineError, parseApiError } from "@/api/client";
 import { writeLocal } from "@/lib/localWrite";
+import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import { appEvents } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
@@ -184,9 +185,22 @@ export default function POSPage() {
                 }),
             };
 
-            await writeLocal.sale(offlineSale as unknown as Parameters<typeof writeLocal.sale>[0]);
-            for (const item of cart.state.items) {
-                await writeLocal.inventory(activeBranchId, item.drug.id, -item.quantity);
+            // Use robust transactional offline sales manager
+            const inventoryDeltas = cart.state.items.map((item) => ({
+                drug_id: item.drug.id,
+                delta: -item.quantity,
+            }));
+            const idempotencyKey = `${user?.id}-${payload.price_contract_id}-${Date.now()}`;
+
+            const recordResult = await offlineSalesManager.recordSaleTransaction(
+                offlineSale as unknown as Parameters<typeof offlineSalesManager.recordSaleTransaction>[0],
+                offlineSale.items,
+                inventoryDeltas,
+                idempotencyKey
+            );
+
+            if (!recordResult.success) {
+                throw new Error(`Failed to record offline sale: ${recordResult.error}`);
             }
 
             return {

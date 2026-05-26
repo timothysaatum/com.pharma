@@ -22,16 +22,13 @@ jobs:
           key: ${{ secrets.SERVER_SSH_KEY }}
           script: |
             # Go to your project folder on the server
-            cd /path/to/com.pharma
+            cd /home/ubuntu/laso
 
             # Pull latest code
             git pull origin main
 
-            # Go into backend folder
-            cd backend.laso
-
-            # Activate virtual environment (update path if different)
-            source venv/bin/activate
+            # Activate virtual environment
+            source /home/ubuntu/com.pharamaenv/bin/activate
 
             # Install any new dependencies
             pip install -r requirements.txt
@@ -40,6 +37,6 @@ jobs:
             alembic upgrade head
 
             # Restart the backend service
-            sudo systemctl restart ${{ secrets.SERVICE_NAME }}
+            sudo systemctl restart backend.atlas.service
 
             echo "Backend deployed successfully!"

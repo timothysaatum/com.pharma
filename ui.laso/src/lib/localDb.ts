@@ -44,6 +44,7 @@ async function runMigrations(db: Database): Promise<void> {
   if (user_version < 5) await migrate_v5(db);
   if (user_version < 6) await migrate_v6(db);
   if (user_version < 7) await migrate_v7(db);
+  if (user_version < 8) await migrate_v8(db);
   await ensureBranchInventorySchema(db);
 }
 
@@ -470,6 +471,48 @@ async function migrate_v7(db: Database): Promise<void> {
       AND sync_status = 'synced'
   `);
   await db.execute("PRAGMA user_version = 7");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION V8 — offline_sales table for durable offline transactions
+// Stores sale records with retry logic, duplicate detection, and audit trail
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function migrate_v8(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS offline_sales (
+      id                    TEXT PRIMARY KEY,
+      idempotency_key       TEXT NOT NULL UNIQUE,
+      sale_data             TEXT NOT NULL,
+      sale_items            TEXT NOT NULL,
+      inventory_updates     TEXT NOT NULL,
+      recorded_at           TEXT NOT NULL,
+      sync_status           TEXT NOT NULL DEFAULT 'pending',
+      retry_count           INTEGER NOT NULL DEFAULT 0,
+      last_retry_at         TEXT,
+      next_retry_at         TEXT,
+      error_message         TEXT,
+      created_at            TEXT NOT NULL,
+      updated_at            TEXT NOT NULL
+    )
+  `);
+
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS offline_sales_sync_status 
+      ON offline_sales(sync_status)
+  `);
+
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS offline_sales_next_retry 
+      ON offline_sales(next_retry_at)
+  `);
+
+  await db.execute(`
+    CREATE INDEX IF NOT EXISTS offline_sales_idempotency 
+      ON offline_sales(idempotency_key)
+  `);
+
+  await db.execute("PRAGMA user_version = 8");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {

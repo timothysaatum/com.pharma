@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-    Pill, Package, ShoppingCart, Users, BarChart2,
-    LogOut, Building2, Menu, X, ScrollText, ShoppingBag,
-    Receipt, Settings, UserCog,
+    Pill, ShoppingCart, Users, BarChart2,
+    LogOut, Building2, Menu, X,
+    Receipt, Settings, UserCog, Cog,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
@@ -17,24 +17,21 @@ interface NavItem {
     roles?: string[];
 }
 
-const NAV_ITEMS: NavItem[] = [
-    { to: "/drugs", icon: Pill, label: "Drugs" },
-    { to: "/inventory", icon: Package, label: "Inventory" },
+export const NAV_ITEMS: NavItem[] = [
     { to: "/pos", icon: ShoppingCart, label: "Point of Sale" },
     { to: "/sales", icon: Receipt, label: "Sales History" },
     { to: "/customers", icon: Users, label: "Customers" },
-    { to: "/contracts", icon: ScrollText, label: "Contracts" },
-    {
-        to: "/purchases",
-        icon: ShoppingBag,
-        label: "Purchases",
-        roles: ["admin", "manager", "super_admin"],
-    },
     {
         to: "/reports",
         icon: BarChart2,
         label: "Reports",
         roles: ["admin", "manager", "super_admin"],
+    },
+    {
+        to: "/admin",
+        icon: Cog,
+        label: "Admin",
+        roles: ["admin", "super_admin", "manager"],
     },
     {
         to: "/users",

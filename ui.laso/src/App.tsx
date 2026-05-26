@@ -17,20 +17,14 @@ import PurchasesPage from "@/pages/PurchasesPage";
 import SalesHistoryPage from "@/pages/SalesHistoryPage";
 import SettingsPage from "@/pages/SettingsPage";
 import UsersPage from "@/pages/UsersPage";
+import ReportsPage from "@/pages/ReportsPage";
+import AdminPage from "@/pages/AdminPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 1000 * 60 * 5, retry: 1 },
   },
 });
-
-function ComingSoon({ label }: { label: string }) {
-  return (
-    <div className="flex-1 flex items-center justify-center text-ink-muted">
-      <p className="text-sm">{label} coming soon</p>
-    </div>
-  );
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Route guards
@@ -316,7 +310,17 @@ function AppRoutes() {
         />
         <Route
           path="/reports"
-          element={<RequireAuth><AppShell><ComingSoon label="Reports" /></AppShell></RequireAuth>}
+          element={<RequireAuth><AppShell><ReportsPage /></AppShell></RequireAuth>}
+        />
+        <Route
+          path="/admin"
+          element={
+            <RequireAuth>
+              <RequireManager>
+                <AppShell><AdminPage /></AppShell>
+              </RequireManager>
+            </RequireAuth>
+          }
         />
 
         {/* ── Redirects ── */}
