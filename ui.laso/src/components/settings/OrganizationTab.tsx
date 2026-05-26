@@ -22,6 +22,7 @@ import {
     DollarSign, Users, Pill, ShoppingBag,
     TrendingUp, AlertCircle,
 } from "lucide-react";
+import { isBackendReachable } from "@/api/client";
 import { useOrganization } from "@/hooks/useOrganization";
 import type { OrganizationUpdate } from "@/types";
 import type { OrganizationSettingsUpdate } from "@/api/organization";
@@ -100,6 +101,7 @@ function SaveFooter({
     onSave: () => void;
     onReset: () => void;
 }) {
+    const offline = !isBackendReachable();
     if (!isDirty && !loading) return null;
     return (
         <div className="flex items-center justify-end gap-3 px-5 py-3 border-t border-slate-100 bg-slate-50/60">
@@ -113,7 +115,7 @@ function SaveFooter({
             </button>
             <button
                 onClick={onSave}
-                disabled={loading || !isDirty}
+                disabled={loading || !isDirty || offline}
                 type="button"
                 className="px-5 py-2 text-xs font-bold text-white bg-brand-600 hover:bg-brand-700 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
             >
@@ -593,7 +595,6 @@ export function OrganizationTab() {
 
     return (
         <div className="flex flex-col h-full min-h-0 overflow-hidden">
-
             {/* Stats bar */}
             {stats && (
                 <div className="flex-shrink-0 border-b border-slate-200 bg-white">

@@ -6,7 +6,7 @@
  * plugin-store v2 changed API: use load() instead of new Store()
  */
 
-import type { BranchListItem, PaginatedResponse, UserResponse } from "@/types";
+import type { BranchListItem, Organization, OrganizationStats, PaginatedResponse, UserResponse } from "@/types";
 
 const IS_TAURI =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -86,6 +86,8 @@ type CachedUserPage = PaginatedResponse<UserResponse>;
 const CACHE_KEYS = {
     BRANCHES: "cache.branches",
     USERS: "cache.users",
+    ORGANIZATION: "cache.organization",
+    ORGANIZATION_STATS: "cache.organization_stats",
 } as const;
 
 export const offlineCache = {
@@ -97,6 +99,10 @@ export const offlineCache = {
     },
     setUsers: (users: CachedUserPage) => storageSet(CACHE_KEYS.USERS, users),
     getUsers: () => storageGet<CachedUserPage>(CACHE_KEYS.USERS),
+    setOrganization: (org: Organization) => storageSet(CACHE_KEYS.ORGANIZATION, org),
+    getOrganization: () => storageGet<Organization>(CACHE_KEYS.ORGANIZATION),
+    setOrganizationStats: (stats: OrganizationStats) => storageSet(CACHE_KEYS.ORGANIZATION_STATS, stats),
+    getOrganizationStats: () => storageGet<OrganizationStats>(CACHE_KEYS.ORGANIZATION_STATS),
 };
 
 export const authStorage = {
@@ -116,6 +122,8 @@ export const authStorage = {
             storageDel(KEYS.BRANCH),
             storageDel(CACHE_KEYS.BRANCHES),
             storageDel(CACHE_KEYS.USERS),
+            storageDel(CACHE_KEYS.ORGANIZATION),
+            storageDel(CACHE_KEYS.ORGANIZATION_STATS),
         ]);
     },
 

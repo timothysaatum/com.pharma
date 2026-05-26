@@ -9,7 +9,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { branchApi } from "@/api/branches";
-import { parseApiError } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendReachable } from "@/api/client";
+import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import type { BranchListItem, BranchCreate } from "@/types";
 
@@ -27,18 +28,44 @@ export function useBranches() {
 
     const [creating, setCreating] = useState(false);
     const [createError, setCreateError] = useState<string | null>(null);
+    const [isOffline, setIsOffline] = useState(false);
 
     const [actionState, setActionState] = useState<ActionState>({ loading: false, error: null });
 
-    // ── Fetch all branches for the org ────────────────────────
+    // ── Fetch all branches for the org with offline cache fallback ─────
     const fetchBranches = useCallback(async () => {
         setLoading(true);
         setError(null);
+        setIsOffline(false);
+
+        if (!isBackendReachable()) {
+            const cached = await offlineCache.getBranches();
+            if (cached) {
+                setBranches(cached);
+                setIsOffline(true);
+            } else {
+                setError("Cannot load branches while offline and no cached data is available.");
+            }
+            setLoading(false);
+            return;
+        }
+
         try {
             const result = await branchApi.list({ page_size: 200 });
             setBranches(result.items);
+            await offlineCache.setBranches(result.items);
         } catch (err) {
-            setError(parseApiError(err));
+            if (isOfflineError(err)) {
+                const cached = await offlineCache.getBranches();
+                if (cached) {
+                    setBranches(cached);
+                    setIsOffline(true);
+                } else {
+                    setError(parseApiError(err));
+                }
+            } else {
+                setError(parseApiError(err));
+            }
         } finally {
             setLoading(false);
         }
@@ -51,6 +78,10 @@ export function useBranches() {
     // ── Create ────────────────────────────────────────────────
     const createBranch = useCallback(
         async (data: BranchCreate): Promise<boolean> => {
+            if (!isBackendReachable()) {
+                setCreateError("Cannot create a branch while offline. Reconnect and try again.");
+                return false;
+            }
             setCreating(true);
             setCreateError(null);
             try {
@@ -58,7 +89,6 @@ export function useBranches() {
                     ...data,
                     organization_id: user?.organization_id,
                 });
-                // Optimistically append as BranchListItem
                 const listItem: BranchListItem = {
                     id: branch.id,
                     organization_id: branch.organization_id,
@@ -74,15 +104,21 @@ export function useBranches() {
                 setBranches((prev) =>
                     [...prev, listItem].sort((a, b) => a.name.localeCompare(b.name))
                 );
+                await offlineCache.setBranches(
+                    [...branches, listItem].sort((a, b) => a.name.localeCompare(b.name))
+                );
                 return true;
             } catch (err) {
-                setCreateError(parseApiError(err));
+                const message = isOfflineError(err)
+                    ? "Cannot create a branch while offline. Reconnect and try again."
+                    : parseApiError(err);
+                setCreateError(message);
                 return false;
             } finally {
                 setCreating(false);
             }
         },
-        [user?.organization_id],
+        [user?.organization_id, branches],
     );
 
     // ── Activate / Deactivate ─────────────────────────────────
@@ -100,21 +136,34 @@ export function useBranches() {
 
     const activateBranch = useCallback(
         async (id: string) => {
-            // Optimistic update
+            if (!isBackendReachable()) {
+                setActionState({
+                    loading: false,
+                    error: "Cannot change branch status while offline. Reconnect and try again.",
+                });
+                return false;
+            }
             setBranches((prev) =>
                 prev.map((b) => (b.id === id ? { ...b, is_active: true } : b))
             );
             const ok = await runAction(async () => {
                 await branchApi.activate(id);
             });
-            // Revert on error by refetching
             if (!ok) await fetchBranches();
+            return ok;
         },
         [runAction, fetchBranches],
     );
 
     const deactivateBranch = useCallback(
         async (id: string) => {
+            if (!isBackendReachable()) {
+                setActionState({
+                    loading: false,
+                    error: "Cannot change branch status while offline. Reconnect and try again.",
+                });
+                return false;
+            }
             setBranches((prev) =>
                 prev.map((b) => (b.id === id ? { ...b, is_active: false } : b))
             );
@@ -122,6 +171,7 @@ export function useBranches() {
                 await branchApi.deactivate(id);
             });
             if (!ok) await fetchBranches();
+            return ok;
         },
         [runAction, fetchBranches],
     );
@@ -131,6 +181,7 @@ export function useBranches() {
         setBranches,   // exposed so BranchesTab can merge edits without refetch
         loading,
         error,
+        isOffline,
         creating,
         createError,
         clearCreateError: () => setCreateError(null),

@@ -49,6 +49,7 @@ function BranchRow({
     onEdit,
     actionLoading,
     canManage,
+    isOffline,
 }: {
     branch: BranchListItem;
     onActivate: (id: string) => void;
@@ -56,6 +57,7 @@ function BranchRow({
     onEdit: (branch: BranchListItem) => void;
     actionLoading: boolean;
     canManage: boolean;
+    isOffline: boolean;
 }) {
     return (
         <div className="px-5 py-4 hover:bg-slate-50/60 transition-colors">
@@ -94,8 +96,9 @@ function BranchRow({
                     {canManage && (
                         <button
                             onClick={() => onEdit(branch)}
-                            title="Edit branch"
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl hover:text-brand-600 hover:border-brand-200 hover:bg-brand-50 transition-colors"
+                            title={isOffline ? "Cannot edit while offline" : "Edit branch"}
+                            disabled={actionLoading || isOffline}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl hover:text-brand-600 hover:border-brand-200 hover:bg-brand-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                         >
                             <Pencil className="w-3.5 h-3.5" />
                             Edit
@@ -104,8 +107,8 @@ function BranchRow({
                     {branch.is_active ? (
                         <button
                             onClick={() => onDeactivate(branch.id)}
-                            disabled={actionLoading}
-                            title="Deactivate branch"
+                            disabled={actionLoading || isOffline}
+                            title={isOffline ? "Cannot deactivate while offline" : "Deactivate branch"}
                             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl hover:text-red-600 hover:border-red-200 hover:bg-red-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                             <PowerOff className="w-3.5 h-3.5" />
@@ -114,8 +117,8 @@ function BranchRow({
                     ) : (
                         <button
                             onClick={() => onActivate(branch.id)}
-                            disabled={actionLoading}
-                            title="Activate branch"
+                            disabled={actionLoading || isOffline}
+                            title={isOffline ? "Cannot activate while offline" : "Activate branch"}
                             className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-slate-500 border border-slate-200 rounded-xl hover:text-green-700 hover:border-green-200 hover:bg-green-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                         >
                             <Power className="w-3.5 h-3.5" />
@@ -151,6 +154,7 @@ export function BranchesTab() {
     const { user } = useAuthStore();
     const {
         branches, setBranches, loading, error,
+        isOffline,
         creating, createError, clearCreateError,
         actionState,
         createBranch, activateBranch, deactivateBranch,
@@ -266,7 +270,9 @@ export function BranchesTab() {
                                 setEditingBranch(null);
                                 setShowCreate(true);
                             }}
-                            className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-brand-600 hover:bg-brand-700 rounded-xl transition-colors shadow-sm"
+                            disabled={isOffline}
+                            title={isOffline ? "Cannot create a branch while offline" : "Create new branch"}
+                            className="flex items-center gap-2 px-4 py-2 text-sm font-bold text-white bg-brand-600 hover:bg-brand-700 rounded-xl transition-colors shadow-sm disabled:opacity-50 disabled:cursor-not-allowed"
                         >
                             <Plus className="w-4 h-4" />
                             New Branch
@@ -327,6 +333,7 @@ export function BranchesTab() {
                                     onEdit={(b) => { clearEditError(); setEditingBranch(b); setShowCreate(false); }}
                                     actionLoading={actionState.loading}
                                     canManage={canManage}
+                                    isOffline={isOffline}
                                 />
                             ))}
                         </div>

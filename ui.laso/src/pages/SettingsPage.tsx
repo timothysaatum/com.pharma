@@ -59,7 +59,6 @@ export default function SettingsPage() {
 
     return (
         <div className="flex flex-col h-full bg-surface">
-
             {/* Page header */}
             <div className="px-6 py-4 border-b border-slate-200 bg-white flex-shrink-0">
                 <div className="flex items-center gap-2 text-xs text-slate-400 mb-1">

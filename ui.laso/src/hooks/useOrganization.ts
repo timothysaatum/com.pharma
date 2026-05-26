@@ -13,7 +13,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { organizationApi, type OrganizationSettingsUpdate } from "@/api/organization";
-import { parseApiError } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendReachable } from "@/api/client";
+import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import type { Organization, OrganizationStats, OrganizationUpdate } from "@/types";
 
@@ -36,12 +37,31 @@ export function useOrganization() {
 
     const [orgMutation, setOrgMutation] = useState<MutationState>(IDLE);
     const [settingsMutation, setSettingsMutation] = useState<MutationState>(IDLE);
+    const [isOffline, setIsOffline] = useState(false);
 
-    // ── Load org + stats in parallel ─────────────────────────
+    // ── Load org + stats in parallel with offline cache fallback ─────────
     const load = useCallback(async () => {
         if (!orgId) return;
         setLoading(true);
         setError(null);
+        setIsOffline(false);
+
+        if (!isBackendReachable()) {
+            const [cachedOrg, cachedStats] = await Promise.all([
+                offlineCache.getOrganization(),
+                offlineCache.getOrganizationStats(),
+            ]);
+            if (cachedOrg) {
+                setOrg(cachedOrg);
+                setStats(cachedStats);
+                setIsOffline(true);
+            } else {
+                setError("Offline mode: no cached organisation data available.");
+            }
+            setLoading(false);
+            return;
+        }
+
         try {
             const [orgData, statsData] = await Promise.all([
                 organizationApi.getById(orgId),
@@ -49,8 +69,26 @@ export function useOrganization() {
             ]);
             setOrg(orgData);
             setStats(statsData);
+            await Promise.all([
+                offlineCache.setOrganization(orgData),
+                offlineCache.setOrganizationStats(statsData),
+            ]);
         } catch (err) {
-            setError(parseApiError(err));
+            if (isOfflineError(err)) {
+                const [cachedOrg, cachedStats] = await Promise.all([
+                    offlineCache.getOrganization(),
+                    offlineCache.getOrganizationStats(),
+                ]);
+                if (cachedOrg) {
+                    setOrg(cachedOrg);
+                    setStats(cachedStats);
+                    setIsOffline(true);
+                } else {
+                    setError(parseApiError(err));
+                }
+            } else {
+                setError(parseApiError(err));
+            }
         } finally {
             setLoading(false);
         }
@@ -64,16 +102,27 @@ export function useOrganization() {
     const updateOrg = useCallback(
         async (data: OrganizationUpdate): Promise<boolean> => {
             if (!orgId) return false;
+            if (!isBackendReachable()) {
+                setOrgMutation({
+                    loading: false,
+                    error: "Cannot save organisation data while offline. Reconnect and try again.",
+                    success: false,
+                });
+                return false;
+            }
             setOrgMutation({ loading: true, error: null, success: false });
             try {
                 const updated = await organizationApi.update(orgId, data);
                 setOrg(updated);
+                await offlineCache.setOrganization(updated);
                 setOrgMutation({ loading: false, error: null, success: true });
-                // Clear success flag after 3s
                 setTimeout(() => setOrgMutation(IDLE), 3000);
                 return true;
             } catch (err) {
-                setOrgMutation({ loading: false, error: parseApiError(err), success: false });
+                const message = isOfflineError(err)
+                    ? "Cannot save organisation data while offline. Reconnect and try again."
+                    : parseApiError(err);
+                setOrgMutation({ loading: false, error: message, success: false });
                 return false;
             }
         },
@@ -84,15 +133,27 @@ export function useOrganization() {
     const updateSettings = useCallback(
         async (data: OrganizationSettingsUpdate): Promise<boolean> => {
             if (!orgId) return false;
+            if (!isBackendReachable()) {
+                setSettingsMutation({
+                    loading: false,
+                    error: "Cannot save organisation settings while offline. Reconnect and try again.",
+                    success: false,
+                });
+                return false;
+            }
             setSettingsMutation({ loading: true, error: null, success: false });
             try {
                 const updated = await organizationApi.updateSettings(orgId, data);
                 setOrg(updated);
+                await offlineCache.setOrganization(updated);
                 setSettingsMutation({ loading: false, error: null, success: true });
                 setTimeout(() => setSettingsMutation(IDLE), 3000);
                 return true;
             } catch (err) {
-                setSettingsMutation({ loading: false, error: parseApiError(err), success: false });
+                const message = isOfflineError(err)
+                    ? "Cannot save organisation settings while offline. Reconnect and try again."
+                    : parseApiError(err);
+                setSettingsMutation({ loading: false, error: message, success: false });
                 return false;
             }
         },
@@ -104,6 +165,7 @@ export function useOrganization() {
         stats,
         loading,
         error,
+        isOffline,
         orgMutation,
         settingsMutation,
         updateOrg,

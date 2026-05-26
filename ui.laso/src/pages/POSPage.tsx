@@ -291,29 +291,7 @@ export default function POSPage() {
                         {user?.full_name} · {user?.role}
                     </p>
                 </div>
-                <div className="flex items-center gap-3">
-                    {isOffline && (
-                        <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-50 border border-amber-200 rounded-xl text-amber-700 text-sm font-medium">
-                            <WifiOff className="w-4 h-4" />
-                            Offline mode — sales will sync when back online
-                        </div>
-                    )}
-                </div>
             </div>
-
-            {/* Checkout error banner */}
-            {checkoutError && (
-                <div className="mx-6 mt-3 rounded-xl bg-red-50 border border-red-100 p-3 flex gap-2 items-start flex-shrink-0">
-                    <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
-                    <p className="text-sm text-red-600">{checkoutError}</p>
-                    <button
-                        onClick={() => setCheckoutError(null)}
-                        className="ml-auto text-ink-muted hover:text-ink flex-shrink-0"
-                    >
-                        ×
-                    </button>
-                </div>
-            )}
 
             {/* Two-panel layout */}
             <div className="flex flex-1 min-h-0 overflow-hidden">

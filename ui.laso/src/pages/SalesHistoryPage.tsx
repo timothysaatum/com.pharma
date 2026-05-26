@@ -1066,15 +1066,6 @@ export default function SalesHistoryPage() {
             {/* ── Main body ────────────────────────────────────── */}
             <div className="flex flex-1 min-h-0 overflow-hidden">
 
-                {/* Offline banner */}
-                {syncStatus === "offline" && (
-                    <div className="absolute left-0 right-0 mt-20 z-20 flex justify-center">
-                        <div className="mx-5 p-3 rounded-xl bg-amber-50 border border-amber-100 text-sm text-amber-800">
-                            You are offline — showing cached data. Some information may be unavailable until you reconnect.
-                        </div>
-                    </div>
-                )}
-
                 {/* Left: Table ───────────────────────────────── */}
                 <div className="flex flex-col flex-1 min-h-0 overflow-hidden">
 

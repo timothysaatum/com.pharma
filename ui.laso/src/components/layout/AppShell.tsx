@@ -8,6 +8,7 @@ import {
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
 import { offlineCache } from "@/lib/storage";
+import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 
 interface NavItem {
@@ -93,6 +94,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const initials = user?.full_name
         ? user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()
         : "??";
+
+    const { status } = useSyncStatus();
 
     return (
         <div className="flex h-screen bg-surface overflow-hidden">
@@ -207,7 +210,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </aside>
 
             {/* ── Page content ────────────────────────────────────── */}
-            <main className="flex-1 flex flex-col min-w-0 overflow-hidden">
+            <main className="relative flex-1 flex flex-col min-w-0 overflow-hidden">
+                {status === "offline" && (
+                    <div className="pointer-events-none absolute right-28 top-5 z-10 rounded-full border border-amber-200 bg-amber-50/90 px-2 py-1 text-xs font-semibold text-amber-700 shadow-sm backdrop-blur-sm">
+                        offline
+                    </div>
+                )}
                 {children}
             </main>
         </div>
