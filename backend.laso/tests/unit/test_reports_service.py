@@ -41,6 +41,7 @@ class TestReportsService:
         assert len(result) > 0
         assert result[0]["transaction_count"] > 0
         assert result[0]["net_revenue"] > 0
+        assert result[0]["total_items"] > 0
 
     async def test_daily_sales_summary_with_filters(self, db: AsyncSession, sales_data):
         """Test daily sales summary with branch and contract filters."""

@@ -392,7 +392,7 @@ function OperationalSettingsSection({ org, settingsMutation, updateSettings }: O
         setEnablePrescriptions((settings.enable_prescriptions as boolean) ?? false);
         setEnableBatchTracking((settings.enable_batch_tracking as boolean) ?? true);
         setReceiptFooter((settings.receipt_footer as string) ?? "");
-    }, [org?.id]);
+    }, [org, settings]);
 
     const reset = useCallback(() => {
         if (!org) return;
@@ -430,6 +430,17 @@ function OperationalSettingsSection({ org, settingsMutation, updateSettings }: O
         };
         await updateSettings(data);
     };
+
+    const handleToggleSetting = useCallback(
+        async (key: keyof OrganizationSettingsUpdate, value: boolean, setter: (v: boolean) => void) => {
+            setter(value);
+            const success = await updateSettings({ [key]: value } as OrganizationSettingsUpdate);
+            if (!success) {
+                setter(!value);
+            }
+        },
+        [updateSettings],
+    );
 
     if (!org) return null;
 
@@ -505,25 +516,25 @@ function OperationalSettingsSection({ org, settingsMutation, updateSettings }: O
                         label="Tax-inclusive pricing"
                         description="Prices shown to customers include tax"
                         value={taxInclusive}
-                        onChange={setTaxInclusive}
+                        onChange={(v) => handleToggleSetting("tax_inclusive", v, setTaxInclusive)}
                     />
                     <ToggleRow
                         label="Loyalty programme"
                         description="Award and redeem loyalty points at point of sale"
                         value={enableLoyalty}
-                        onChange={setEnableLoyalty}
+                        onChange={(v) => handleToggleSetting("enable_loyalty_program", v, setEnableLoyalty)}
                     />
                     <ToggleRow
                         label="Prescription management"
                         description="Enable prescription workflows and controlled substance tracking"
                         value={enablePrescriptions}
-                        onChange={setEnablePrescriptions}
+                        onChange={(v) => handleToggleSetting("enable_prescriptions", v, setEnablePrescriptions)}
                     />
                     <ToggleRow
                         label="Batch / expiry tracking"
                         description="Track stock by batch number and expiry date (FEFO)"
                         value={enableBatchTracking}
-                        onChange={setEnableBatchTracking}
+                        onChange={(v) => handleToggleSetting("enable_batch_tracking", v, setEnableBatchTracking)}
                     />
                 </div>
 

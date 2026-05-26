@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Any
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, and_
+from sqlalchemy import select, func, and_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -64,14 +64,18 @@ class ReportsService:
                 Sale.price_contract_id,
                 PriceContract.contract_name,
                 Sale.cashier_id,
-                User.user_name.label("cashier_name"),
+                User.full_name.label("cashier_name"),
                 func.count(Sale.id).label("transaction_count"),
                 func.sum(Sale.subtotal).label("gross_revenue"),
                 func.sum(Sale.discount_amount).label("total_discount"),
                 func.sum(Sale.tax_amount).label("total_tax"),
                 func.sum(Sale.total_amount).label("net_revenue"),
-                func.count(
-                    func.if_(Sale.status == "refunded", 1, None)
+                func.sum(SaleItem.quantity).label("total_items"),
+                func.sum(
+                    case(
+                        (Sale.status == "refunded", 1),
+                        else_=0,
+                    )
                 ).label("refund_count"),
             )
             .join(Branch, Sale.branch_id == Branch.id)
@@ -80,6 +84,7 @@ class ReportsService:
                 PriceContract,
                 Sale.price_contract_id == PriceContract.id,
             )
+            .join(SaleItem, SaleItem.sale_id == Sale.id)
             .where(
                 Sale.organization_id == organization_id,
                 func.date(Sale.created_at) >= start_date,
@@ -102,7 +107,7 @@ class ReportsService:
             Sale.price_contract_id,
             PriceContract.contract_name,
             Sale.cashier_id,
-            User.user_name,
+            User.full_name,
         ).order_by(func.date(Sale.created_at).desc())
 
         result = await db.execute(stmt)
@@ -122,6 +127,7 @@ class ReportsService:
                 "total_discount": float(row.total_discount or 0),
                 "total_tax": float(row.total_tax or 0),
                 "net_revenue": float(row.net_revenue or 0),
+                "total_items": int(row.total_items or 0),
                 "refund_count": row.refund_count,
             }
             for row in rows

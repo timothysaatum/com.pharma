@@ -441,7 +441,24 @@ class SyncService:
         conflicts: List[PushConflict] = []
         failed: List[PushResult]     = []
 
-        for record in request.records:
+        table_priority = {
+            "price_contracts": 0,
+            "customers": 1,
+            "drugs": 2,
+            "drug_categories": 3,
+            "branch_inventory": 4,
+            "drug_batches": 5,
+            "stock_adjustments": 6,
+            "purchase_orders": 7,
+            "sales": 8,
+        }
+
+        sorted_records = sorted(
+            request.records,
+            key=lambda record: table_priority.get(record.table_name, 99)
+        )
+
+        for record in sorted_records:
             try:
                 async with db.begin_nested():  # savepoint per record
                     push_result, conflict = await SyncService._handle_record(
@@ -585,6 +602,24 @@ class SyncService:
         safe_data.pop("total_discount_amount", None)
         safe_data.pop("contract_discount_amount", None)
         safe_data.pop("additional_discount_amount", None)
+
+        # Ensure optional foreign keys are valid before insert.
+        price_contract_id = safe_data.get("price_contract_id")
+        if price_contract_id is not None:
+            result = await db.execute(
+                select(PriceContract.id).where(
+                    PriceContract.id == price_contract_id,
+                    PriceContract.organization_id == organization_id,
+                )
+            )
+            contract_exists = result.scalar_one_or_none()
+            if contract_exists is None:
+                logger.warning(
+                    "Missing price_contract %s for offline sale %s; clearing price_contract_id",
+                    price_contract_id,
+                    record.local_id,
+                )
+                safe_data["price_contract_id"] = None
 
         sale = Sale(**safe_data)
         sale.sync_status = "synced"
