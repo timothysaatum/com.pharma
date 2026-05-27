@@ -19,7 +19,7 @@ import { useState, useEffect, useCallback } from "react";
 import {
     Building2, Phone, Mail, MapPin, RefreshCw,
     AlertTriangle, CheckCircle2, Save, Globe,
-    DollarSign, Users, Pill, ShoppingBag,
+    DollarSign, Users, ShoppingBag,
     TrendingUp, AlertCircle,
 } from "lucide-react";
 import { isBackendReachable } from "@/api/client";

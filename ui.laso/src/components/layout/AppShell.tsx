@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-    Pill, ShoppingCart, Users, BarChart2,
+    ShoppingCart, Users, BarChart2,
     LogOut, Building2, Menu, X,
     Receipt, Settings, UserCog, Cog,
 } from "lucide-react";

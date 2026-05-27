@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-    Eye, EyeOff, Stethoscope, AlertTriangle,
+    Eye, EyeOff, AlertTriangle,
     Lock, ArrowRight, ShieldAlert,
 } from "lucide-react";
 import { useLogin } from "@/hooks/useLogin";
