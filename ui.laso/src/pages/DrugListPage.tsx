@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Search, Plus, Filter, ChevronLeft, ChevronRight,
-    AlertTriangle, Package, Edit2, ToggleLeft,
+    Pill, AlertTriangle, Package, Edit2, ToggleLeft,
     ToggleRight, RefreshCw, X, FolderTree,
 } from "lucide-react";
 import { drugApi } from "@/api/drugs";

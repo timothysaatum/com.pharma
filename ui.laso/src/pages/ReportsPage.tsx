@@ -11,6 +11,7 @@ import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
 import { isOfflineError } from '@/api/client';
 import { localRead } from '@/lib/localRead';
+import { offlineCache } from '@/lib/storage';
 
 interface FilterState {
   startDate: string;
@@ -99,8 +100,6 @@ export default function ReportsPage() {
                 0;
               let branchName: string | null = null;
               if (s.branch_id) {
-                // lazy lookup branch name from cache
-                const { offlineCache } = await import('@/lib/storage');
                 branchName = await offlineCache.getBranchName(s.branch_id);
               }
 
