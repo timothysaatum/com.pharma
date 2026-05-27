@@ -288,11 +288,18 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
             self.tax_amount = 0
             self.total_amount = 0
             return
-        
+
         self.subtotal = sum(item.subtotal for item in self.items)
         self.discount_amount = sum(item.discount_amount for item in self.items)
         self.tax_amount = sum(item.tax_amount for item in self.items)
         self.total_amount = sum(item.total_price for item in self.items)
+
+    @property
+    def items_count(self) -> int:
+        """Count the total quantity across all sale items."""
+        if not self.items:
+            return 0
+        return sum(item.quantity for item in self.items)
     
     # ==================== TABLE CONSTRAINTS ====================
     

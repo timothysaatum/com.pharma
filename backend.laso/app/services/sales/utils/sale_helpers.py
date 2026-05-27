@@ -200,11 +200,12 @@ async def build_sale_with_details(
         k: v
         for k, v in sale.__dict__.items()
         if not k.startswith("_")
-        and k not in ("items", "items_count")  # exclude ORM relationship + computed_field name
+        and k != "items"
     }
     return SaleWithDetails(
         **sale_dict,
         items=items_with_details,
+        items_count=sum(item.quantity for item in items_with_details),
         branch_name=branch.name,
         branch_address=branch.address,
         organization_name=organization.name,

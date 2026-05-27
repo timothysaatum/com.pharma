@@ -427,6 +427,7 @@ class SyncEngine {
                 "refund_amount", "refunded_at",
                 // receipt
                 "receipt_printed", "receipt_emailed",
+                "items_count",
                 // sync
                 "sync_status", "sync_version", "synced_at", "updated_at", "created_at",
             ]);

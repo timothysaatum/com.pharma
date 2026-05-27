@@ -223,6 +223,14 @@ class PushResult(BaseSchema):
     server_id: Optional[str] = None
     success: bool
     error: Optional[str] = None
+    fk_fixes: Optional[List[str]] = Field(
+        default=None,
+        description="FK fields that were cleared/fixed during sync (e.g. ['price_contract_id', 'customer_id'])"
+    )
+    recovery_applied: Optional[bool] = Field(
+        default=False,
+        description="True if FK constraint violation was detected and recovered from"
+    )
 
 
 class PushResponse(BaseSchema):

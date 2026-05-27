@@ -55,6 +55,7 @@ import uuid
 from sqlalchemy import and_, or_, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from dateutil.parser import isoparse
 
 from app.db.session import AsyncSessionLocal
@@ -63,6 +64,7 @@ from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, St
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pricing.pricing_model import PriceContract
 from app.models.sales.sales_model import Sale, PurchaseOrder
+from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
 from app.schemas.inventory_schemas import BranchInventoryResponse, DrugBatchResponse
@@ -232,6 +234,139 @@ def _parse_datetime_fields(data: Dict[str, Any]) -> None:
                     pass
 
 
+async def _validate_and_fix_sale_fks(
+    db: AsyncSession,
+    safe_data: Dict[str, Any],
+    organization_id: uuid.UUID,
+    record_id: str,
+    branch_id: uuid.UUID,
+) -> List[str]:
+    """
+    Validate all foreign keys for a sale record and clear/fix invalid ones.
+    
+    Args:
+        db: AsyncSession for DB queries
+        safe_data: Sale data dict (will be modified in-place)
+        organization_id: Organization ID for FK scope
+        record_id: Record ID for logging
+        branch_id: Branch ID for context
+    
+    Returns:
+        List of fixed/cleared FK fields for logging
+    
+    This prevents foreign key constraint violations by:
+    1. Validating optional FKs and clearing invalid ones
+    2. Validating required FKs and logging errors
+    3. Ensuring data consistency before insert
+    """
+    fixes: List[str] = []
+    
+    # ============================================================================
+    # OPTIONAL FOREIGN KEYS — clear if referenced record missing
+    # ============================================================================
+    
+    # price_contract_id (nullable, ondelete='SET NULL')
+    price_contract_id = safe_data.get("price_contract_id")
+    if price_contract_id is not None:
+        result = await db.execute(
+            select(PriceContract.id).where(
+                PriceContract.id == price_contract_id,
+                PriceContract.organization_id == organization_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            logger.warning(
+                "Sync: Missing price_contract %s for sale %s in org %s; clearing price_contract_id",
+                price_contract_id, record_id, organization_id,
+            )
+            safe_data["price_contract_id"] = None
+            fixes.append(f"price_contract_id={price_contract_id}")
+
+    # customer_id (nullable, ondelete='SET NULL')
+    customer_id = safe_data.get("customer_id")
+    if customer_id is not None:
+        result = await db.execute(
+            select(Customer.id).where(
+                Customer.id == customer_id,
+                Customer.organization_id == organization_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            logger.warning(
+                "Sync: Missing customer %s for sale %s in org %s; clearing customer_id",
+                customer_id, record_id, organization_id,
+            )
+            safe_data["customer_id"] = None
+            fixes.append(f"customer_id={customer_id}")
+
+    # prescription_id (nullable, ondelete='SET NULL')
+    prescription_id = safe_data.get("prescription_id")
+    if prescription_id is not None:
+        # Prescriptions might not be synced; treat as optional
+        # In production, you may want to validate this more strictly
+        logger.debug(
+            "Sync: prescription_id=%s for sale %s (not validated)",
+            prescription_id, record_id,
+        )
+
+    # pharmacist_id (nullable, ondelete='RESTRICT')
+    pharmacist_id = safe_data.get("pharmacist_id")
+    if pharmacist_id is not None:
+        result = await db.execute(
+            select(User.id).where(
+                User.id == pharmacist_id,
+                User.organization_id == organization_id,
+            )
+        )
+        if result.scalar_one_or_none() is None:
+            logger.warning(
+                "Sync: Missing pharmacist user %s for sale %s in org %s; clearing pharmacist_id",
+                pharmacist_id, record_id, organization_id,
+            )
+            safe_data["pharmacist_id"] = None
+            fixes.append(f"pharmacist_id={pharmacist_id}")
+
+    # ============================================================================
+    # REQUIRED FOREIGN KEYS — must exist or sync fails
+    # ============================================================================
+    
+    # cashier_id (nullable=False, ondelete='RESTRICT')
+    cashier_id = safe_data.get("cashier_id")
+    if cashier_id is None:
+        logger.error(
+            "Sync: Missing required cashier_id for sale %s in org %s; sync failed",
+            record_id, organization_id,
+        )
+        raise ValueError(f"Sale {record_id} missing required cashier_id")
+    
+    result = await db.execute(
+        select(User.id).where(
+            User.id == cashier_id,
+            User.organization_id == organization_id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        logger.error(
+            "Sync: Cashier user %s not found in org %s for sale %s; sync failed. "
+            "This usually means the user was deleted or sync is out of order.",
+            cashier_id, organization_id, record_id,
+        )
+        raise ValueError(
+            f"Cashier {cashier_id} not found in organization {organization_id}. "
+            "User may have been deleted or sync order is incorrect."
+        )
+    
+    # branch_id (always set by sync service, validates just to be safe)
+    if str(safe_data.get("branch_id")) != str(branch_id):
+        logger.error(
+            "Sync: branch_id mismatch for sale %s: %s != %s",
+            record_id, safe_data.get("branch_id"), branch_id,
+        )
+        raise ValueError(f"Sale {record_id} has mismatched branch_id")
+    
+    return fixes
+
+
 class SyncService:
 
     # =========================================================================
@@ -375,8 +510,19 @@ class SyncService:
                 # to push them back, causing a NOT NULL constraint on discount_amount
                 # and an infinite sync-error loop.
                 Sale.sync_status == "synced",
+                options=[selectinload(Sale.items)],
             )
-            result.sales = [SaleResponse.model_validate(r) for r in rows]
+            result.sales = []
+            for row in rows:
+                sale_data = {
+                    k: v
+                    for k, v in row.__dict__.items()
+                    if not k.startswith("_") and k != "items"
+                }
+                sale_data["items_count"] = sum(
+                    int(item.quantity or 0) for item in row.items
+                ) if row.items else 0
+                result.sales.append(SaleResponse.model_validate(sale_data))
             total += len(rows)
 
         if "purchase_orders" in tables:
@@ -401,6 +547,7 @@ class SyncService:
         model: Any,
         since: Optional[datetime],
         *filters,
+        options: Optional[list] = None,
     ) -> List[Any]:
         """
         Fetch all rows matching ``filters``, optionally restricted to those
@@ -414,6 +561,8 @@ class SyncService:
             conditions.append(model.updated_at > since)
 
         stmt   = select(model).where(and_(*conditions))
+        if options:
+            stmt = stmt.options(*options)
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
@@ -562,6 +711,12 @@ class SyncService:
         as ``total_discount_amount`` (via validation_alias).  The client
         therefore pushes ``total_discount_amount``; we remap it back to the DB
         column name before constructing the Sale model.
+        
+        Foreign Key Validation:
+        - Comprehensive FK validation prevents constraint violations
+        - Optional FKs (customer, contract, pharmacist) are cleared if missing
+        - Required FKs (cashier, branch) must exist or sync fails with error
+        - All fixes/validations are logged for audit trail
         """
         existing = (await db.execute(
             select(Sale).where(
@@ -603,34 +758,140 @@ class SyncService:
         safe_data.pop("contract_discount_amount", None)
         safe_data.pop("additional_discount_amount", None)
 
-        # Ensure optional foreign keys are valid before insert.
-        price_contract_id = safe_data.get("price_contract_id")
-        if price_contract_id is not None:
-            result = await db.execute(
-                select(PriceContract.id).where(
-                    PriceContract.id == price_contract_id,
-                    PriceContract.organization_id == organization_id,
-                )
+        # ======================================================================
+        # COMPREHENSIVE FOREIGN KEY VALIDATION
+        # ======================================================================
+        fk_fixes: List[str] = []
+        try:
+            fixes = await _validate_and_fix_sale_fks(
+                db, safe_data, organization_id, record.local_id, branch_id
             )
-            contract_exists = result.scalar_one_or_none()
-            if contract_exists is None:
-                logger.warning(
-                    "Missing price_contract %s for offline sale %s; clearing price_contract_id",
-                    price_contract_id,
-                    record.local_id,
+            fk_fixes.extend(fixes)
+            if fk_fixes:
+                logger.info(
+                    "Sync: Sale %s had FK fixes: %s",
+                    record.local_id, ", ".join(fk_fixes),
                 )
-                safe_data["price_contract_id"] = None
+        except ValueError as exc:
+            logger.error(
+                "Sync: FK validation failed for sale %s: %s",
+                record.local_id, exc,
+            )
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=f"Foreign key validation failed: {exc}",
+                fk_fixes=fk_fixes if fk_fixes else None,
+            ), None
 
-        sale = Sale(**safe_data)
-        sale.sync_status = "synced"
-        db.add(sale)
-        await db.flush()
+        try:
+            sale = Sale(**safe_data)
+            sale.sync_status = "synced"
+            db.add(sale)
+            await db.flush()
+        except Exception as exc:
+            # If we still get a FK constraint violation after validation,
+            # it means a referenced record was deleted between validation and flush.
+            # Parse the error to identify which FK constraint failed, then clear it.
+            error_str = str(exc).lower()
+            if "foreign key" in error_str or "fk" in error_str or "constraint" in error_str:
+                logger.warning(
+                    "Sync: FK constraint violation after validation for sale %s; "
+                    "attempting recovery: %s",
+                    record.local_id, exc,
+                )
+                
+                # Remove the sale from the session to start fresh
+                db.expunge(sale)
+                
+                # Map constraint names to FK fields
+                constraint_to_field = {
+                    "sales_price_contract_id_fkey": ["price_contract_id", "contract_name", "contract_discount_percentage"],
+                    "sales_customer_id_fkey": ["customer_id"],
+                    "sales_pharmacist_id_fkey": ["pharmacist_id"],
+                    "sales_cashier_id_fkey": ["cashier_id"],
+                    "sales_branch_id_fkey": ["branch_id"],
+                }
+                
+                # Try to identify which constraint failed and clear it
+                cleared_fields = []
+                for constraint_name, fields_to_clear in constraint_to_field.items():
+                    if constraint_name in error_str:
+                        for field in fields_to_clear:
+                            safe_data[field] = None
+                            cleared_fields.append(field)
+                        break
+                
+                # If we couldn't identify the constraint, clear all optional FKs
+                if not cleared_fields:
+                    optional_fk_fields = [
+                        "price_contract_id", "contract_name", "contract_discount_percentage",
+                        "customer_id", "pharmacist_id", "prescription_id"
+                    ]
+                    for field in optional_fk_fields:
+                        safe_data[field] = None
+                        cleared_fields.append(field)
+                
+                # Track recovery for response
+                fk_fixes.extend(cleared_fields)
+                
+                # Try to flush again with cleared FKs
+                try:
+                    sale = Sale(**safe_data)
+                    sale.sync_status = "synced"
+                    db.add(sale)
+                    await db.flush()
+                    
+                    logger.info(
+                        "Sync: Recovered from FK violation for sale %s by clearing: %s",
+                        record.local_id, ", ".join(cleared_fields),
+                    )
+                    return PushResult(
+                        local_id=record.local_id,
+                        table_name="sales",
+                        server_id=str(sale.id),
+                        success=True,
+                        fk_fixes=fk_fixes if fk_fixes else None,
+                        recovery_applied=True,
+                    ), None
+                except Exception as recovery_exc:
+                    # Recovery failed; return detailed error
+                    logger.error(
+                        "Sync: Failed to recover from FK constraint violation for sale %s; "
+                        "cleared fields %s but error persists: %s",
+                        record.local_id, cleared_fields, recovery_exc,
+                        exc_info=True,
+                    )
+                    return PushResult(
+                        local_id=record.local_id,
+                        table_name="sales",
+                        success=False,
+                        error=f"FK constraint violation (non-recoverable): {recovery_exc}",
+                        fk_fixes=fk_fixes if fk_fixes else None,
+                        recovery_applied=True,
+                    ), None
+            else:
+                # Not a FK error; return failure
+                logger.error(
+                    "Sync: Failed to flush sale %s (non-FK error): %s",
+                    record.local_id, exc,
+                    exc_info=True,
+                )
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error=f"Database error: {exc}",
+                    fk_fixes=fk_fixes if fk_fixes else None,
+                ), None
 
         return PushResult(
             local_id=record.local_id,
             table_name="sales",
             server_id=str(sale.id),
             success=True,
+            fk_fixes=fk_fixes if fk_fixes else None,
         ), None
 
     @staticmethod

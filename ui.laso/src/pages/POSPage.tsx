@@ -29,7 +29,6 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { AnimatePresence } from "framer-motion";
-import { WifiOff, AlertTriangle } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
@@ -77,7 +76,7 @@ export default function POSPage() {
 
     // ── Checkout ───────────────────────────────────────────────────────────────
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [checkoutError, setCheckoutError] = useState<string | null>(null);
+    const [, setCheckoutError] = useState<string | null>(null);
     const [successResult, setSuccessResult] = useState<ProcessSaleResponse | null>(null);
 
     const handleCheckout = useCallback(async () => {

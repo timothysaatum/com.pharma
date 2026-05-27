@@ -45,6 +45,7 @@ async function runMigrations(db: Database): Promise<void> {
   if (user_version < 6) await migrate_v6(db);
   if (user_version < 7) await migrate_v7(db);
   if (user_version < 8) await migrate_v8(db);
+  if (user_version < 9) await migrate_v9(db);
   await ensureBranchInventorySchema(db);
 }
 
@@ -274,6 +275,7 @@ async function migrate_v1(db: Database): Promise<void> {
       -- Local-only: sale items stored as JSON for offline receipt display.
       -- Not returned by the server pull — written only by localWrite.sale.
       items_json                    TEXT DEFAULT '[]',
+      items_count                   INTEGER NOT NULL DEFAULT 0,
 
       -- Sync
       sync_status                   TEXT NOT NULL DEFAULT 'pending',
@@ -513,6 +515,15 @@ async function migrate_v8(db: Database): Promise<void> {
   `);
 
   await db.execute("PRAGMA user_version = 8");
+}
+
+async function migrate_v9(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE sales ADD COLUMN items_count INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    // Already exists or unsupported; safe to ignore.
+  }
+  await db.execute("PRAGMA user_version = 9");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
@@ -873,11 +884,11 @@ export async function cacheSales(items: Sale[]): Promise<void> {
          prescription_number, prescriber_name, cashier_id, pharmacist_id,
          insurance_claim_number, patient_copay_amount, insurance_covered_amount,
          insurance_verified, insurance_verified_at, insurance_verified_by,
-         notes, status, receipt_printed, receipt_emailed, items_json,
+         notes, status, receipt_printed, receipt_emailed, items_json, items_count,
          sync_status, sync_version, synced_at, updated_at, created_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
                $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27,
-               $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39)`,
+               $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)`,
       [
         item.id,
         item.organization_id,
@@ -913,6 +924,7 @@ export async function cacheSales(items: Sale[]): Promise<void> {
         item.receipt_printed ? 1 : 0,
         item.receipt_emailed ? 1 : 0,
         JSON.stringify(item.items ?? []),
+        item.items_count ?? (item.items ? item.items.reduce((sum, item) => sum + (item.quantity ?? 0), 0) : 0),
         "synced",
         item.sync_version ?? 1,
         item.synced_at ?? null,

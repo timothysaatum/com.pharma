@@ -178,7 +178,7 @@ async def list_sales(
     ```
     """
     from sqlalchemy import select, and_
-    from app.models.sales.sales_model import Sale
+    from sqlalchemy.orm import selectinload
     
     filters = [Sale.organization_id == organization_id]
     
@@ -213,6 +213,7 @@ async def list_sales(
 
     query = (
         select(Sale)
+        .options(selectinload(Sale.items))
         .where(and_(*filters))
         .order_by(Sale.created_at.desc())
     )

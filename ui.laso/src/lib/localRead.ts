@@ -163,7 +163,7 @@ function toSale(row: Record<string, unknown>): Sale {
     status: String(row.status) as SaleStatus,
     receipt_printed: toBoolean(row.receipt_printed),
     receipt_emailed: toBoolean(row.receipt_emailed),
-    items_count: 0,
+    items_count: row.items_count === null || row.items_count === undefined ? 0 : toNumber(row.items_count),
     created_at: String(row.created_at),
     updated_at: String(row.updated_at),
     sync_status: String(row.sync_status) as any,
@@ -174,6 +174,8 @@ function toSale(row: Record<string, unknown>): Sale {
 
 function toSaleWithDetails(row: Record<string, unknown>): SaleWithDetails {
   const items = parseJsonArray<SaleItem>(row.items_json);
+  const jsonItemsCount = items.reduce((sum, item) => sum + (item?.quantity ?? 0), 0);
+  const rowItemsCount = row.items_count === null || row.items_count === undefined ? undefined : toNumber(row.items_count);
   return {
     ...toSale(row),
     contract_discount_amount: row.discount_amount === null ? 0 : toNumber(row.discount_amount),
@@ -194,6 +196,7 @@ function toSaleWithDetails(row: Record<string, unknown>): SaleWithDetails {
     organization_name: "",
     organization_tax_id: null,
     items,
+    items_count: rowItemsCount ?? jsonItemsCount,
   };
 }
 

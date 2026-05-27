@@ -9,6 +9,8 @@ import { useQuery } from '@tanstack/react-query';
 import { BarChart2, Download, RefreshCw, AlertCircle } from 'lucide-react';
 import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
+import { isOfflineError } from '@/api/client';
+import { localRead } from '@/lib/localRead';
 
 interface FilterState {
   startDate: string;
@@ -66,13 +68,87 @@ export default function ReportsPage() {
   // Daily Sales Query
   const { data: dailySalesData, isLoading: dailySalesLoading, refetch: refetchDailySales } = useQuery<DailySalesRow[]>({
     queryKey: ['reports', 'daily-sales', filters],
-    queryFn: () => reportsApi.getDailySalesSummary({
-      startDate: filters.startDate,
-      endDate: filters.endDate,
-      branchId: filters.branchId,
-      contractId: filters.contractId,
-      cashierId: filters.cashierId,
-    }),
+    queryFn: async () => {
+      try {
+        return await reportsApi.getDailySalesSummary({
+          startDate: filters.startDate,
+          endDate: filters.endDate,
+          branchId: filters.branchId,
+          contractId: filters.contractId,
+          cashierId: filters.cashierId,
+        });
+      } catch (err) {
+        // If offline, fall back to local DB aggregation
+        if (isOfflineError(err)) {
+          // fetch all sales from local DB within date range
+          const pageSize = 1000;
+          const local = await localRead.searchSales({
+            start_date: filters.startDate,
+            end_date: filters.endDate,
+            branch_id: filters.branchId,
+          }, 1, pageSize);
+
+          // Enrich local sales with items count and branch name
+          const rows: DailySalesRow[] = [];
+          for (const s of local.items) {
+            try {
+              const details = await localRead.getSaleById(s.id);
+              const itemsCount =
+                details?.items_count ??
+                details?.items?.reduce((sum, item) => sum + (item?.quantity ?? 0), 0) ??
+                0;
+              let branchName: string | null = null;
+              if (s.branch_id) {
+                // lazy lookup branch name from cache
+                const { offlineCache } = await import('@/lib/storage');
+                branchName = await offlineCache.getBranchName(s.branch_id);
+              }
+
+              rows.push({
+                sale_date: (s.created_at || '').slice(0, 10),
+                branch_id: s.branch_id ?? null,
+                branch_name: branchName,
+                price_contract_id: s.price_contract_id ?? null,
+                contract_name: s.contract_name ?? null,
+                cashier_id: s.cashier_id ?? null,
+                cashier_name: null,
+                transaction_count: 1,
+                gross_revenue: s.total_amount ?? 0,
+                total_discount: s.discount_amount ?? 0,
+                total_tax: s.tax_amount ?? 0,
+                net_revenue: s.total_amount ?? 0,
+                total_items: itemsCount,
+                refund_count: 0,
+              });
+            } catch (e) {
+              // skip problematic rows
+            }
+          }
+
+          // aggregate by date
+          const grouped: Record<string, DailySalesRow> = {};
+          for (const r of rows) {
+            const key = r.sale_date;
+            if (!grouped[key]) {
+              grouped[key] = { ...r };
+            } else {
+              grouped[key].transaction_count += r.transaction_count;
+              grouped[key].gross_revenue += r.gross_revenue;
+              grouped[key].total_discount += r.total_discount;
+              grouped[key].total_tax += r.total_tax;
+              grouped[key].net_revenue += r.net_revenue;
+              grouped[key].total_items += r.total_items;
+              grouped[key].refund_count += r.refund_count;
+            }
+          }
+
+          return Object.keys(grouped).sort().map((k) => grouped[k]);
+        }
+
+        // rethrow other errors
+        throw err;
+      }
+    },
     enabled: activeTab === 'daily-sales',
   });
 

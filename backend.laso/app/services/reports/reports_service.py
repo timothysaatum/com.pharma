@@ -65,12 +65,12 @@ class ReportsService:
                 PriceContract.contract_name,
                 Sale.cashier_id,
                 User.full_name.label("cashier_name"),
-                func.count(Sale.id).label("transaction_count"),
+                func.count(func.distinct(Sale.id)).label("transaction_count"),
                 func.sum(Sale.subtotal).label("gross_revenue"),
                 func.sum(Sale.discount_amount).label("total_discount"),
                 func.sum(Sale.tax_amount).label("total_tax"),
                 func.sum(Sale.total_amount).label("net_revenue"),
-                func.sum(SaleItem.quantity).label("total_items"),
+                func.coalesce(func.sum(SaleItem.quantity), 0).label("total_items"),
                 func.sum(
                     case(
                         (Sale.status == "refunded", 1),
@@ -84,7 +84,10 @@ class ReportsService:
                 PriceContract,
                 Sale.price_contract_id == PriceContract.id,
             )
-            .join(SaleItem, SaleItem.sale_id == Sale.id)
+            # Use an outerjoin to SaleItem so sales without explicit item rows
+            # (edge cases) are still included. We aggregate items via SUM
+            # and protect against NULL using COALESCE above.
+            .outerjoin(SaleItem, SaleItem.sale_id == Sale.id)
             .where(
                 Sale.organization_id == organization_id,
                 func.date(Sale.created_at) >= start_date,

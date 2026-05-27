@@ -548,12 +548,10 @@ class SaleResponse(SaleBase, TimestampSchema, SyncSchema):
         """Amount after all deductions"""
         return self.total_amount - (self.insurance_covered_amount or Decimal('0.00'))
 
-    @computed_field  # type: ignore[misc]
-    @property
-    def items_count(self) -> int:
-        """Always 0 for list responses — items are not loaded by the list endpoint.
-        Overridden by SaleWithDetails which has the actual items list."""
-        return 0
+    items_count: int = Field(
+        default=0,
+        description="Total number of items in the sale"
+    )
 
     model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
@@ -579,11 +577,11 @@ class SaleWithDetails(SaleResponse):
     organization_name: str
     organization_tax_id: Optional[str] = None
 
-    @computed_field  # type: ignore[misc]
-    @property
-    def items_count(self) -> int:
-        """Derived from items list — never stored, never triggers validate_assignment."""
-        return len(self.items)
+    @model_validator(mode='after')
+    def populate_items_count(self) -> 'SaleWithDetails':
+        if self.items_count == 0 and self.items:
+            self.items_count = len(self.items)
+        return self
 
 
 class ProcessSaleResponse(BaseSchema):

@@ -7,7 +7,9 @@ import pytest
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 import uuid
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.sales.sales_model import Sale, SaleItem
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
@@ -17,7 +19,7 @@ from app.models.customer.customer_model import Customer
 from app.models.user.user_model import User
 from app.models.precriptions.prescription_model import Prescription
 from app.models.pricing.pricing_model import PriceContract
-from app.schemas.sales_schemas import SaleCreate, SaleItemCreate, RefundSaleRequest
+from app.schemas.sales_schemas import SaleCreate, SaleItemCreate, RefundSaleRequest, SaleResponse
 from app.services.sales.sales_service import SalesService
 
 
@@ -78,6 +80,55 @@ class TestProcessSale:
         assert response.sale.status == "completed"
         assert response.inventory_updated == 1
         assert response.sale.total_amount == Decimal("250.00")
+
+    async def test_sale_response_items_count_from_loaded_items(self, db: AsyncSession, setup_test_data):
+        """SaleResponse should populate items_count when sale items are present."""
+        org, branch, user, drugs, customer = setup_test_data
+
+        sale = Sale(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number="SALE_COUNT_TEST",
+            customer_id=customer.id,
+            cashier_id=user.id,
+            subtotal=Decimal("150.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("150.00"),
+            payment_method="cash",
+            payment_status="completed",
+            amount_paid=Decimal("150.00"),
+            status="completed",
+        )
+
+        sale_item = SaleItem(
+            id=uuid.uuid4(),
+            sale_id=sale.id,
+            drug_id=drugs[0].id,
+            quantity=3,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("150.00"),
+            discount_percentage=Decimal("0.00"),
+            discount_amount=Decimal("0.00"),
+            tax_rate=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_price=Decimal("150.00"),
+        )
+
+        db.add_all([sale, sale_item])
+        await db.commit()
+
+        loaded_sale = await db.execute(
+            select(Sale)
+            .options(selectinload(Sale.items))
+            .where(Sale.id == sale.id)
+        )
+        loaded_sale = loaded_sale.scalar_one()
+
+        response = SaleResponse.model_validate(loaded_sale)
+
+        assert response.items_count == 3
 
     async def test_process_sale_insufficient_stock(self, db: AsyncSession, setup_test_data):
         """Test sale fails when insufficient stock available."""

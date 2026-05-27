@@ -855,7 +855,7 @@ export default function SalesHistoryPage() {
 
     // ── Selected sale (detail panel) ──────────────────────────
     const [selectedId, setSelectedId] = useState<string | null>(null);
-    const { status: syncStatus } = useSyncStatus();
+    useSyncStatus();
 
     const abortRef = useRef<AbortController | null>(null);
 

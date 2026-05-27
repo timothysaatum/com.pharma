@@ -61,6 +61,7 @@ const SALE_COLUMNS = new Set([
     "receipt_printed",
     "receipt_emailed",
     "items_json",
+    "items_count",
     "sync_status",
     "sync_version",
     "synced_at",
@@ -145,6 +146,10 @@ export const writeLocal = {
                 (saleData as Record<string, unknown>).total_discount_amount ??
                 0,
             items_json: JSON.stringify(items ?? []),
+            items_count: (items ?? []).reduce(
+                (sum, item) => sum + (item?.quantity ?? 0),
+                0
+            ),
         };
         const payload = pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
         await upsertAndEnqueue("sales", payload as Record<string, unknown>, "create");
