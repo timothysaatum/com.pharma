@@ -45,6 +45,7 @@ interface ContractSearchParams {
   contract_type?: string;
   status?: string;
   is_active?: boolean;
+  organization_id?: string;
 }
 
 function sqlLike(value: string): string {
@@ -447,6 +448,10 @@ export const localRead = {
         LOWER(contract_code) LIKE $${values.length}
       )`);
     }
+    if (params.organization_id) {
+      values.push(params.organization_id);
+      qualifiers.push(`organization_id = $${values.length}`);
+    }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
     const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM price_contracts ${where}`, values);
@@ -652,11 +657,11 @@ export const localRead = {
     return rows.map(toSupplierFromPurchaseOrders);
   },
 
-  async getAvailableContractsForPos(branchId: string): Promise<AvailableContract[]> {
+  async getAvailableContractsForPos(branchId: string, organizationId?: string): Promise<AvailableContract[]> {
     const db = await getDb();
     const today = new Date().toISOString().slice(0, 10);
-    const rows = await db.select<PriceContract[]>(
-      `SELECT * FROM price_contracts
+    const values: unknown[] = [today, `%"${branchId}"%`];
+    let query = `SELECT * FROM price_contracts
        WHERE is_deleted = 0
          AND is_active = 1
          AND status = 'active'
@@ -665,10 +670,16 @@ export const localRead = {
          AND (
            applies_to_all_branches = 1
            OR applicable_branch_ids LIKE $2
-         )
-       ORDER BY is_default_contract DESC, contract_name ASC`,
-      [today, `%"${branchId}"%`]
-    );
+         )`;
+
+    if (organizationId) {
+      values.push(organizationId);
+      query += ` AND organization_id = $${values.length}`;
+    }
+
+    query += ` ORDER BY is_default_contract DESC, contract_name ASC`;
+
+    const rows = await db.select<PriceContract[]>(query, values);
 
     return rows.map((row) => ({
       id: row.id,

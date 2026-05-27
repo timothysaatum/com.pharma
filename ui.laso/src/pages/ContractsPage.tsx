@@ -131,6 +131,7 @@ export default function ContractsPage() {
                             search: debouncedSearch || undefined,
                             contract_type: filterType || undefined,
                             status: filterStatus || undefined,
+                            organization_id: user?.organization_id,
                         },
                         page,
                         20

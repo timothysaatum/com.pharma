@@ -63,7 +63,7 @@ export default function POSPage() {
             setContracts(data);
         } catch {
             // Non-blocking — cashier can still proceed with empty list
-            const fallback = await localRead.getAvailableContractsForPos(activeBranchId);
+            const fallback = await localRead.getAvailableContractsForPos(activeBranchId, user?.organization_id);
             setContracts(fallback);
         } finally {
             setContractsLoading(false);
