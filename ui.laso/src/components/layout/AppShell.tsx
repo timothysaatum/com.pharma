@@ -107,7 +107,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {/* Header */}
                 <div className="flex items-center h-14 px-3 border-b border-white/10 gap-2">
                     <div className="w-7 h-7 rounded-lg bg-brand-500 flex items-center justify-center flex-shrink-0">
-                        <Pill className="w-4 h-4 text-white" />
+                        <img
+                            src="/logo.png"
+                            alt="Laso logo"
+                            className="w-full h-full rounded-lg object-contain"
+                        />
                     </div>
                     {!collapsed && (
                         <span className="font-display font-bold text-sm flex-1 truncate">

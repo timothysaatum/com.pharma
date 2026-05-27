@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
     Building2, MapPin, ArrowRight, LogOut,
-    Stethoscope, AlertCircle, CheckCircle2,
+    AlertCircle, CheckCircle2,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
@@ -118,9 +118,11 @@ function AddBranchPanel() {
             {/* Header */}
             <div className="text-center mb-8">
                 <div className="inline-flex items-center gap-2.5 mb-5">
-                    <div className="w-10 h-10 rounded-2xl bg-brand-600 flex items-center justify-center shadow-sm">
-                        <Stethoscope className="w-5 h-5 text-white" />
-                    </div>
+                    <img
+                        src="/logo.png"
+                        alt="Laso logo"
+                        className="w-10 h-10 rounded-2xl bg-white/10 p-2 object-contain shadow-sm"
+                    />
                     <span className="font-display text-2xl font-bold text-ink tracking-tight">
                         Laso
                     </span>
@@ -250,9 +252,11 @@ function OnboardRedirectPanel() {
             className="w-full max-w-md mx-auto text-center"
         >
             <div className="inline-flex items-center gap-2.5 mb-6">
-                <div className="w-10 h-10 rounded-2xl bg-brand-600 flex items-center justify-center shadow-sm">
-                    <Stethoscope className="w-5 h-5 text-white" />
-                </div>
+                <img
+                    src="/logo.png"
+                    alt="Laso logo"
+                    className="w-10 h-10 rounded-2xl bg-white/10 p-2 object-contain shadow-sm"
+                />
                 <span className="font-display text-2xl font-bold text-ink tracking-tight">
                     Laso
                 </span>
