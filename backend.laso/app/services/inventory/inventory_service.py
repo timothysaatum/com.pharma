@@ -293,6 +293,8 @@ class InventoryService:
                     sync_status=inv.sync_status,
                     drug_name=drug.name,
                     drug_sku=drug.sku,
+                    drug_type=drug.drug_type or "otc",
+                    requires_prescription=drug.requires_prescription,
                     catalog_unit_price=catalog_unit_price,
                     # Backwards-compatible POS price field. Older clients use
                     # drug_unit_price directly, so expose the branch-effective

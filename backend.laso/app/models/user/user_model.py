@@ -12,11 +12,23 @@ from app.models.core.mixins import pwd_context
 from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime, timezone
 import uuid
+from enum import Enum
 
 from app.models.core.mixins import TimestampMixin, SyncTrackingMixin, SoftDeleteMixin
 if TYPE_CHECKING:
     from app.models.pharmacy.pharmacy_model import Organization
     from app.models.system_md.sys_models import AuditLog
+
+
+class UserRole(str, Enum):
+    """User roles for role-based access control"""
+    super_admin = "super_admin"
+    admin = "admin"
+    manager = "manager"
+    pharmacist = "pharmacist"
+    cashier = "cashier"
+    viewer = "viewer"
+
 
 class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     """

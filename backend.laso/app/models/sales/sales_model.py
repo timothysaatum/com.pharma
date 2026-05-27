@@ -22,7 +22,7 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     Optimized for offline-first with conflict resolution.
     
     PRICING STRATEGY:
-    - Discounts come ONLY from PriceContract applied to the sale
+    - Discounts come ONLY from PriceContract applied to the sale 
     - No additional manual discounts allowed
     - Personnel can select appropriate contract at checkout
     """

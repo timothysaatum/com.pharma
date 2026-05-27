@@ -60,6 +60,8 @@ class BranchInventoryWithDetails(BranchInventoryResponse):
     """Branch inventory with drug and branch details"""
     drug_name: str
     drug_sku: Optional[str]
+    drug_type: str = Field(default="otc", description="Drug type: otc, prescription, controlled, herbal, supplement")
+    requires_prescription: bool = Field(default=False, description="Whether this drug requires a valid prescription to sell")
     catalog_unit_price: Decimal
     drug_unit_price: Decimal
     effective_unit_price: Decimal

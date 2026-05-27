@@ -266,20 +266,42 @@ async def _validate_and_fix_sale_fks(
     # ============================================================================
     
     # price_contract_id (nullable, ondelete='SET NULL')
+    # This is checked in BOTH organization scope AND globally since it might
+    # have been created in a different sync session
     price_contract_id = safe_data.get("price_contract_id")
     if price_contract_id is not None:
+        # First check: is it in this organization?
         result = await db.execute(
             select(PriceContract.id).where(
                 PriceContract.id == price_contract_id,
                 PriceContract.organization_id == organization_id,
             )
         )
-        if result.scalar_one_or_none() is None:
-            logger.warning(
-                "Sync: Missing price_contract %s for sale %s in org %s; clearing price_contract_id",
-                price_contract_id, record_id, organization_id,
+        contract_in_org = result.scalar_one_or_none()
+        
+        if contract_in_org is None:
+            # Second check: does it exist at all (in any org)?
+            result2 = await db.execute(
+                select(PriceContract.id).where(
+                    PriceContract.id == price_contract_id,
+                )
             )
+            contract_exists = result2.scalar_one_or_none()
+            
+            if contract_exists is None:
+                logger.warning(
+                    "Sync: Missing price_contract %s for sale %s; clearing price_contract_id (not found globally)",
+                    price_contract_id, record_id,
+                )
+            else:
+                logger.warning(
+                    "Sync: price_contract %s for sale %s not in org %s; clearing price_contract_id",
+                    price_contract_id, record_id, organization_id,
+                )
+            
             safe_data["price_contract_id"] = None
+            safe_data["contract_name"] = None
+            safe_data["contract_discount_percentage"] = None
             fixes.append(f"price_contract_id={price_contract_id}")
 
     # customer_id (nullable, ondelete='SET NULL')

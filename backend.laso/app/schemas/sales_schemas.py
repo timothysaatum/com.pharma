@@ -48,26 +48,11 @@ class SaleItemCreate(SaleItemBase):
     
     Pricing is calculated server-side using contract and drug data.
     User only provides drug_id, quantity, and optional batch_id.
+    
+    Prescription requirements and verification are computed server-side
+    based on the drug's actual requires_prescription field.
     """
-    requires_prescription: bool = Field(
-        default=False,
-        description="Whether this item requires a prescription"
-    )
-    
-    prescription_verified: bool = Field(
-        default=False,
-        description="Whether prescription has been verified for this item"
-    )
-    
-    @model_validator(mode='after')
-    def validate_prescription(self) -> 'SaleItemCreate':
-        """Validate prescription requirements"""
-        if self.requires_prescription and not self.prescription_verified:
-            raise ValueError(
-                f"Prescription verification required for this drug (drug_id: {self.drug_id})"
-            )
-        
-        return self
+    pass
 
 
 class SaleItemResponse(TimestampSchema):
