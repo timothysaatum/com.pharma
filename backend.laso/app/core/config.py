@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     # -------------------------
     # Core App Settings
     # -------------------------
-    PROJECT_NAME: str = "Laso"
+    PROJECT_NAME: str = "Pharmacy System"
     VERSION: str = "1.0.0"
     ENVIRONMENT: str = "development"
     SYSTEM_STATUS: str = "up"
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     CACHE_ENABLED: bool = True
     CACHE_TYPE: str = "redis"
     CACHE_DEFAULT_TTL: int = 300
-    CACHE_KEY_PREFIX: str = "Laso:"
+    CACHE_KEY_PREFIX: str = "app:"
     REDIS_URL: Optional[str] = None
 
     # -------------------------
@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     SMTP_USER: str = ""
     SMTP_PASSWORD: str = ""
     FROM_EMAIL: str = ""
-    FROM_NAME: str = "Laso System"
+    FROM_NAME: str = "Pharmacy System"
 
     # -------------------------
     # Africa's Talking (SMS)

@@ -12,6 +12,7 @@ import { reportsApi } from '../api/reports';
 import { isOfflineError } from '@/api/client';
 import { localRead } from '@/lib/localRead';
 import { offlineCache } from '@/lib/storage';
+import { DataFreshnessIndicator } from '@/components/DataFreshnessIndicator';
 
 interface FilterState {
   startDate: string;
@@ -65,11 +66,13 @@ export default function ReportsPage() {
   });
 
   const [showFilters] = useState(true);
+  const [dailySalesFromCache, setDailySalesFromCache] = useState(false);
 
   // Daily Sales Query
   const { data: dailySalesData, isLoading: dailySalesLoading, refetch: refetchDailySales } = useQuery<DailySalesRow[]>({
     queryKey: ['reports', 'daily-sales', filters],
     queryFn: async () => {
+      setDailySalesFromCache(false);
       try {
         return await reportsApi.getDailySalesSummary({
           startDate: filters.startDate,
@@ -81,6 +84,7 @@ export default function ReportsPage() {
       } catch (err) {
         // If offline, fall back to local DB aggregation
         if (isOfflineError(err)) {
+          setDailySalesFromCache(true);
           // fetch all sales from local DB within date range
           const pageSize = 1000;
           const local = await localRead.searchSales({
@@ -293,6 +297,11 @@ export default function ReportsPage() {
       )}
 
       {/* Data Table */}
+      {dailySalesFromCache && (
+        <div className="bg-amber-50 border border-amber-200 rounded-lg p-4 text-amber-900">
+          <DataFreshnessIndicator isFromCache cached_at={new Date().toISOString()} compact />
+        </div>
+      )}
       {dailySalesLoading ? (
         <div className="bg-white p-8 rounded-lg text-center text-gray-500">Loading sales data...</div>
       ) : dailySalesData && dailySalesData.length > 0 ? (

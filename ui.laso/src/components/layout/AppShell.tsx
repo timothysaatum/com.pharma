@@ -7,7 +7,9 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
+import { organizationApi } from "@/api/organization";
 import { offlineCache } from "@/lib/storage";
+import { APP_NAME } from "@/lib/appConfig";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 
@@ -63,6 +65,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const [collapsed, setCollapsed] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
     const [branchName, setBranchName] = useState<string | null | undefined>(undefined);
+    const [organizationName, setOrganizationName] = useState<string | null | undefined>(undefined);
 
     useEffect(() => {
         if (!activeBranchId) {
@@ -80,6 +83,38 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             });
         return () => { cancelled = true; };
     }, [activeBranchId]);
+
+    useEffect(() => {
+        const orgId = user?.organization_id;
+        if (!orgId) {
+            setOrganizationName(null);
+            return;
+        }
+
+        let cancelled = false;
+        setOrganizationName(undefined);
+
+        void (async () => {
+            const cachedOrg = await offlineCache.getOrganization();
+            if (!cancelled && cachedOrg?.id === orgId) {
+                setOrganizationName(cachedOrg.name);
+            }
+
+            try {
+                const org = await organizationApi.getById(orgId);
+                if (!cancelled) {
+                    setOrganizationName(org.name);
+                    await offlineCache.setOrganization(org);
+                }
+            } catch {
+                if (!cancelled && cachedOrg?.id !== orgId) {
+                    setOrganizationName(null);
+                }
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [user?.organization_id]);
 
     const handleLogout = async () => {
         setLoggingOut(true);
@@ -109,13 +144,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     <div className="w-7 h-7 rounded-lg bg-brand-500 flex items-center justify-center flex-shrink-0">
                         <img
                             src="/logo.png"
-                            alt="Laso logo"
+                            alt={`${organizationName ?? APP_NAME} logo`}
                             className="w-full h-full rounded-lg object-contain"
                         />
                     </div>
                     {!collapsed && (
                         <span className="font-display font-bold text-sm flex-1 truncate">
-                            Laso
+                            {organizationName ?? APP_NAME}
                         </span>
                     )}
                     <button

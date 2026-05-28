@@ -9,6 +9,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
 import { parseApiError } from "@/api/client";
 import { getHomePathForRole } from "@/lib/routes";
+import { APP_NAME } from "@/lib/appConfig";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Minimal inline UI primitives (avoids importing from ui/ which may rely on
@@ -120,11 +121,11 @@ function AddBranchPanel() {
                 <div className="inline-flex items-center gap-2.5 mb-5">
                     <img
                         src="/logo.png"
-                        alt="Laso logo"
+                        alt={`${APP_NAME} logo`}
                         className="w-10 h-10 rounded-2xl bg-white/10 p-2 object-contain shadow-sm"
                     />
                     <span className="font-display text-2xl font-bold text-ink tracking-tight">
-                        Laso
+                        {APP_NAME}
                     </span>
                 </div>
                 <h1 className="font-display text-3xl font-bold text-ink">
@@ -254,11 +255,11 @@ function OnboardRedirectPanel() {
             <div className="inline-flex items-center gap-2.5 mb-6">
                 <img
                     src="/logo.png"
-                    alt="Laso logo"
+                    alt={`${APP_NAME} logo`}
                     className="w-10 h-10 rounded-2xl bg-white/10 p-2 object-contain shadow-sm"
                 />
                 <span className="font-display text-2xl font-bold text-ink tracking-tight">
-                    Laso
+                    {APP_NAME}
                 </span>
             </div>
 

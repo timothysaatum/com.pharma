@@ -18,6 +18,8 @@ import { useDebounce } from "@/hooks/useDebounce";
 import { AddBatchForm } from "@/components/inventory/AddBatchForm";
 import { parseApiError } from "@/api/client";
 import { appEvents, useAppEvent } from "@/lib/events";
+import { withTimeout } from "@/lib/withTimeout";
+import { DataFreshnessIndicator } from "@/components/DataFreshnessIndicator";
 import type {
     BranchInventoryWithDetails,
     LowStockItem,
@@ -839,6 +841,12 @@ export default function InventoryPage() {
     const [sidePanel, setSidePanel] = useState<SidePanel>(null);
     const [panelItem, setPanelItem] = useState<BranchInventoryWithDetails | null>(null);
 
+    // ── Cache freshness tracking ──────────────────────────────
+    const [inventoryFromCache, setInventoryFromCache] = useState(false);
+    const [inventoryCachedAt, setInventoryCachedAt] = useState<string | undefined>();
+    const [lowStockFromCache, setLowStockFromCache] = useState(false);
+    const [expiringFromCache, setExpiringFromCache] = useState(false);
+
     const abortRef = useRef<AbortController | null>(null);
 
     // ── Fetch inventory ───────────────────────────────────────
@@ -849,56 +857,76 @@ export default function InventoryPage() {
         abortRef.current = controller;
         setIsLoading(true);
         setError(null);
-        const loadLocal = async () => {
-            const result = await localRead.getBranchInventory(
-                activeBranchId,
-                {
-                    search: debouncedSearch || undefined,
-                    low_stock_only: lowStockOnly || undefined,
-                    include_zero_stock: includeZeroStock || undefined,
-                },
-                page,
-                PAGE_SIZE
-            );
-            if (!controller.signal.aborted) {
-                setInventory(result.items);
-                setTotalPages(result.total_pages);
-                setTotal(result.total);
-                void cacheBranchInventoryRows(result.items);
-            }
-        };
+        setInventoryFromCache(false);
+
         try {
+            // If offline, go straight to cache
             if (!navigator.onLine || !isBackendReachable()) {
-                await loadLocal();
-                return;
-            }
-            const result = await inventoryApi.getBranchInventory(
-                activeBranchId,
-                {
+                const result = await localRead.getBranchInventory(
+                    activeBranchId,
+                    {
+                        search: debouncedSearch || undefined,
+                        low_stock_only: lowStockOnly || undefined,
+                        include_zero_stock: includeZeroStock || undefined,
+                    },
                     page,
-                    page_size: PAGE_SIZE,
-                    search: debouncedSearch || undefined,
-                    low_stock_only: lowStockOnly || undefined,
-                    include_zero_stock: includeZeroStock || undefined,
-                },
-                controller.signal
-            );
-            if (!controller.signal.aborted) {
-                setInventory(result.items);
-                setTotalPages(result.total_pages);
-                setTotal(result.total);
-            }
-        } catch (err: unknown) {
-            if (err instanceof Error && err.name === "AbortError") return;
-            if (!controller.signal.aborted && isOfflineError(err)) {
-                try {
-                    await loadLocal();
-                } catch (localErr) {
-                    if (!controller.signal.aborted) setError(parseApiError(localErr));
+                    PAGE_SIZE
+                );
+                if (!controller.signal.aborted) {
+                    setInventory(result.items);
+                    setTotalPages(result.total_pages);
+                    setTotal(result.total);
+                    setInventoryFromCache(true);
+                    setInventoryCachedAt(new Date().toISOString());
+                    void cacheBranchInventoryRows(result.items);
                 }
                 return;
             }
-            if (!controller.signal.aborted) setError(parseApiError(err));
+
+            // Try server with timeout fallback
+            const timeoutResult = await withTimeout(
+                // Server fetch
+                () => inventoryApi.getBranchInventory(
+                    activeBranchId,
+                    {
+                        page,
+                        page_size: PAGE_SIZE,
+                        search: debouncedSearch || undefined,
+                        low_stock_only: lowStockOnly || undefined,
+                        include_zero_stock: includeZeroStock || undefined,
+                    },
+                    controller.signal
+                ),
+                // Cache fallback
+                () => localRead.getBranchInventory(
+                    activeBranchId,
+                    {
+                        search: debouncedSearch || undefined,
+                        low_stock_only: lowStockOnly || undefined,
+                        include_zero_stock: includeZeroStock || undefined,
+                    },
+                    page,
+                    PAGE_SIZE
+                ),
+                { timeoutMs: 15000, dataKey: `inventory:${activeBranchId}:${page}` }
+            );
+
+            if (!controller.signal.aborted) {
+                setInventory(timeoutResult.data.items);
+                setTotalPages(timeoutResult.data.total_pages);
+                setTotal(timeoutResult.data.total);
+                setInventoryFromCache(timeoutResult.isFromCache);
+                setInventoryCachedAt(timeoutResult.cached_at);
+                if (!timeoutResult.isFromCache) {
+                    void cacheBranchInventoryRows(timeoutResult.data.items);
+                }
+            }
+        } catch (err: unknown) {
+            if (err instanceof Error && err.name === "AbortError") return;
+            if (!controller.signal.aborted) {
+                setError(parseApiError(err));
+                setInventoryFromCache(false);
+            }
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
         }
@@ -906,36 +934,36 @@ export default function InventoryPage() {
 
     const fetchLowStock = useCallback(async () => {
         if (!activeBranchId) return;
+        setLowStockFromCache(false);
+
         try {
             if (!navigator.onLine || !isBackendReachable()) {
                 const result = await localRead.getLowStock(activeBranchId);
                 setLowStockItems(result.items);
                 setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
+                setLowStockFromCache(true);
                 return;
             }
-            const result = await inventoryApi.getLowStock(activeBranchId);
-            setLowStockItems(result.items);
-            setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
-        } catch (err: unknown) {
-            if (isOfflineError(err)) {
-                await fetchLowStockOffline();
-            }
-        }
-    }, [activeBranchId]);
 
-    const fetchLowStockOffline = useCallback(async () => {
-        if (!activeBranchId) return;
-        try {
-            const result = await localRead.getLowStock(activeBranchId);
-            setLowStockItems(result.items);
-            setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
-        } catch {
-            // ignore
+            const timeoutResult = await withTimeout(
+                () => inventoryApi.getLowStock(activeBranchId),
+                () => localRead.getLowStock(activeBranchId),
+                { timeoutMs: 15000, dataKey: `low_stock:${activeBranchId}` }
+            );
+
+            setLowStockItems(timeoutResult.data.items);
+            setLowStockCounts({ out: timeoutResult.data.out_of_stock_count, low: timeoutResult.data.low_stock_count });
+            setLowStockFromCache(timeoutResult.isFromCache);
+        } catch (err: unknown) {
+            // Silently fail for secondary reports
+            console.debug("Low stock fetch failed:", err);
         }
     }, [activeBranchId]);
 
     const fetchExpiring = useCallback(async () => {
         if (!activeBranchId) return;
+        setExpiringFromCache(false);
+
         try {
             if (!navigator.onLine || !isBackendReachable()) {
                 const result = await localRead.getExpiring(activeBranchId, 90);
@@ -945,34 +973,26 @@ export default function InventoryPage() {
                     cost: Number(result.total_cost_value),
                     selling: Number(result.total_selling_value),
                 });
+                setExpiringFromCache(true);
                 return;
             }
-            const result = await inventoryApi.getExpiring(activeBranchId, 90);
-            setExpiringItems(result.items);
-            setExpiringCount(result.total_items);
-            setExpiringTotals({
-                cost: Number(result.total_cost_value),
-                selling: Number(result.total_selling_value),
-            });
-        } catch (err: unknown) {
-            if (isOfflineError(err)) {
-                await fetchExpiringOffline();
-            }
-        }
-    }, [activeBranchId]);
 
-    const fetchExpiringOffline = useCallback(async () => {
-        if (!activeBranchId) return;
-        try {
-            const result = await localRead.getExpiring(activeBranchId, 90);
-            setExpiringItems(result.items);
-            setExpiringCount(result.total_items);
+            const timeoutResult = await withTimeout(
+                () => inventoryApi.getExpiring(activeBranchId, 90),
+                () => localRead.getExpiring(activeBranchId, 90),
+                { timeoutMs: 15000, dataKey: `expiring:${activeBranchId}` }
+            );
+
+            setExpiringItems(timeoutResult.data.items);
+            setExpiringCount(timeoutResult.data.total_items);
             setExpiringTotals({
-                cost: Number(result.total_cost_value),
-                selling: Number(result.total_selling_value),
+                cost: Number(timeoutResult.data.total_cost_value),
+                selling: Number(timeoutResult.data.total_selling_value),
             });
-        } catch {
-            // ignore
+            setExpiringFromCache(timeoutResult.isFromCache);
+        } catch (err: unknown) {
+            // Silently fail for secondary reports
+            console.debug("Expiring batch fetch failed:", err);
         }
     }, [activeBranchId]);
 
@@ -1231,6 +1251,16 @@ export default function InventoryPage() {
                                 </div>
                             )}
 
+                            {inventoryFromCache && (
+                                <div className="mx-6 mt-3 flex-shrink-0">
+                                    <DataFreshnessIndicator
+                                        isFromCache={inventoryFromCache}
+                                        cached_at={inventoryCachedAt}
+                                        compact
+                                    />
+                                </div>
+                            )}
+
                             <div className="flex-1 overflow-auto">
                                 {isLoading ? (
                                     <div className="flex items-center justify-center h-64">
@@ -1365,7 +1395,16 @@ export default function InventoryPage() {
 
                     {/* ── LOW STOCK ── */}
                     {activeView === "low_stock" && (
-                        <div className="flex-1 overflow-auto">
+                        <div className="flex-1 overflow-auto flex flex-col">
+                            {lowStockFromCache && (
+                                <div className="px-6 pt-3 flex-shrink-0">
+                                    <DataFreshnessIndicator
+                                        isFromCache={lowStockFromCache}
+                                        compact
+                                    />
+                                </div>
+                            )}
+                            <div className="flex-1 overflow-auto">
                             {lowStockItems.length === 0 ? (
                                 <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">
                                     <TrendingDown className="w-10 h-10 opacity-30" />
@@ -1411,12 +1450,22 @@ export default function InventoryPage() {
                                     </tbody>
                                 </table>
                             )}
+                            </div>
                         </div>
                     )}
 
                     {/* ── EXPIRING SOON ── */}
                     {activeView === "expiring" && (
-                        <div className="flex-1 overflow-auto">
+                        <div className="flex-1 overflow-auto flex flex-col">
+                            {expiringFromCache && (
+                                <div className="px-6 pt-3 flex-shrink-0">
+                                    <DataFreshnessIndicator
+                                        isFromCache={expiringFromCache}
+                                        compact
+                                    />
+                                </div>
+                            )}
+                            <div className="flex-1 overflow-auto">
                             {/* FIX: value-at-risk summary bar — total_cost_value and total_selling_value
                                 are returned by ExpiringBatchReport but were previously discarded. */}
                             {expiringTotals && expiringItems.length > 0 && (
@@ -1483,6 +1532,7 @@ export default function InventoryPage() {
                                     </tbody>
                                 </table>
                             )}
+                            </div>
                         </div>
                     )}
 

@@ -15,6 +15,7 @@ import { BranchesStep } from "@/components/onboarding/BranchesStep";
 import { ReviewStep } from "@/components/onboarding/ReviewStep";
 import { SuccessScreen } from "@/components/onboarding/SuccessScreen";
 import { Button } from "@/components/ui";
+import { APP_NAME } from "@/lib/appConfig";
 import type { OnboardingResponse } from "@/types";
 
 export default function OnboardingPage() {
@@ -98,11 +99,11 @@ export default function OnboardingPage() {
                     <div className="inline-flex items-center gap-2.5 mb-5">
                         <img
                             src="/logo.png"
-                            alt="Laso logo"
+                            alt={`${APP_NAME} logo`}
                             className="w-10 h-10 rounded-2xl bg-white/10 p-2 object-contain shadow-sm"
                         />
                         <span className="font-display text-2xl font-bold text-ink tracking-tight">
-                            Laso
+                            {APP_NAME}
                         </span>
                     </div>
                     <h1 className="font-display text-4xl font-bold text-ink leading-tight">

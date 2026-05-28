@@ -40,7 +40,7 @@ async def create_initial_admin():
                 print("Creating default organization...")
                 org = Organization(
                     id=uuid.uuid4(),
-                    name="LASO Pharmacy System",
+                    name="Pharmacy System",
                     type="pharmacy",
                     is_active=True,
                     subscription_tier="basic",
@@ -57,7 +57,7 @@ async def create_initial_admin():
             print("Creating admin user...")
             admin_data = UserCreate(
                 username="admin",
-                email="admin@laso.com",
+                email="admin@pharmacy.com",
                 password="Admin@123456",
                 full_name="System Administrator",
                 role="super_admin",

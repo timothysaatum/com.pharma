@@ -537,9 +537,16 @@ async function ensureBranchInventorySchema(db: Database): Promise<void> {
 // ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
-export async function getLastSyncAt(table?: string): Promise<string | null> {
+function syncMetaKey(table?: string, branchId?: string): string {
+  if (branchId) {
+    return table ? `last_sync_at:${branchId}:${table}` : `last_sync_at:${branchId}`;
+  }
+  return table ? `last_sync_at:${table}` : "last_sync_at";
+}
+
+export async function getLastSyncAt(table?: string, branchId?: string): Promise<string | null> {
   const db = await getDb();
-  const key = table ? `last_sync_at:${table}` : "last_sync_at";
+  const key = syncMetaKey(table, branchId);
   const rows = await db.select<{ value: string }[]>(
     "SELECT value FROM sync_meta WHERE key = $1",
     [key]
@@ -547,9 +554,13 @@ export async function getLastSyncAt(table?: string): Promise<string | null> {
   return rows[0]?.value ?? null;
 }
 
-export async function setLastSyncAt(timestamp: string, table?: string): Promise<void> {
+export async function setLastSyncAt(
+  timestamp: string,
+  table?: string,
+  branchId?: string,
+): Promise<void> {
   const db = await getDb();
-  const key = table ? `last_sync_at:${table}` : "last_sync_at";
+  const key = syncMetaKey(table, branchId);
   await db.execute(
     "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
     [key, timestamp]

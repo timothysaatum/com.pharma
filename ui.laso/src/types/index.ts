@@ -1370,7 +1370,7 @@ export interface ExpiringBatch {
 
 export interface PullRequest {
     branch_id: string;
-    last_sync_at: string | null;
+    last_sync_at?: string | null;
     tables?: string[];
 }
 

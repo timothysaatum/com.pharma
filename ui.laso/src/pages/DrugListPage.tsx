@@ -8,7 +8,7 @@ import {
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
 import { cacheBranchScopedDrugs } from "@/lib/localDb";
-import { isBackendReachable, isOfflineError } from "@/api/client";
+import { isBackendReachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useCategoryTree } from "@/hooks/useCategories";
@@ -17,6 +17,8 @@ import { AddBatchForm } from "@/components/inventory/AddBatchForm";
 import { DrugCategoryModal } from "@/components/drugs/DrugCategoryModal";
 import { parseApiError } from "@/api/client";
 import { appEvents, useAppEvent } from "@/lib/events";
+import { withTimeout } from "@/lib/withTimeout";
+import { DataFreshnessIndicator } from "@/components/DataFreshnessIndicator";
 import type { Drug, DrugBatch, DrugType, DrugCategoryTree } from "@/types";
 
 // ── Render hierarchical <option> elements from the category tree ─────────────
@@ -74,6 +76,7 @@ export default function DrugListPage() {
     const [drugs, setDrugs] = useState<Drug[]>([]);
     const [isLoading, setIsLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [drugsFromCache, setDrugsFromCache] = useState(false);
 
     // Search input is debounced — API only called 300ms after typing stops
     const [searchInput, setSearchInput] = useState("");
@@ -105,7 +108,7 @@ export default function DrugListPage() {
     // AbortController ref — cancels the previous in-flight request on each fetch
     const abortRef = useRef<AbortController | null>(null);
 
-    // ── Fetch ─────────────────────────────────────────────────
+    // -- Fetch
     const fetchDrugs = useCallback(async () => {
         abortRef.current?.abort();
         const controller = new AbortController();
@@ -113,6 +116,7 @@ export default function DrugListPage() {
 
         setIsLoading(true);
         setError(null);
+        setDrugsFromCache(false);
 
         try {
             if (!navigator.onLine || !isBackendReachable()) {
@@ -131,54 +135,53 @@ export default function DrugListPage() {
                     setDrugs(result.items);
                     setTotalPages(result.total_pages);
                     setTotal(result.total);
+                    setDrugsFromCache(true);
                 }
                 return;
             }
-            const result = await drugApi.list(
-                {
+
+            const timeoutResult = await withTimeout(
+                () => drugApi.list(
+                    {
+                        page,
+                        page_size: PAGE_SIZE,
+                        search: debouncedSearch || undefined,
+                        drug_type: filterType || undefined,
+                        category_id: filterCategory || undefined,
+                        is_active: filterActive === "" ? undefined : filterActive === "true",
+                        branch_id: activeBranchId || undefined,
+                    },
+                    controller.signal
+                ),
+                () => localRead.searchDrugs(
+                    {
+                        search: debouncedSearch || undefined,
+                        drug_type: filterType || undefined,
+                        category_id: filterCategory || undefined,
+                        is_active: filterActive === "" ? undefined : filterActive === "true",
+                        branch_id: activeBranchId || undefined,
+                    },
                     page,
-                    page_size: PAGE_SIZE,
-                    search: debouncedSearch || undefined,
-                    drug_type: filterType || undefined,
-                    category_id: filterCategory || undefined,
-                    is_active: filterActive === "" ? undefined : filterActive === "true",
-                    branch_id: activeBranchId || undefined,
-                },
-                controller.signal
+                    PAGE_SIZE
+                ),
+                { timeoutMs: 10000, dataKey: `drugs:${page}:${debouncedSearch}:${filterType}:${filterCategory}` }
             );
 
             if (!controller.signal.aborted) {
-                setDrugs(result.items);
-                setTotalPages(result.total_pages);
-                setTotal(result.total);
-                if (activeBranchId) void cacheBranchScopedDrugs(activeBranchId, result.items);
+                setDrugs(timeoutResult.data.items);
+                setTotalPages(timeoutResult.data.total_pages);
+                setTotal(timeoutResult.data.total);
+                setDrugsFromCache(timeoutResult.isFromCache);
+                if (!timeoutResult.isFromCache && activeBranchId) {
+                    void cacheBranchScopedDrugs(activeBranchId, timeoutResult.data.items);
+                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
-            if (!controller.signal.aborted && isOfflineError(err)) {
-                try {
-                    const result = await localRead.searchDrugs(
-                        {
-                            search: debouncedSearch || undefined,
-                            drug_type: filterType || undefined,
-                            category_id: filterCategory || undefined,
-                            is_active: filterActive === "" ? undefined : filterActive === "true",
-                            branch_id: activeBranchId || undefined,
-                        },
-                        page,
-                        PAGE_SIZE
-                    );
-                    if (!controller.signal.aborted) {
-                        setDrugs(result.items);
-                        setTotalPages(result.total_pages);
-                        setTotal(result.total);
-                    }
-                } catch (localErr) {
-                    if (!controller.signal.aborted) setError(parseApiError(localErr));
-                }
-                return;
+            if (!controller.signal.aborted) {
+                setError(parseApiError(err));
+                setDrugsFromCache(false);
             }
-            if (!controller.signal.aborted) setError(parseApiError(err));
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
         }
@@ -375,6 +378,15 @@ export default function DrugListPage() {
                     <button onClick={() => setError(null)} className="ml-auto text-ink-muted hover:text-ink">
                         <X className="w-4 h-4" />
                     </button>
+                </div>
+            )}
+
+            {drugsFromCache && (
+                <div className="mx-6 mt-4">
+                    <DataFreshnessIndicator
+                        isFromCache={drugsFromCache}
+                        compact
+                    />
                 </div>
             )}
 

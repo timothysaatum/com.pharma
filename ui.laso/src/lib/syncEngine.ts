@@ -27,6 +27,7 @@ import {
 } from "@/lib/localDb";
 import { isOfflineError } from "@/api/client";
 import type {
+    PullRequest,
     PullResponse,
     PushRecord,
     PushResponse,
@@ -231,7 +232,7 @@ class SyncEngine {
     // ── PULL ─────────────────────────────────────────────────────────
 
     async pull(forceSince?: string): Promise<void> {
-        const lastSyncAt = forceSince ?? await getLastSyncAt();
+        const lastSyncAt = forceSince ?? await getLastSyncAt(undefined, this.branchId ?? undefined);
 
         let hasMore = true;
         let since: string | null = lastSyncAt;
@@ -241,11 +242,16 @@ class SyncEngine {
             let response: PullResponse;
             try {
                 console.log(`[SyncEngine] Pulling since: ${since || "initial"}`);
-                response = await syncApi.pull({
+
+                const request: Partial<PullRequest> = {
                     branch_id: this.branchId!,
-                    last_sync_at: since,
                     tables: DEFAULT_SYNC_TABLES,
-                });
+                };
+                if (since !== null) {
+                    request.last_sync_at = since;
+                }
+
+                response = await syncApi.pull(request as PullRequest);
                 console.log(
                     `[SyncEngine] Pull response: drugs=${response.drugs.length}, ` +
                     `categories=${response.drug_categories.length}, contracts=${response.price_contracts.length}, ` +
@@ -263,7 +269,7 @@ class SyncEngine {
             }
 
             await this.applyPullResponse(response);
-            await setLastSyncAt(response.sync_timestamp);
+            await setLastSyncAt(response.sync_timestamp, undefined, this.branchId ?? undefined);
             totalRecords += response.total_records;
 
             hasMore = response.has_more;
@@ -468,7 +474,10 @@ class SyncEngine {
 
     private async loadPersistedConflicts(): Promise<void> {
         this.pendingConflicts = await getPendingConflicts();
-        this.notify(await getPendingCount(), await getLastSyncAt());
+        this.notify(
+            await getPendingCount(),
+            await getLastSyncAt(undefined, this.branchId ?? undefined)
+        );
     }
 
     async resolveConflict(
@@ -535,7 +544,7 @@ class SyncEngine {
     private setStatus(s: SyncStatus): void {
         this._status = s;
         getPendingCount().then((count) => {
-            getLastSyncAt().then((last) => this.notify(count, last));
+            getLastSyncAt(undefined, this.branchId ?? undefined).then((last) => this.notify(count, last));
         });
     }
 

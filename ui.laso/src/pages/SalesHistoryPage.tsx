@@ -36,6 +36,8 @@ import type { Sale, SaleWithDetails } from "@/types";
 import type { ReceiptData } from "@/api/sales";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
+import { withTimeout } from "@/lib/withTimeout";
+import { DataFreshnessIndicator } from "@/components/DataFreshnessIndicator";
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -844,6 +846,7 @@ export default function SalesHistoryPage() {
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const [salesFromCache, setSalesFromCache] = useState(false);
 
     // ── Filters ───────────────────────────────────────────────
     const [search, setSearch] = useState("");
@@ -867,6 +870,7 @@ export default function SalesHistoryPage() {
 
         setLoading(true);
         setError(null);
+        setSalesFromCache(false);
 
         try {
             if (!navigator.onLine || !isBackendReachable()) {
@@ -888,52 +892,55 @@ export default function SalesHistoryPage() {
                     setTotal(local.total);
                     setTotalPages(local.total_pages);
                     setPage(targetPage);
+                    setSalesFromCache(true);
                 }
                 return;
             }
-            const data = await salesApi.list(
-                {
-                    page: targetPage,
-                    page_size: PAGE_SIZE,
-                    branch_id: activeBranchId ?? undefined,
-                    status: statusFilter || undefined,
-                    payment_method: paymentFilter || undefined,
-                    start_date: startDate || undefined,
-                    end_date: endDate || undefined,
-                },
-                controller.signal,
+
+            const timeoutResult = await withTimeout(
+                () => salesApi.list(
+                    {
+                        page: targetPage,
+                        page_size: PAGE_SIZE,
+                        branch_id: activeBranchId ?? undefined,
+                        status: statusFilter || undefined,
+                        payment_method: paymentFilter || undefined,
+                        start_date: startDate || undefined,
+                        end_date: endDate || undefined,
+                    },
+                    controller.signal,
+                ),
+                () => localRead.searchSales(
+                    {
+                        page: targetPage,
+                        page_size: PAGE_SIZE,
+                        branch_id: activeBranchId ?? undefined,
+                        status: statusFilter || undefined,
+                        payment_method: paymentFilter || undefined,
+                        start_date: startDate || undefined,
+                        end_date: endDate || undefined,
+                    },
+                    targetPage,
+                    PAGE_SIZE,
+                ),
+                { timeoutMs: 15000, dataKey: `sales:${targetPage}:${statusFilter}:${paymentFilter}` }
             );
+
             if (!controller.signal.aborted) {
-                const items = data.items || [];
+                const items = timeoutResult.data.items || [];
                 setSales(items);
-                setTotal(data.total);
-                setTotalPages(data.total_pages);
+                setTotal(timeoutResult.data.total);
+                setTotalPages(timeoutResult.data.total_pages);
                 setPage(targetPage);
-                void cacheSales(items);
+                setSalesFromCache(timeoutResult.isFromCache);
+                if (!timeoutResult.isFromCache) {
+                    void cacheSales(items);
+                }
             }
         } catch (err: unknown) {
             if (!controller.signal.aborted) {
-                if (isOfflineError(err)) {
-                    const data = await localRead.searchSales(
-                        {
-                            page: targetPage,
-                            page_size: PAGE_SIZE,
-                            branch_id: activeBranchId ?? undefined,
-                            status: statusFilter || undefined,
-                            payment_method: paymentFilter || undefined,
-                            start_date: startDate || undefined,
-                            end_date: endDate || undefined,
-                        },
-                        targetPage,
-                        PAGE_SIZE,
-                    );
-                    setSales(data.items);
-                    setTotal(data.total);
-                    setTotalPages(data.total_pages);
-                    setPage(targetPage);
-                } else {
-                    setError(parseApiError(err));
-                }
+                setError(parseApiError(err));
+                setSalesFromCache(false);
             }
         } finally {
             if (!controller.signal.aborted) setLoading(false);
@@ -1074,6 +1081,16 @@ export default function SalesHistoryPage() {
                         <div className="mx-5 mt-3 p-3 rounded-xl bg-red-50 border border-red-100 text-sm text-red-600 flex gap-2 flex-shrink-0">
                             <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                             {error}
+                        </div>
+                    )}
+
+                    {/* Cache freshness indicator */}
+                    {salesFromCache && (
+                        <div className="mx-5 mt-3 flex-shrink-0">
+                            <DataFreshnessIndicator
+                                isFromCache={salesFromCache}
+                                compact
+                            />
                         </div>
                     )}
 

@@ -22,11 +22,13 @@ import {
 } from "lucide-react";
 import { customersApi, type CustomerWithDetails } from "@/api/customers";
 import { localRead } from "@/lib/localRead";
-import { isOfflineError } from "@/api/client";
+import { isBackendReachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { CustomerForm } from "@/components/customers/CustomerForm";
+import { withTimeout } from "@/lib/withTimeout";
+import { DataFreshnessIndicator } from "@/components/DataFreshnessIndicator";
 import type { Customer } from "@/types";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -63,6 +65,7 @@ export default function CustomersPage() {
     const debouncedSearch = useDebounce(searchInput, 300);
     const [filterType, setFilterType] = useState("");
     const [filterTier, setFilterTier] = useState("");
+    const [customersFromCache, setCustomersFromCache] = useState(false);
 
     // ── Modal / drawer state ───────────────────────────────────────────────────
     const [showCreate, setShowCreate] = useState(false);
@@ -80,49 +83,65 @@ export default function CustomersPage() {
 
         setIsLoading(true);
         setError(null);
+        setCustomersFromCache(false);
 
         try {
-            const res = await customersApi.list(
-                {
+            if (!navigator.onLine || !isBackendReachable()) {
+                const result = await localRead.searchCustomers(
+                    {
+                        search: debouncedSearch || undefined,
+                        customer_type: filterType || undefined,
+                        loyalty_tier: filterTier || undefined,
+                    },
                     page,
-                    page_size: 25,
-                    search: debouncedSearch || undefined,
-                    customer_type: filterType || undefined,
-                    loyalty_tier: filterTier || undefined,
-                    sort_by: "created_at",
-                    sort_order: "desc",
-                },
-                ctrl.signal
-            );
-            if (!ctrl.signal.aborted) {
-                setCustomers(res.customers as CustomerWithDetails[]);
-                setTotal(res.total);
-                setTotalPages(res.total_pages);
-            }
-        } catch (err: unknown) {
-            if (err instanceof Error && err.name === "AbortError") return;
-            if (!ctrl.signal.aborted && isOfflineError(err)) {
-                try {
-                    const result = await localRead.searchCustomers(
-                        {
-                            search: debouncedSearch || undefined,
-                            customer_type: filterType || undefined,
-                            loyalty_tier: filterTier || undefined,
-                        },
-                        page,
-                        25
-                    );
-                    if (!ctrl.signal.aborted) {
-                        setCustomers(result.customers as CustomerWithDetails[]);
-                        setTotal(result.total);
-                        setTotalPages(result.total_pages);
-                    }
-                } catch (localErr) {
-                    if (!ctrl.signal.aborted) setError(parseApiError(localErr));
+                    25
+                );
+                if (!ctrl.signal.aborted) {
+                    setCustomers(result.customers as CustomerWithDetails[]);
+                    setTotal(result.total);
+                    setTotalPages(result.total_pages);
+                    setCustomersFromCache(true);
                 }
                 return;
             }
-            if (!ctrl.signal.aborted) setError(parseApiError(err));
+
+            const timeoutResult = await withTimeout(
+                () => customersApi.list(
+                    {
+                        page,
+                        page_size: 25,
+                        search: debouncedSearch || undefined,
+                        customer_type: filterType || undefined,
+                        loyalty_tier: filterTier || undefined,
+                        sort_by: "created_at",
+                        sort_order: "desc",
+                    },
+                    ctrl.signal
+                ),
+                () => localRead.searchCustomers(
+                    {
+                        search: debouncedSearch || undefined,
+                        customer_type: filterType || undefined,
+                        loyalty_tier: filterTier || undefined,
+                    },
+                    page,
+                    25
+                ),
+                { timeoutMs: 12000, dataKey: `customers:${page}:${debouncedSearch}:${filterType}` }
+            );
+
+            if (!ctrl.signal.aborted) {
+                setCustomers(timeoutResult.data.customers as CustomerWithDetails[]);
+                setTotal(timeoutResult.data.total);
+                setTotalPages(timeoutResult.data.total_pages);
+                setCustomersFromCache(timeoutResult.isFromCache);
+            }
+        } catch (err: unknown) {
+            if (err instanceof Error && err.name === "AbortError") return;
+            if (!ctrl.signal.aborted) {
+                setError(parseApiError(err));
+                setCustomersFromCache(false);
+            }
         } finally {
             if (!ctrl.signal.aborted) setIsLoading(false);
         }
@@ -232,6 +251,12 @@ export default function CustomersPage() {
                     <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
                     <p className="text-sm text-red-600 flex-1">{error}</p>
                     <button onClick={() => setError(null)}><X className="w-4 h-4 text-ink-muted" /></button>
+                </div>
+            )}
+
+            {customersFromCache && (
+                <div className="mx-6 mt-3">
+                    <DataFreshnessIndicator isFromCache cached_at={new Date().toISOString()} compact />
                 </div>
             )}
 

@@ -11,6 +11,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { Input, Button } from "@/components/ui";
 import { branchApi } from "@/api/branches";
 import { offlineCache } from "@/lib/storage";
+import { APP_NAME } from "@/lib/appConfig";
 import type { BranchListItem } from "@/types";
 
 export default function LoginPage() {
@@ -96,11 +97,11 @@ export default function LoginPage() {
                 <div className="relative flex items-center gap-3">
                     <img
                         src="/logo.png"
-                        alt="Laso logo"
+                        alt={`${APP_NAME} logo`}
                         className="w-12 h-12 rounded-2xl bg-white/10 p-2 object-contain"
                     />
                     <span className="font-display text-2xl font-bold text-white tracking-tight">
-                        Laso
+                        {APP_NAME}
                     </span>
                 </div>
 
@@ -151,10 +152,10 @@ export default function LoginPage() {
                     <div className="flex items-center gap-2 mb-8 lg:hidden">
                         <img
                             src="/logo.png"
-                            alt="Laso logo"
+                            alt={`${APP_NAME} logo`}
                             className="w-9 h-9 rounded-xl bg-brand-600 p-1 object-contain"
                         />
-                        <span className="font-display text-xl font-bold text-ink">Laso</span>
+                        <span className="font-display text-xl font-bold text-ink">{APP_NAME}</span>
                     </div>
 
                     <AnimatePresence mode="wait">
@@ -173,7 +174,7 @@ export default function LoginPage() {
                                         Welcome back
                                     </h2>
                                     <p className="text-ink-secondary mt-1">
-                                        Sign in to your Laso account
+                                        Sign in to your {APP_NAME} account
                                     </p>
                                 </div>
 
