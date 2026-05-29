@@ -13,7 +13,7 @@ Features:
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, or_
 from typing import Optional, List
 from datetime import date, datetime, timezone
 import uuid
@@ -30,6 +30,15 @@ from pydantic import BaseModel, Field
 from decimal import Decimal
 
 router = APIRouter(prefix="/prescriptions", tags=["Prescriptions"])
+
+
+def _customer_display_name(customer: Optional[Customer]) -> Optional[str]:
+    if not customer:
+        return None
+    full_name = " ".join(
+        part for part in [customer.first_name, customer.last_name] if part
+    ).strip()
+    return full_name or customer.phone or customer.email
 
 
 # ============================================
@@ -278,8 +287,90 @@ async def create_prescription(
         **{
             **prescription.__dict__,
             "is_expired": prescription.expiry_date < date.today(),
-            "customer_name": customer.name,
+            "customer_name": _customer_display_name(customer),
         }
+    )
+
+
+@router.get(
+    "/",
+    response_model=PaginatedResponse[PrescriptionResponse],
+    dependencies=[Depends(require_any_permission("manage_prescriptions", "process_sales"))]
+)
+async def list_prescriptions(
+    pagination: PaginationParams = Depends(),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    customer_id: Optional[uuid.UUID] = Query(None),
+    status_filter: Optional[str] = Query(None, description="Filter by status: active, filled, expired, cancelled"),
+    include_expired: bool = Query(True),
+    search: Optional[str] = Query(None, description="Search prescription number, prescriber, or customer name"),
+):
+    """
+    List prescriptions for the organization.
+
+    Used by the prescription management screen. POS still uses the
+    customer-scoped search endpoint below.
+    """
+    conditions = [Prescription.organization_id == current_user.organization_id]
+
+    if customer_id:
+        conditions.append(Prescription.customer_id == customer_id)
+
+    if status_filter:
+        conditions.append(Prescription.status == status_filter)
+
+    if not include_expired:
+        conditions.append(Prescription.expiry_date >= date.today())
+
+    query = select(Prescription).where(and_(*conditions))
+
+    if search:
+        term = f"%{search.strip()}%"
+        query = (
+            query
+            .join(Customer, Customer.id == Prescription.customer_id)
+            .where(
+                or_(
+                    Prescription.prescription_number.ilike(term),
+                    Prescription.prescriber_name.ilike(term),
+                    Customer.first_name.ilike(term),
+                    Customer.last_name.ilike(term),
+                    Customer.phone.ilike(term),
+                )
+            )
+        )
+
+    query = query.order_by(Prescription.issue_date.desc(), Prescription.created_at.desc())
+    result = await Paginator(db).paginate(query, pagination)
+
+    customer_ids = [p.customer_id for p in result.items]
+    customers = {}
+    if customer_ids:
+        cust_res = await db.execute(
+            select(Customer).where(Customer.id.in_(customer_ids))
+        )
+        customers = {c.id: c for c in cust_res.scalars().all()}
+
+    items = [
+        PrescriptionResponse(
+            **{
+                **p.__dict__,
+                "is_expired": p.expiry_date < date.today(),
+                "customer_name": _customer_display_name(customers.get(p.customer_id)),
+            }
+        )
+        for p in result.items
+    ]
+
+    return PaginatedResponse(
+        items=items,
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+        has_next=result.has_next,
+        has_prev=result.has_prev,
     )
 
 
@@ -359,22 +450,13 @@ async def search_customer_prescriptions(
     if status_filter:
         conditions.append(Prescription.status == status_filter)
     
-    # Get total count
-    count_res = await db.execute(
-        select(Prescription).where(and_(*conditions))
-    )
-    total = len(count_res.scalars().all())
-    
-    # Get paginated results
-    paginator = Paginator(paginate.page, paginate.size, total)
-    res = await db.execute(
+    result = await Paginator(db).paginate(
         select(Prescription)
         .where(and_(*conditions))
-        .order_by(Prescription.issue_date.desc())
-        .limit(paginator.limit)
-        .offset(paginator.offset)
+        .order_by(Prescription.issue_date.desc()),
+        paginate,
     )
-    prescriptions = res.scalars().all()
+    prescriptions = result.items
     
     items = [
         PrescriptionSearchResponse(
@@ -394,9 +476,12 @@ async def search_customer_prescriptions(
     
     return PaginatedResponse(
         items=items,
-        total=total,
-        page=paginator.page,
-        size=paginator.size
+        total=result.total,
+        page=result.page,
+        page_size=result.page_size,
+        total_pages=result.total_pages,
+        has_next=result.has_next,
+        has_prev=result.has_prev,
     )
 
 
@@ -437,7 +522,7 @@ async def get_prescription(
         **{
             **prescription.__dict__,
             "is_expired": prescription.expiry_date < date.today(),
-            "customer_name": customer.name if customer else None,
+            "customer_name": _customer_display_name(customer),
         }
     )
 
@@ -503,7 +588,7 @@ async def update_prescription(
         **{
             **prescription.__dict__,
             "is_expired": prescription.expiry_date < date.today(),
-            "customer_name": customer.name if customer else None,
+            "customer_name": _customer_display_name(customer),
         }
     )
 
@@ -588,6 +673,6 @@ async def use_prescription_refill(
         **{
             **prescription.__dict__,
             "is_expired": prescription.expiry_date < date.today(),
-            "customer_name": customer.name if customer else None,
+            "customer_name": _customer_display_name(customer),
         }
     )

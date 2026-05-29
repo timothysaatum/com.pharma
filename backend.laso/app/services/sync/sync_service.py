@@ -14,11 +14,10 @@ the server-side ``now`` captured at transaction open — not after queries.
 
 Pull filtering
 --------------
-Sales (and other branch-owned records) are only pulled when their
-``sync_status`` is ``'synced'``.  Records still marked ``'pending'`` on the
-server were created via the POS endpoint but not yet flushed to synced state;
-pulling them would cause the client to immediately try to push them back,
-creating an infinite sync loop.
+Branch-owned records created on the server are authoritative for the pulling
+client, even if their server-side ``sync_status`` is still ``'pending'`` from a
+legacy write path.  Pull responses normalize those rows to ``'synced'`` so the
+client stores them without pushing them straight back to the server.
 
 Push strategy
 -------------
@@ -409,10 +408,9 @@ class SyncService:
         a record committed between two sequential table queries from being
         silently skipped in both the current pull and all future pulls.
 
-        Branch-owned records (sales, inventory, batches) are filtered to
-        ``sync_status = 'synced'`` so that server-created records that are
-        still pending don't get pulled to the client and pushed right back,
-        which would create an infinite sync loop.
+        Branch-owned records (sales, inventory, batches) are normalized to
+        ``sync_status = 'synced'`` in the response so server-created rows do
+        not get queued back as local pending changes after pull.
         """
         # Auth dependencies may already have used the request-scoped session to
         # load the current user. PostgreSQL requires SET TRANSACTION ISOLATION
@@ -504,34 +502,32 @@ class SyncService:
             rows = await SyncService._pull_table(
                 db, BranchInventory, since,
                 BranchInventory.branch_id == branch_id,
-                # Only pull synced records — pending means the server hasn't
-                # finished processing them; pulling them would cause the client
-                # to push them straight back in a loop.
-                BranchInventory.sync_status == "synced",
             )
-            result.branch_inventory = [BranchInventoryResponse.model_validate(r) for r in rows]
+            result.branch_inventory = [
+                BranchInventoryResponse.model_validate(r).model_copy(
+                    update={"sync_status": "synced"}
+                )
+                for r in rows
+            ]
             total += len(rows)
 
         if "drug_batches" in tables:
             rows = await SyncService._pull_table(
                 db, DrugBatch, since,
                 DrugBatch.branch_id == branch_id,
-                DrugBatch.sync_status == "synced",
             )
-            result.drug_batches = [DrugBatchResponse.model_validate(r) for r in rows]
+            result.drug_batches = [
+                DrugBatchResponse.model_validate(r).model_copy(
+                    update={"sync_status": "synced"}
+                )
+                for r in rows
+            ]
             total += len(rows)
 
         if "sales" in tables:
             rows = await SyncService._pull_table(
                 db, Sale, since,
                 Sale.branch_id == branch_id,
-                # IMPORTANT: only pull synced sales.  Sales created via the
-                # POS endpoint are initially marked 'pending' by mark_as_pending_sync()
-                # before the sales_service commit.  If we pull them while still
-                # pending the client stores them as pending and immediately tries
-                # to push them back, causing a NOT NULL constraint on discount_amount
-                # and an infinite sync-error loop.
-                Sale.sync_status == "synced",
                 options=[selectinload(Sale.items)],
             )
             result.sales = []
@@ -541,6 +537,10 @@ class SyncService:
                     for k, v in row.__dict__.items()
                     if not k.startswith("_") and k != "items"
                 }
+                # Server branch records are authoritative for the pulling
+                # client.  Normalizing to "synced" prevents a pulled server row
+                # from being queued back to the server as a local pending change.
+                sale_data["sync_status"] = "synced"
                 sale_data["items_count"] = sum(
                     int(item.quantity or 0) for item in row.items
                 ) if row.items else 0

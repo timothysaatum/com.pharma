@@ -1,4 +1,4 @@
-import { get, post } from "./client";
+import { get, patch, post } from "./client";
 import type { PaginatedResponse, Prescription, PrescriptionMedication } from "@/types";
 
 export interface PrescriptionSearchItem {
@@ -31,6 +31,24 @@ export interface PrescriptionCreate {
 }
 
 export const prescriptionsApi = {
+    list(
+        params: {
+            page?: number;
+            page_size?: number;
+            customer_id?: string;
+            status_filter?: string;
+            include_expired?: boolean;
+            search?: string;
+        } = {},
+        signal?: AbortSignal
+    ): Promise<PaginatedResponse<Prescription>> {
+        const qs = new URLSearchParams();
+        Object.entries(params).forEach(([key, value]) => {
+            if (value !== undefined && value !== null && value !== "") qs.set(key, String(value));
+        });
+        return get<PaginatedResponse<Prescription>>(`/prescriptions/?${qs}`, { signal });
+    },
+
     listForCustomer(
         customerId: string,
         params: {
@@ -53,5 +71,12 @@ export const prescriptionsApi = {
 
     create(data: PrescriptionCreate): Promise<Prescription> {
         return post<Prescription>("/prescriptions/", data);
+    },
+
+    update(
+        id: string,
+        data: { status?: string; notes?: string }
+    ): Promise<Prescription> {
+        return patch<Prescription>(`/prescriptions/${id}`, data);
     },
 };

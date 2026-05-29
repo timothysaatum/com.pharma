@@ -107,8 +107,8 @@ function CustomerSearchWidget({
     };
 
     const selectCustomer = (c: CustomerMatch) => {
-        onSetCustomerId(c.id);
         onSetCustomerName(c.full_name);
+        onSetCustomerId(c.id);
         setQuery("");
         setResults([]);
         setOpen(false);

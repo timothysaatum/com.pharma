@@ -3,7 +3,7 @@ import type { UserRole } from "@/types";
 export const SETTINGS_TABS = ["organization", "branches"] as const;
 export type SettingsTabId = (typeof SETTINGS_TABS)[number];
 
-export const ADMIN_TABS = ["drugs", "inventory", "purchases", "contracts"] as const;
+export const ADMIN_TABS = ["drugs", "inventory", "purchases", "contracts", "prescriptions"] as const;
 export type AdminTabId = (typeof ADMIN_TABS)[number];
 
 export function getHomePathForRole(role?: UserRole | string | null): string {

@@ -313,10 +313,17 @@ class SyncEngine {
                     if (v === null || v === undefined) {
                         if (c === "is_deleted") return 0;
                         if (c === "is_active") return 1;
+                        if (c === "discount_amount") return 0;
+                        if (c === "tax_amount") return 0;
+                        if (c === "subtotal") return 0;
+                        if (c === "total_amount") return 0;
                         if (c === "insurance_verified") return 0;
                         if (c === "requires_prescription") return 0;
                         if (c === "receipt_printed") return 0;
                         if (c === "receipt_emailed") return 0;
+                        if (c === "status") return "completed";
+                        if (c === "payment_status") return "completed";
+                        if (c === "payment_method") return "cash";
                         if (c === "sync_version") return 1;
                         if (c === "sync_status") return "synced";
                         return null;

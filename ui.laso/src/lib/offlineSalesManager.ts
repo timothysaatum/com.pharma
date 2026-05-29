@@ -96,6 +96,7 @@ class OfflineSalesManager {
           quantity: item.quantity,
           unit_price: item.unit_price,
           discount_percentage: (item as any).discount_percentage || 0,
+          discount_amount: (item as any).discount_amount || 0,
         })),
         inventory_updates: inventoryDeltas,
         recorded_at: now,

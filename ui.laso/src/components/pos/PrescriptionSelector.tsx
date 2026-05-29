@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, FilePlus2, FileText, Loader2, Plus, RefreshCw, X } from "lucide-react";
 import { parseApiError } from "@/api/client";
 import { prescriptionsApi, type PrescriptionSearchItem } from "@/api/prescriptions";
@@ -84,9 +84,9 @@ export function PrescriptionSelector({
         [prescriptions, prescriptionId]
     );
 
-    const markVerified = () => {
+    const markVerified = useCallback(() => {
         rxItems.forEach((item) => onSetPrescriptionVerified(item.drug.id, true));
-    };
+    }, [rxItems, onSetPrescriptionVerified]);
 
     const load = async (signal?: AbortSignal) => {
         if (!customerId) {
@@ -117,11 +117,11 @@ export function PrescriptionSelector({
         return () => ctrl.abort();
     }, [customerId]);
 
-    const selectPrescription = (id: string) => {
+    const selectPrescription = useCallback((id: string) => {
         onSetPrescriptionId(id);
         markVerified();
         setShowCreate(false);
-    };
+    }, [onSetPrescriptionId, markVerified]);
 
     const updateMedication = (drugId: string, patch: Partial<PrescriptionMedication>) => {
         setMedications((prev) => prev.map((med) => med.drug_id === drugId ? { ...med, ...patch } : med));

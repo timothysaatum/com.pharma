@@ -22,6 +22,10 @@ export default function AdminPage() {
 
   useEffect(() => {
     const nextTab = parseAdminTab(tab);
+    if (nextTab === 'prescriptions') {
+      navigate('/prescriptions', { replace: true });
+      return;
+    }
     setActiveTab(nextTab);
     if (tab && tab !== nextTab) {
       navigate(`/admin/${nextTab}`, { replace: true });
@@ -48,9 +52,14 @@ export default function AdminPage() {
     inventory: 'Inventory',
     purchases: 'Purchases',
     contracts: 'Contracts',
+    prescriptions: 'Prescriptions',
   };
 
   const selectTab = (nextTab: AdminTabId) => {
+    if (nextTab === 'prescriptions') {
+      navigate('/prescriptions');
+      return;
+    }
     setActiveTab(nextTab);
     navigate(nextTab === 'drugs' ? '/admin' : `/admin/${nextTab}`);
   };

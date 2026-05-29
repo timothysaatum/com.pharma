@@ -11,6 +11,7 @@ import SetupRequiredPage from "@/pages/SetupRequiredPage";
 import POSPage from "@/pages/POSPage";
 import CustomersPage from "@/pages/CustomersPage";
 import SalesHistoryPage from "@/pages/SalesHistoryPage";
+import PrescriptionsPage from "@/pages/PrescriptionsPage";
 import SettingsPage from "@/pages/SettingsPage";
 import UsersPage from "@/pages/UsersPage";
 import ReportsPage from "@/pages/ReportsPage";
@@ -251,6 +252,10 @@ function AppRoutes() {
           path="/sales"
           element={<RequireAuth><AppShell><SalesHistoryPage /></AppShell></RequireAuth>}
         />
+        <Route
+          path="/prescriptions"
+          element={<RequireAuth><AppShell><PrescriptionsPage /></AppShell></RequireAuth>}
+        />
 
         {/*
          * /users — user management.
@@ -318,6 +323,7 @@ function AppRoutes() {
         <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
         <Route path="/purchases" element={<Navigate to="/admin/purchases" replace />} />
         <Route path="/contracts" element={<Navigate to="/admin/contracts" replace />} />
+        <Route path="/admin/prescriptions" element={<Navigate to="/prescriptions" replace />} />
         <Route path="/organization-stats" element={<Navigate to="/settings/organization" replace />} />
         <Route path="/branches" element={<Navigate to="/settings/branches" replace />} />
         <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />

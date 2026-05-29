@@ -31,8 +31,17 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      // 3. keep Vite's watcher focused on app source used at runtime.
+      ignored: [
+        "**/src-tauri/**",
+        "**/node_modules/**",
+        "**/dist/**",
+        "**/coverage/**",
+        "**/.git/**",
+        "**/__tests__/**",
+        "**/*.test.*",
+        "**/*.spec.*",
+      ],
     },
   },
 }));

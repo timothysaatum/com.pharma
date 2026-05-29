@@ -32,7 +32,7 @@ import { AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
-import { isOfflineError, parseApiError } from "@/api/client";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import { appEvents } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
@@ -94,11 +94,18 @@ export default function POSPage() {
         setCheckoutError(null);
 
         const payload = cart.buildSaleCreate(activeBranchId);
+        const backendWasReachable = isBackendReachable();
         const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
             const saleId = crypto.randomUUID();
             const saleNumber = `OFFLINE-${Date.now()}`;
             const now = new Date().toISOString();
             const totals = cart.totals;
+            
+            // Defensive guards: ensure all numeric values are valid numbers
+            const sanitizeNum = (val: unknown, fallback = 0): number => {
+                const num = typeof val === 'number' ? val : Number(val);
+                return !isNaN(num) ? num : fallback;
+            };
 
             const offlineSale = {
                 id: saleId,
@@ -107,13 +114,13 @@ export default function POSPage() {
                 branch_id: activeBranchId,
                 customer_id: payload.customer_id ?? null,
                 customer_name: payload.customer_name ?? null,
-                subtotal: totals.subtotal,
-                discount_amount: totals.discountAmount,
-                contract_discount_amount: totals.discountAmount,
+                subtotal: sanitizeNum(totals.subtotal),
+                discount_amount: sanitizeNum(totals.discountAmount),
+                contract_discount_amount: sanitizeNum(totals.discountAmount),
                 additional_discount_amount: 0,
-                total_discount_amount: totals.discountAmount,
-                tax_amount: totals.taxAmount,
-                total_amount: totals.total,
+                total_discount_amount: sanitizeNum(totals.discountAmount),
+                tax_amount: sanitizeNum(totals.taxAmount),
+                total_amount: sanitizeNum(totals.total),
                 price_contract_id: payload.price_contract_id,
                 contract_name: cart.state.contract?.name ?? null,
                 contract_type: cart.state.contract?.type ?? null,
@@ -151,10 +158,13 @@ export default function POSPage() {
                 updated_at: now,
                 created_at: now,
                 items: cart.state.items.map((item) => {
-                    const lineSubtotal = item.drug.unit_price * item.quantity;
-                    const discountPct = cart.state.contract?.discount_percentage ?? 0;
-                    const contractDiscountAmt = parseFloat(((lineSubtotal * discountPct) / 100).toFixed(2));
-                    const taxAmt = parseFloat(((lineSubtotal * item.drug.tax_rate) / 100).toFixed(2));
+                    const unitPrice = Number(item.drug.unit_price) || 0;
+                    const qty = Number(item.quantity) || 0;
+                    const lineSubtotal = unitPrice * qty;
+                    const discountPct = Number(cart.state.contract?.discount_percentage) || 0;
+                    const contractDiscountAmt = parseFloat(((lineSubtotal * discountPct) / 100).toFixed(2)) || 0;
+                    const taxRate = Number(item.drug.tax_rate) || 0;
+                    const taxAmt = parseFloat(((lineSubtotal * taxRate) / 100).toFixed(2)) || 0;
                     return {
                         id: crypto.randomUUID(),
                         sale_id: saleId,
@@ -258,7 +268,11 @@ export default function POSPage() {
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
         } catch (err) {
-            if (!isOffline && isOfflineError(err)) {
+            const shouldRecordOffline =
+                isOfflineError(err) &&
+                (!navigator.onLine || isOffline || !backendWasReachable);
+
+            if (shouldRecordOffline) {
                 const result = await recordOfflineSale();
                 setSuccessResult(result);
                 appEvents.emit("inventory:changed");

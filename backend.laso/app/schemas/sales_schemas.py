@@ -311,18 +311,6 @@ class SaleCreate(SaleBase):
         return v
     
     @model_validator(mode='after')
-    def validate_prescription_requirements(self) -> 'SaleCreate':
-        """Validate prescription requirements"""
-        has_prescription_items = any(item.requires_prescription for item in self.items)
-        
-        if has_prescription_items and not self.prescription_id:
-            raise ValueError(
-                "Prescription ID required when selling prescription drugs"
-            )
-        
-        return self
-    
-    @model_validator(mode='after')
     def validate_customer_for_contract(self) -> 'SaleCreate':
         """Validate customer requirements for specific contract types"""
         # Insurance and corporate contracts require registered customer

@@ -10,6 +10,7 @@ import uuid
 
 from app.core.deps import get_current_user, get_organization_id, require_permission
 from app.db.dependencies import get_db
+from app.models.sales.sales_model import Sale
 from app.models.user.user_model import User
 from app.schemas.sales_schemas import (
     SaleResponse, SaleWithDetails,
@@ -111,8 +112,7 @@ async def get_sale(
     """
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
-    from app.models.sales.sales_model import Sale
-    
+
     result = await db.execute(
         select(Sale)
         .options(selectinload(Sale.items))

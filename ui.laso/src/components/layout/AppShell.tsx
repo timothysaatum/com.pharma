@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
-    ShoppingCart, Users, BarChart2,
+    ShoppingCart, Users, BarChart2, FileText,
     LogOut, Building2, Menu, X,
     Receipt, Settings, UserCog, Cog,
 } from "lucide-react";
@@ -24,6 +24,7 @@ export const NAV_ITEMS: NavItem[] = [
     { to: "/pos", icon: ShoppingCart, label: "Point of Sale" },
     { to: "/sales", icon: Receipt, label: "Sales History" },
     { to: "/customers", icon: Users, label: "Customers" },
+    { to: "/prescriptions", icon: FileText, label: "Prescriptions" },
     {
         to: "/reports",
         icon: BarChart2,

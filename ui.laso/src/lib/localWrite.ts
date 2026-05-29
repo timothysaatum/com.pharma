@@ -139,12 +139,18 @@ export const writeLocal = {
         sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string }
     ): Promise<void> => {
         const { items, ...saleData } = sale;
+        const sanitizeNumber = (val: unknown, fallback = 0): number => {
+            const num = typeof val === 'number' ? val : Number(val);
+            return !isNaN(num) ? num : fallback;
+        };
+        
         const rawPayload = {
             ...saleData,
-            discount_amount:
-                (saleData as Record<string, unknown>).discount_amount ??
-                (saleData as Record<string, unknown>).total_discount_amount ??
-                0,
+            discount_amount: sanitizeNumber((saleData as Record<string, unknown>).discount_amount ??
+                (saleData as Record<string, unknown>).total_discount_amount ?? 0),
+            tax_amount: sanitizeNumber((saleData as Record<string, unknown>).tax_amount),
+            subtotal: sanitizeNumber((saleData as Record<string, unknown>).subtotal),
+            total_amount: sanitizeNumber((saleData as Record<string, unknown>).total_amount),
             items_json: JSON.stringify(items ?? []),
             items_count: (items ?? []).reduce(
                 (sum, item) => sum + (item?.quantity ?? 0),

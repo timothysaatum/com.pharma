@@ -389,7 +389,7 @@ class SalesService:
                         )
 
                     inventory.reserved_quantity += item.quantity
-                    inventory.mark_as_pending_sync()
+                    inventory.mark_as_synced()
                     reservations.append((inventory, item.quantity))
 
             except HTTPException:
@@ -525,7 +525,7 @@ class SalesService:
                 created_at=datetime.now(timezone.utc),
                 updated_at=datetime.now(timezone.utc),
             )
-            sale.mark_as_pending_sync()
+            sale.mark_as_synced()
             db.add(sale)
             await db.flush()  # materialise sale.id for FK references below
 
@@ -612,7 +612,7 @@ class SalesService:
 
                     batch.remaining_quantity -= take
                     batch.updated_at          = datetime.now(timezone.utc)
-                    batch.mark_as_pending_sync()
+                    batch.mark_as_synced()
                     qty_to_deduct  -= take
                     batches_updated += 1
 
@@ -642,7 +642,7 @@ class SalesService:
                 inventory.quantity          -= sale_item.quantity
                 inventory.reserved_quantity -= sale_item.quantity  # release
                 inventory.updated_at         = datetime.now(timezone.utc)
-                inventory.mark_as_pending_sync()
+                inventory.mark_as_synced()
                 inventory_updated += 1
 
                 # ------------------------------------------------------------------
@@ -742,7 +742,7 @@ class SalesService:
                     "filled" if prescription.refills_remaining == 0 else "active"
                 )
                 prescription.updated_at = datetime.now(timezone.utc)
-                prescription.mark_as_pending_sync()
+                prescription.mark_as_synced()
 
             # ------------------------------------------------------------------
             # 18. Loyalty points + tier recalculation
@@ -794,7 +794,7 @@ class SalesService:
                     )
 
                 customer.updated_at = datetime.now(timezone.utc)
-                customer.mark_as_pending_sync()
+                customer.mark_as_synced()
 
         # ----------------------------------------------------------------------
         # 19. Commit — outside the savepoint context
@@ -930,7 +930,7 @@ class SalesService:
                 f"Refunded: {refund_data.reason}\n\n{sale.notes or ''}".strip()
             )
             sale.updated_at = datetime.now(timezone.utc)
-            sale.mark_as_pending_sync()
+            sale.mark_as_synced()
 
             inventory_restored = 0
             batches_restored   = 0
@@ -961,7 +961,7 @@ class SalesService:
                 previous_qty       = inventory.quantity
                 inventory.quantity += refund_item.quantity
                 inventory.updated_at = datetime.now(timezone.utc)
-                inventory.mark_as_pending_sync()
+                inventory.mark_as_synced()
                 inventory_restored += 1
 
                 # Restore to the original batch
@@ -978,7 +978,7 @@ class SalesService:
                     if batch:
                         batch.remaining_quantity += refund_item.quantity
                         batch.updated_at          = datetime.now(timezone.utc)
-                        batch.mark_as_pending_sync()
+                        batch.mark_as_synced()
                         batches_restored += 1
 
                 # 'return' is the correct model-valid type for customer returns
@@ -1034,7 +1034,7 @@ class SalesService:
                     )
                     loyalty_points_deducted = points_to_deduct
                     customer.updated_at     = datetime.now(timezone.utc)
-                    customer.mark_as_pending_sync()
+                    customer.mark_as_synced()
 
         # 8. Commit
         await db.commit()
