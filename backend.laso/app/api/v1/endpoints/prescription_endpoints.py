@@ -98,12 +98,33 @@ class PrescriptionCreate(BaseModel):
 
 
 class PrescriptionUpdate(BaseModel):
-    """Update prescription status or refills"""
+    """Update prescription details, medications, or status"""
+    # Basic details
+    prescriber_name: Optional[str] = None
+    prescriber_license: Optional[str] = None
+    prescriber_phone: Optional[str] = None
+    prescriber_address: Optional[str] = None
+    
+    # Dates
+    issue_date: Optional[date] = None
+    expiry_date: Optional[date] = None
+    
+    # Medications
+    medications: Optional[List[MedicationItem]] = None
+    
+    # Refills
+    refills_allowed: Optional[int] = Field(None, ge=0, le=10)
+    
+    # Clinical info
+    diagnosis: Optional[str] = None
+    notes: Optional[str] = None
+    special_instructions: Optional[str] = None
+    
+    # Status
     status: Optional[str] = Field(
         None,
         description="active, filled, expired, cancelled"
     )
-    notes: Optional[str] = None
 
 
 class MedicationResponse(MedicationItem):
@@ -540,20 +561,39 @@ async def update_prescription(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Update prescription status
+    Update prescription details, medications, or status.
     
     **Permissions:** manage_prescriptions
     
-    **Allowed Status Changes:**
-    - active → filled (after dispensing)
-    - active → cancelled (before expiry)
-    - filled → cancelled (withdraw fill)
+    **Editable Fields:**
+    - Prescriber details (name, license, phone, address)
+    - Issue and expiry dates
+    - Medications (full replacement)
+    - Refills allowed
+    - Clinical info (diagnosis, notes, instructions)
+    - Status (active, filled, expired, cancelled)
     
-    **Example:**
+    **Example - Edit medications:**
+    ```json
+    {
+      "medications": [
+        {
+          "drug_id": "uuid",
+          "drug_name": "Amoxicillin",
+          "dosage": "500mg",
+          "frequency": "twice daily",
+          "duration": "7 days",
+          "quantity": 14
+        }
+      ]
+    }
+    ```
+    
+    **Example - Change status:**
     ```json
     {
       "status": "filled",
-      "notes": "Dispensed 14 tablets on 2026-05-27"
+      "notes": "Dispensed on 2026-05-27"
     }
     ```
     """
@@ -570,11 +610,71 @@ async def update_prescription(
             detail="Prescription not found"
         )
     
-    if update_data.status:
-        prescription.status = update_data.status
+    # Validate dates if being updated
+    issue_date = update_data.issue_date or prescription.issue_date
+    expiry_date = update_data.expiry_date or prescription.expiry_date
     
-    if update_data.notes:
+    if issue_date > expiry_date:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Issue date cannot be after expiry date"
+        )
+    
+    if expiry_date < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Expiry date must be today or in the future"
+        )
+    
+    # Update basic fields
+    if update_data.prescriber_name is not None:
+        prescription.prescriber_name = update_data.prescriber_name
+    
+    if update_data.prescriber_license is not None:
+        prescription.prescriber_license = update_data.prescriber_license
+    
+    if update_data.prescriber_phone is not None:
+        prescription.prescriber_phone = update_data.prescriber_phone
+    
+    if update_data.prescriber_address is not None:
+        prescription.prescriber_address = update_data.prescriber_address
+    
+    if update_data.issue_date is not None:
+        prescription.issue_date = update_data.issue_date
+    
+    if update_data.expiry_date is not None:
+        prescription.expiry_date = update_data.expiry_date
+    
+    # Update medications if provided
+    if update_data.medications is not None:
+        if len(update_data.medications) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="At least one medication is required"
+            )
+        medications_list = [m.model_dump() for m in update_data.medications]
+        prescription.medications = medications_list
+    
+    # Update refills
+    if update_data.refills_allowed is not None:
+        prescription.refills_allowed = update_data.refills_allowed
+        # If increasing refills, replenish remaining
+        if update_data.refills_allowed > prescription.refills_remaining:
+            prescription.refills_remaining = update_data.refills_allowed
+    
+    # Update clinical info
+    if update_data.diagnosis is not None:
+        prescription.diagnosis = update_data.diagnosis
+    
+    if update_data.notes is not None:
         prescription.notes = update_data.notes
+    
+    if update_data.special_instructions is not None:
+        prescription.special_instructions = update_data.special_instructions
+    
+    # Update status
+    if update_data.status is not None:
+        prescription.status = update_data.status
     
     prescription.updated_at = datetime.now(timezone.utc)
     await db.commit()

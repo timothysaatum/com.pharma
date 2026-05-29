@@ -339,12 +339,12 @@ function validateCart(
                     .map((i) => i.drug.name)
                     .join(", ")}`,
             });
-        }
-        if (!state.prescriptionId) {
-            errors.push({
-                field: "prescription_id",
-                message: "Prescription ID required for prescription drugs",
-            });
+            if (!state.prescriptionId) {
+                errors.push({
+                    field: "prescription_id",
+                    message: "Prescription ID required for prescription drugs",
+                });
+            }
         }
     }
 

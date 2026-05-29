@@ -26,6 +26,7 @@ import { contractsApi, type ContractCreate, type ContractUpdate, type ContractRe
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
 import { parseApiError } from "@/api/client";
+import { InsuranceProviderSelector } from "@/components/contracts/InsuranceProviderSelector";
 import type { Branch } from "@/types";
 
 // ── Zod schema — mirrors Pydantic validators ──────────────────────────────────
@@ -244,7 +245,7 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
         setApiError(null);
 
         const clean = <T,>(v: T | null | undefined): T | undefined =>
-            v === null || v === "" ? undefined : (v as T);
+            v === null || v === "" || (typeof v === "number" && isNaN(v)) ? undefined : (v as T);
 
         try {
             let saved: ContractResponse;
@@ -475,10 +476,12 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
                                 <Shield className="w-3.5 h-3.5" />Insurance Details
                             </p>
                             <div>
-                                <label className={labelCls}>Insurance Provider ID <span className="text-red-500">*</span></label>
-                                <input {...register("insurance_provider_id")} placeholder="Insurance provider UUID" className={inputCls} />
-                                <FieldError msg={errors.insurance_provider_id?.message} />
-                                <p className="text-xs text-ink-muted mt-1">Enter the UUID of the insurance provider from your provider list.</p>
+                                <label className={labelCls}>Insurance Provider <span className="text-red-500">*</span></label>
+                                <InsuranceProviderSelector
+                                    value={watch("insurance_provider_id") || null}
+                                    onChange={(id) => setValue("insurance_provider_id", id || "")}
+                                    error={errors.insurance_provider_id?.message}
+                                />
                             </div>
                             <div className="grid grid-cols-2 gap-4">
                                 <div>

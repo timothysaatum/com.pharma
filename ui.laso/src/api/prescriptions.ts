@@ -30,6 +30,21 @@ export interface PrescriptionCreate {
     special_instructions?: string | null;
 }
 
+export interface PrescriptionUpdate {
+    prescriber_name?: string;
+    prescriber_license?: string;
+    prescriber_phone?: string | null;
+    prescriber_address?: string | null;
+    issue_date?: string;
+    expiry_date?: string;
+    medications?: PrescriptionMedication[];
+    refills_allowed?: number;
+    diagnosis?: string | null;
+    notes?: string | null;
+    special_instructions?: string | null;
+    status?: string;
+}
+
 export const prescriptionsApi = {
     list(
         params: {
@@ -75,8 +90,22 @@ export const prescriptionsApi = {
 
     update(
         id: string,
-        data: { status?: string; notes?: string }
+        data: PrescriptionUpdate
     ): Promise<Prescription> {
         return patch<Prescription>(`/prescriptions/${id}`, data);
+    },
+
+    /**
+     * Use a prescription refill during sales
+     */
+    refill(id: string): Promise<Prescription> {
+        return post<Prescription>(`/prescriptions/${id}/refill`, {});
+    },
+
+    /**
+     * Get a single prescription by ID
+     */
+    getById(id: string): Promise<Prescription> {
+        return get<Prescription>(`/prescriptions/${id}`);
     },
 };
