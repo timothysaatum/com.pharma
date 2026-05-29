@@ -245,7 +245,7 @@ export default function POSPage() {
         try {
             let result: ProcessSaleResponse;
 
-            if (isOffline || !navigator.onLine) {
+            if (!navigator.onLine) {
                 // ── Offline path ─────────────────────────────────────────────
                 result = await recordOfflineSale();
             } else {

@@ -23,6 +23,7 @@ import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError } from "@/hooks/useCart";
 import { apiClient } from "@/api/client";
+import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
 const CONTRACT_TYPE_COLORS: Record<string, string> = {
     standard: "bg-slate-100 text-slate-600",
@@ -504,32 +505,14 @@ export function CartPanel({
                             {hasRxItems && (
                                 <div>
                                     <SectionLabel icon={FileText}>Prescription</SectionLabel>
-                                    {!customerId && (
-                                        <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-50 border border-amber-100 mb-2">
-                                            <AlertCircle className="w-3.5 h-3.5 text-amber-600 flex-shrink-0 mt-0.5" />
-                                            <p className="text-xs text-amber-700">
-                                                A <strong>registered customer</strong> must be selected above before linking a prescription.
-                                            </p>
-                                        </div>
-                                    )}
-                                    <div className="relative">
-                                        <FileText className="absolute left-3 top-3 w-3.5 h-3.5 text-slate-400" />
-                                        <input
-                                            value={prescriptionId ?? ""}
-                                            onChange={(e) => onSetPrescriptionId(e.target.value || null)}
-                                            placeholder="Prescription UUID from patient record"
-                                            disabled={!customerId}
-                                            className={`${inputCls} pl-9 font-mono text-xs ${!customerId ? "opacity-50 cursor-not-allowed bg-slate-50" : ""} ${fieldError("prescription_id") ? "border-red-300 bg-red-50/30" : ""}`}
-                                        />
-                                    </div>
-                                    <p className="text-[10px] text-slate-400 mt-1.5">
-                                        The prescription must be active, have refills remaining, and belong to the selected customer.
-                                    </p>
-                                    {fieldError("prescription_id") && (
-                                        <p className="text-xs text-red-500 mt-1.5 flex items-center gap-1">
-                                            <AlertCircle className="w-3 h-3" />{fieldError("prescription_id")}
-                                        </p>
-                                    )}
+                                    <PrescriptionSelector
+                                        customerId={customerId}
+                                        rxItems={items.filter((item) => item.requiresPrescription)}
+                                        prescriptionId={prescriptionId}
+                                        error={fieldError("prescription_id")}
+                                        onSetPrescriptionId={onSetPrescriptionId}
+                                        onSetPrescriptionVerified={onSetPrescriptionVerified}
+                                    />
                                 </div>
                             )}
 

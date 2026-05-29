@@ -46,9 +46,16 @@ const TYPE_COLORS: Record<string, string> = {
     supplement: "bg-amber-50 text-amber-700",
 };
 
+function toBoolean(value: unknown): boolean {
+    return value === true || value === 1 || value === "1" || value === "true";
+}
+
 function inventoryItemToDrug(item: BranchInventoryWithDetails): Drug {
     const now = item.updated_at || new Date().toISOString();
     const row = item as unknown as Record<string, unknown>;
+    const requiresPrescription = toBoolean(row.requires_prescription);
+    const drugType = (row.drug_type as DrugType | undefined)
+        ?? (requiresPrescription ? "prescription" : "otc");
     const unitPrice = Number(
         item.effective_unit_price ??
         item.selling_price ??
@@ -63,18 +70,18 @@ function inventoryItemToDrug(item: BranchInventoryWithDetails): Drug {
         id: item.drug_id,
         organization_id: String(row.organization_id ?? ""),
         name: item.drug_name || item.drug_id,
-        generic_name: null,
+        generic_name: (row.drug_generic_name as string | null | undefined) ?? null,
         brand_name: null,
         sku: item.drug_sku,
         barcode: null,
         category_id: null,
-        drug_type: (row.drug_type as DrugType | undefined) ?? "otc",
+        drug_type: drugType,
         dosage_form: null,
-        strength: null,
+        strength: (row.drug_strength as string | null | undefined) ?? null,
         manufacturer: null,
         supplier: null,
         ndc_code: null,
-        requires_prescription: Boolean(row.requires_prescription),
+        requires_prescription: requiresPrescription,
         controlled_substance_schedule: null,
         unit_price: Number.isFinite(unitPrice) ? unitPrice : 0,
         cost_price: null,
@@ -136,6 +143,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                     {
                         search: debouncedQuery || undefined,
                         include_zero_stock: false,
+                        drug_type: typeFilter || undefined,
                     },
                     1,
                     30
@@ -152,6 +160,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                     page_size: 30,
                     search: debouncedQuery || undefined,
                     include_zero_stock: false,
+                    drug_type: typeFilter || undefined,
                 },
                 controller.signal
             );
@@ -172,6 +181,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                         {
                             search: debouncedQuery || undefined,
                             include_zero_stock: false,
+                            drug_type: typeFilter || undefined,
                         },
                         1,
                         30

@@ -45,6 +45,7 @@ export const inventoryApi = {
             include_zero_stock?: boolean;
             search?: string;
             low_stock_only?: boolean;
+            drug_type?: string;
         } = {},
         signal?: AbortSignal
     ): Promise<PaginatedResponse<BranchInventoryWithDetails>> {

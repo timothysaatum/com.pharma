@@ -28,10 +28,13 @@ export function DataFreshnessIndicator({
     error,
     compact = false,
 }: DataFreshnessIndicatorProps) {
-    const [relativeTime, setRelativeTime] = useState<string>("");
+    const [relativeTime, setRelativeTime] = useState<string>("just now");
 
     useEffect(() => {
-        if (!cached_at) return;
+        if (!cached_at) {
+            setRelativeTime("just now");
+            return;
+        }
 
         const updateTime = () => {
             const age = Date.now() - new Date(cached_at).getTime();
@@ -66,7 +69,7 @@ export function DataFreshnessIndicator({
                 title={error ? `Error: ${error}` : `Last synced: ${relativeTime}`}
             >
                 <Clock className="w-3 h-3" />
-                {relativeTime}
+                {relativeTime || "just now"}
             </span>
         );
     }

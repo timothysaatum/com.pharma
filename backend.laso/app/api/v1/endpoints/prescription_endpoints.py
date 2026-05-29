@@ -18,7 +18,7 @@ from typing import Optional, List
 from datetime import date, datetime, timezone
 import uuid
 
-from app.core.deps import get_current_user, require_permission
+from app.core.deps import get_current_user, require_any_permission, require_permission
 from app.db.dependencies import get_db
 from app.models.user.user_model import User
 from app.models.precriptions.prescription_model import Prescription
@@ -158,7 +158,7 @@ class PrescriptionSearchResponse(BaseModel):
     "/",
     response_model=PrescriptionResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("manage_prescriptions"))]
+    dependencies=[Depends(require_any_permission("manage_prescriptions", "process_sales"))]
 )
 async def create_prescription(
     prescription_data: PrescriptionCreate,

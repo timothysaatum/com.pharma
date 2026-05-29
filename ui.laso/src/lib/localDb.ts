@@ -721,6 +721,13 @@ export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails
   await ensureBranchInventorySchema(db);
   for (const item of items) {
     const now = item.updated_at ?? new Date().toISOString();
+    const raw = item as unknown as Record<string, unknown>;
+    const drugType = typeof raw.drug_type === "string" ? raw.drug_type : "otc";
+    const requiresPrescription =
+      raw.requires_prescription === true ||
+      raw.requires_prescription === 1 ||
+      raw.requires_prescription === "1" ||
+      raw.requires_prescription === "true";
     await db.execute(
       `INSERT INTO drugs
         (id, organization_id, name, generic_name, brand_name, sku, barcode,
@@ -731,15 +738,17 @@ export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails
          usage_instructions, side_effects, contraindications, storage_conditions,
          is_active, is_deleted, sync_status, sync_version, synced_at, updated_at, created_at)
        VALUES ($1, '', $2, NULL, NULL, $3, NULL,
-         NULL, 'otc', NULL, NULL, NULL, NULL,
-         0, NULL, NULL,
-         $4, NULL, NULL, 0, $5,
+         NULL, $4, NULL, NULL, NULL, NULL,
+         $5, NULL, NULL,
+         $6, NULL, NULL, 0, $7,
          50, NULL, 'unit', NULL,
          NULL, NULL, NULL, NULL,
-         1, 0, 'synced', 1, NULL, $6, $6)
+         1, 0, 'synced', 1, NULL, $8, $8)
        ON CONFLICT(id) DO UPDATE SET
          name = excluded.name,
          sku = excluded.sku,
+         drug_type = excluded.drug_type,
+         requires_prescription = excluded.requires_prescription,
          unit_price = excluded.unit_price,
          reorder_level = excluded.reorder_level,
          updated_at = excluded.updated_at`,
@@ -747,6 +756,8 @@ export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails
         item.drug_id,
         item.drug_name || item.drug_id,
         item.drug_sku ?? null,
+        drugType,
+        requiresPrescription ? 1 : 0,
         item.effective_unit_price ?? item.drug_unit_price ?? item.selling_price ?? 0,
         item.drug_reorder_level ?? 0,
         now,

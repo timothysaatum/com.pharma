@@ -31,6 +31,7 @@ interface DrugSearchParams {
   drug_type?: string;
   branch_id?: string;
   is_active?: boolean;
+  organization_id?: string;
 }
 
 interface CustomerSearchParams {
@@ -38,6 +39,7 @@ interface CustomerSearchParams {
   customer_type?: string;
   loyalty_tier?: string;
   is_active?: boolean;
+  organization_id?: string;
 }
 
 interface ContractSearchParams {
@@ -295,6 +297,10 @@ export const localRead = {
       values.push(boolToInt(params.is_active));
       qualifiers.push(`is_active = $${values.length}`);
     }
+    if (params.organization_id) {
+      values.push(params.organization_id);
+      qualifiers.push(`d.organization_id = $${values.length}`);
+    }
     if (params.drug_type) {
       values.push(params.drug_type);
       qualifiers.push(`drug_type = $${values.length}`);
@@ -390,6 +396,10 @@ export const localRead = {
     if (params.loyalty_tier) {
       values.push(params.loyalty_tier);
       qualifiers.push(`loyalty_tier = $${values.length}`);
+    }
+    if (params.organization_id) {
+      values.push(params.organization_id);
+      qualifiers.push(`organization_id = $${values.length}`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));
@@ -711,6 +721,7 @@ export const localRead = {
       search?: string;
       low_stock_only?: boolean;
       include_zero_stock?: boolean;
+      drug_type?: string;
     } = {},
     page = 1,
     page_size = 25
@@ -731,6 +742,14 @@ export const localRead = {
     if (params.low_stock_only) {
       qualifiers.push("(bi.quantity - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)");
     }
+    if (params.drug_type) {
+      values.push(params.drug_type);
+      if (params.drug_type === "prescription") {
+        qualifiers.push(`(d.drug_type = $${values.length} OR d.requires_prescription = 1)`);
+      } else {
+        qualifiers.push(`d.drug_type = $${values.length}`);
+      }
+    }
     if (!params.include_zero_stock) {
       qualifiers.push("bi.quantity > 0");
     }
@@ -747,6 +766,9 @@ export const localRead = {
 
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT bi.*, d.name as drug_name, d.sku as drug_sku,
+         d.drug_type as drug_type, d.requires_prescription as requires_prescription,
+         d.organization_id as organization_id, d.generic_name as drug_generic_name,
+         d.strength as drug_strength, d.tax_rate as drug_tax_rate,
          d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level
        FROM branch_inventory bi
        LEFT JOIN drugs d ON d.id = bi.drug_id
@@ -772,6 +794,12 @@ export const localRead = {
       created_at: String(row.created_at),
       drug_name: String(row.drug_name ?? ""),
       drug_sku: row.drug_sku === null ? null : String(row.drug_sku),
+      drug_type: String(row.drug_type ?? "otc") as any,
+      requires_prescription: toBoolean(row.requires_prescription),
+      organization_id: row.organization_id === null ? "" : String(row.organization_id ?? ""),
+      drug_generic_name: row.drug_generic_name === null ? null : String(row.drug_generic_name ?? ""),
+      drug_strength: row.drug_strength === null ? null : String(row.drug_strength ?? ""),
+      drug_tax_rate: toNumber(row.drug_tax_rate),
       catalog_unit_price: toNumber(row.drug_unit_price),
       drug_unit_price: toNumber(row.drug_unit_price),
       effective_unit_price: row.selling_price !== null ? toNumber(row.selling_price) : toNumber(row.drug_unit_price),

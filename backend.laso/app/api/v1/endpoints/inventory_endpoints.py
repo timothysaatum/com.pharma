@@ -43,6 +43,7 @@ async def get_branch_inventory(
     include_zero_stock: bool = Query(False, description="Include items with zero quantity"),
     search: Optional[str] = Query(None, description="Search drug name or SKU"),
     low_stock_only: bool = Query(False, description="Show only low stock items"),
+    drug_type: Optional[str] = Query(None, description="Filter by drug type"),
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db)
 ):
@@ -72,7 +73,8 @@ async def get_branch_inventory(
         drug_id=drug_id,
         include_zero_stock=include_zero_stock,
         search=search,
-        low_stock_only=low_stock_only
+        low_stock_only=low_stock_only,
+        drug_type=drug_type,
     )
     
     return result

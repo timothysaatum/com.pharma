@@ -92,6 +92,7 @@ export default function CustomersPage() {
                         search: debouncedSearch || undefined,
                         customer_type: filterType || undefined,
                         loyalty_tier: filterTier || undefined,
+                        organization_id: user?.organization_id,
                     },
                     page,
                     25
@@ -123,11 +124,12 @@ export default function CustomersPage() {
                         search: debouncedSearch || undefined,
                         customer_type: filterType || undefined,
                         loyalty_tier: filterTier || undefined,
+                        organization_id: user?.organization_id,
                     },
                     page,
                     25
                 ),
-                { timeoutMs: 12000, dataKey: `customers:${page}:${debouncedSearch}:${filterType}` }
+                { timeoutMs: 12000, dataKey: `customers:${user?.organization_id}:${page}:${debouncedSearch}:${filterType}` }
             );
 
             if (!ctrl.signal.aborted) {
@@ -145,7 +147,7 @@ export default function CustomersPage() {
         } finally {
             if (!ctrl.signal.aborted) setIsLoading(false);
         }
-    }, [page, debouncedSearch, filterType, filterTier]);
+    }, [page, debouncedSearch, filterType, filterTier, user?.organization_id]);
 
     useEffect(() => { fetchCustomers(); return () => abortRef.current?.abort(); }, [fetchCustomers]);
 

@@ -1,25 +1,32 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { authStorage } from "@/lib/storage";
 
-const BASE_URL = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
+const configuredBaseUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const BASE_URL = configuredBaseUrl.replace(/^http:\/\/127\.0\.0\.1:8000\/?$/, "http://localhost:8000");
 let backendReachable = true;
+let backendOfflineSince: number | null = null;
 
 export function isBackendReachable(): boolean {
+    if (!backendReachable && navigator.onLine && backendOfflineSince !== null) {
+        return Date.now() - backendOfflineSince > 15_000;
+    }
     return backendReachable;
 }
 
 export function markBackendOffline(): void {
     backendReachable = false;
+    backendOfflineSince = Date.now();
 }
 
 export function markBackendOnline(): void {
     backendReachable = true;
+    backendOfflineSince = null;
 }
 
 export const apiClient = axios.create({
     baseURL: `${BASE_URL}/api/v1`,
     headers: { "Content-Type": "application/json" },
-    timeout: 15_000,
+    timeout: 30_000,
 });
 
 // ── Token refresh state ───────────────────────────────────

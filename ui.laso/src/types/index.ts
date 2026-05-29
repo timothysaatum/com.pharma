@@ -511,6 +511,8 @@ export interface BranchInventory extends TimestampFields, SyncFields {
 export interface BranchInventoryWithDetails extends BranchInventory {
     drug_name: string;
     drug_sku: string | null;
+    drug_type?: DrugType;
+    requires_prescription?: boolean;
     catalog_unit_price?: number;
     drug_unit_price: number;
     effective_unit_price: number;

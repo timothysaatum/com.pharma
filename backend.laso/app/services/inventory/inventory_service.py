@@ -194,6 +194,7 @@ class InventoryService:
         include_zero_stock: bool = False,
         search: Optional[str] = None,
         low_stock_only: bool = False,
+        drug_type: Optional[str] = None,
     ) -> PaginatedResponse[BranchInventoryWithDetails]:
         """
         Paginated inventory for a branch with joined drug and branch details.
@@ -244,6 +245,17 @@ class InventoryService:
         if low_stock_only:
             query      = query.where(BranchInventory.quantity <= Drug.reorder_level)
             count_base = count_base.where(BranchInventory.quantity <= Drug.reorder_level)
+
+        if drug_type:
+            if drug_type == "prescription":
+                cond = or_(
+                    Drug.drug_type == "prescription",
+                    Drug.requires_prescription.is_(True),
+                )
+            else:
+                cond = Drug.drug_type == drug_type
+            query      = query.where(cond)
+            count_base = count_base.where(cond)
 
         query = query.order_by(Drug.name)
 

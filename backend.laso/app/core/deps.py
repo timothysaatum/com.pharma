@@ -186,6 +186,21 @@ def require_permission(permission: str):
     return permission_checker
 
 
+def require_any_permission(*permissions: str):
+    """
+    Dependency factory for endpoints that accept one of several permissions.
+    """
+    async def permission_checker(current_user: User = Depends(get_current_user)) -> User:
+        if not any(current_user.has_permission(permission) for permission in permissions):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Access denied. Required one of: {', '.join(permissions)}",
+            )
+        return current_user
+
+    return permission_checker
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db)

@@ -177,10 +177,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:1420",
+        "http://127.0.0.1:1420",
         "http://tauri.localhost",
         "tauri://localhost",
         "https://tauri.localhost",
     ],
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
