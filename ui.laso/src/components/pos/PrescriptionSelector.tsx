@@ -29,7 +29,8 @@ function addDays(days: number): string {
 }
 
 function makePrescriptionNumber(): string {
-    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
+    const iso = new Date().toISOString();
+    const stamp = iso.replace(/[-]/g, "").replace(/[:]/g, "").replace(/[TZ.]/g, "").slice(0, 14);
     return `RX-${stamp}`;
 }
 
