@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useMemo, useState, useCallback } from "react";
-import { AlertCircle, ChevronDown, Loader2, Plus, RefreshCw, X } from "lucide-react";
+import { AlertCircle, ChevronDown, Loader2, Plus, X } from "lucide-react";
 import { insuranceProvidersApi, type InsuranceProviderSearchItem, type InsuranceProviderCreate } from "@/api/insuranceProviders";
 import { parseApiError } from "@/api/client";
 
@@ -23,8 +23,6 @@ interface InsuranceProviderSelectorProps {
 
 const inputCls = "w-full h-10 px-3 rounded-lg border border-slate-200 text-sm text-ink bg-white " +
     "focus:outline-none focus:ring-2 focus:ring-brand-500/20 focus:border-brand-500 transition-colors";
-
-const labelCls = "block text-xs font-semibold text-ink-muted uppercase tracking-widest mb-1.5";
 
 export function InsuranceProviderSelector({
     value,
