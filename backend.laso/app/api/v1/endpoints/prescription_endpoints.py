@@ -281,7 +281,8 @@ async def create_prescription(
     )
     
     db.add(prescription)
-    await db.flush()
+    await db.commit()
+    await db.refresh(prescription)
     
     return PrescriptionResponse(
         **{
@@ -576,7 +577,8 @@ async def update_prescription(
         prescription.notes = update_data.notes
     
     prescription.updated_at = datetime.now(timezone.utc)
-    await db.flush()
+    await db.commit()
+    await db.refresh(prescription)
     
     # Get customer name
     cust_res = await db.execute(
@@ -661,7 +663,8 @@ async def use_prescription_refill(
     prescription.verified_at = datetime.now(timezone.utc)
     prescription.updated_at = datetime.now(timezone.utc)
     
-    await db.flush()
+    await db.commit()
+    await db.refresh(prescription)
     
     # Get customer name
     cust_res = await db.execute(
