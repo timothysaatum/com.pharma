@@ -66,60 +66,60 @@ const schema = z.object({
     // Insurance validations
     if (v.contract_type === "insurance") {
         if (!v.insurance_provider_id) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["insurance_provider_id"], message: "Insurance provider required for insurance contracts" });
+            ctx.addIssue({ code: "custom", path: ["insurance_provider_id"], message: "Insurance provider required for insurance contracts" });
         }
         if (!v.copay_amount && !v.copay_percentage) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["copay_amount"], message: "Either copay amount or copay % required for insurance contracts" });
+            ctx.addIssue({ code: "custom", path: ["copay_amount"], message: "Either copay amount or copay % required for insurance contracts" });
         }
         if (v.copay_amount && v.copay_percentage) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["copay_amount"], message: "Cannot specify both copay amount and copay %" });
+            ctx.addIssue({ code: "custom", path: ["copay_amount"], message: "Cannot specify both copay amount and copay %" });
         }
     }
     // Default contract validations
     if (v.is_default_contract) {
-        if (v.contract_type !== "standard") ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["is_default_contract"], message: "Only standard contracts can be default" });
-        if (v.discount_percentage !== 0) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["discount_percentage"], message: "Default contract must have 0% discount" });
-        if (!v.applies_to_all_branches) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["applies_to_all_branches"], message: "Default contract must apply to all branches" });
+        if (v.contract_type !== "standard") ctx.addIssue({ code: "custom", path: ["is_default_contract"], message: "Only standard contracts can be default" });
+        if (v.discount_percentage !== 0) ctx.addIssue({ code: "custom", path: ["discount_percentage"], message: "Default contract must have 0% discount" });
+        if (!v.applies_to_all_branches) ctx.addIssue({ code: "custom", path: ["applies_to_all_branches"], message: "Default contract must apply to all branches" });
     }
     // Promotional validations
     if (v.contract_type === "promotional") {
-        if (!v.effective_to) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["effective_to"], message: "Promotional contracts must have an expiry date" });
+        if (!v.effective_to) ctx.addIssue({ code: "custom", path: ["effective_to"], message: "Promotional contracts must have an expiry date" });
         if (v.effective_to) {
             const days = (new Date(v.effective_to).getTime() - new Date(v.effective_from).getTime()) / 86400000;
-            if (days > 365) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["effective_to"], message: "Promotional contracts cannot exceed 365 days" });
+            if (days > 365) ctx.addIssue({ code: "custom", path: ["effective_to"], message: "Promotional contracts cannot exceed 365 days" });
         }
     }
     // Wholesale validations
     if (v.contract_type === "wholesale") {
-        if (!v.minimum_purchase_amount) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["minimum_purchase_amount"], message: "Wholesale contracts must specify minimum purchase amount" });
-        if (v.discount_percentage > 30) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["discount_percentage"], message: "Wholesale discount cannot exceed 30%" });
+        if (!v.minimum_purchase_amount) ctx.addIssue({ code: "custom", path: ["minimum_purchase_amount"], message: "Wholesale contracts must specify minimum purchase amount" });
+        if (v.discount_percentage > 30) ctx.addIssue({ code: "custom", path: ["discount_percentage"], message: "Wholesale discount cannot exceed 30%" });
     }
     // Senior citizen
     if (v.contract_type === "senior_citizen" && v.discount_percentage > 15) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["discount_percentage"], message: "Senior citizen discount should not exceed 15%" });
+        ctx.addIssue({ code: "custom", path: ["discount_percentage"], message: "Senior citizen discount should not exceed 15%" });
     }
     // Staff
     if (v.contract_type === "staff") {
-        if (!v.allowed_user_roles.length) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["allowed_user_roles"], message: "Staff contracts must restrict which roles can apply them" });
+        if (!v.allowed_user_roles.length) ctx.addIssue({ code: "custom", path: ["allowed_user_roles"], message: "Staff contracts must restrict which roles can apply them" });
         const hasApprover = v.allowed_user_roles.includes("manager") || v.allowed_user_roles.includes("admin");
-        if (!hasApprover) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["allowed_user_roles"], message: "Staff contracts must include manager or admin role" });
+        if (!hasApprover) ctx.addIssue({ code: "custom", path: ["allowed_user_roles"], message: "Staff contracts must include manager or admin role" });
     }
     // Branch logic
     if (!v.applies_to_all_branches && (!v.applicable_branch_ids || v.applicable_branch_ids.length === 0)) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["applicable_branch_ids"], message: "Select at least one branch, or enable 'applies to all branches'" });
+        ctx.addIssue({ code: "custom", path: ["applicable_branch_ids"], message: "Select at least one branch, or enable 'applies to all branches'" });
     }
     // Drug applicability
     if (!v.applies_to_prescription_only && !v.applies_to_otc) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["applies_to_otc"], message: "Contract must apply to at least one drug type" });
+        ctx.addIssue({ code: "custom", path: ["applies_to_otc"], message: "Contract must apply to at least one drug type" });
     }
     // Date range
     if (v.effective_to && v.effective_from && v.effective_to < v.effective_from) {
-        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["effective_to"], message: "End date must be on or after start date" });
+        ctx.addIssue({ code: "custom", path: ["effective_to"], message: "End date must be on or after start date" });
     }
     // Purchase amount range
     if (v.minimum_purchase_amount && v.maximum_purchase_amount) {
-        if (v.minimum_purchase_amount > v.maximum_purchase_amount) {
-            ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["maximum_purchase_amount"], message: "Max purchase amount must be ≥ min purchase amount" });
+            if (v.minimum_purchase_amount > v.maximum_purchase_amount) {
+            ctx.addIssue({ code: "custom", path: ["maximum_purchase_amount"], message: "Max purchase amount must be ≥ min purchase amount" });
         }
     }
 });

@@ -183,6 +183,13 @@ function cartReducer(state: CartState, action: CartAction): CartState {
             return {
                 ...state,
                 contract: action.contract,
+                paymentMethod: action.contract?.type === "insurance"
+                    ? "insurance"
+                    : state.paymentMethod === "insurance"
+                        ? "cash"
+                        : state.paymentMethod,
+                amountPaid: action.contract?.type === "insurance" ? 0 : state.amountPaid,
+                splitPayment: action.contract?.type === "insurance" ? {} : state.splitPayment,
                 // Reset insurance state when switching away from insurance contract
                 insuranceVerified: action.contract?.type === "insurance"
                     ? state.insuranceVerified
@@ -242,6 +249,10 @@ export interface CartTotals {
     taxAmount: number;
     total: number;
     change: number;
+    /** Patient copay amount estimated from selected contract (client-side) */
+    patientCopay: number;
+    /** Amount the customer is expected to pay now (cash/copay). For insurance this is patientCopay */
+    amountDue: number;
     itemCount: number;
 }
 
@@ -270,10 +281,24 @@ function computeTotals(state: CartState): CartTotals {
     );
 
     const total = parseFloat((taxableAmount + taxAmount).toFixed(2));
-    const change = Math.max(0, parseFloat((state.amountPaid - total).toFixed(2)));
+    // Calculate patient copay based on selected contract (estimate)
+    let patientCopay = 0;
+    const contract = state.contract;
+    if (contract && contract.type === "insurance") {
+        if (contract.copay_amount !== null && contract.copay_amount !== undefined) {
+            patientCopay = Number(contract.copay_amount) || 0;
+        } else if (contract.copay_percentage !== null && contract.copay_percentage !== undefined) {
+            patientCopay = parseFloat(((total * (Number(contract.copay_percentage) / 100))).toFixed(2));
+        }
+        // Don't let copay exceed total
+        if (patientCopay > total) patientCopay = total;
+    }
+
+    const amountDue = state.contract?.type === "insurance" ? patientCopay : total;
+    const change = Math.max(0, parseFloat((state.amountPaid - amountDue).toFixed(2)));
     const itemCount = state.items.reduce((sum, i) => sum + i.quantity, 0);
 
-    return { subtotal, discountAmount, taxAmount, total, change, itemCount };
+    return { subtotal, discountAmount, taxAmount, total, change, patientCopay, amountDue, itemCount };
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -305,7 +330,7 @@ function validateCart(
     }
 
     // Insurance validations
-    if (state.paymentMethod === "insurance") {
+    if (state.paymentMethod === "insurance" || state.contract?.type === "insurance") {
         if (!state.customerId) {
             errors.push({
                 field: "customer",
@@ -323,6 +348,16 @@ function validateCart(
                 field: "insurance_claim",
                 message: "Insurance claim number is required",
             });
+        }
+        // Ensure copay is being collected (client-side enforcement)
+        const copay = totals.patientCopay ?? 0;
+        if (state.paymentMethod === "insurance" && copay > 0) {
+            if (!(state.amountPaid && state.amountPaid >= copay)) {
+                errors.push({
+                    field: "insurance",
+                    message: `Patient copay of ₵${copay.toFixed(2)} must be collected`,
+                });
+            }
         }
     }
 
@@ -370,6 +405,22 @@ function validateCart(
                 field: "split_payment",
                 message: "Split payment requires at least 2 payment methods",
             });
+        }
+        // If split includes insurance, ensure non-insurance part covers copay
+        const hasInsuranceInSplit = Object.prototype.hasOwnProperty.call(state.splitPayment, "insurance") && (state.splitPayment as any).insurance > 0;
+        if (hasInsuranceInSplit) {
+            const nonInsuranceSum = Object.entries(state.splitPayment).reduce((sum, [k, v]) => {
+                if (!v) return sum;
+                if (k === "insurance") return sum;
+                return sum + (v as number);
+            }, 0);
+            const copay = totals.patientCopay ?? 0;
+            if (copay > 0 && nonInsuranceSum < copay) {
+                errors.push({
+                    field: "split_payment",
+                    message: `When using insurance in split, collect at least copay (₵${copay.toFixed(2)}) from patient`,
+                });
+            }
         }
     }
 

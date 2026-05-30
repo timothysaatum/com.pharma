@@ -192,6 +192,7 @@ async def build_sale_with_details(
                 **item_dict,
                 drug_generic_name=drug.generic_name,
                 drug_manufacturer=drug.manufacturer,
+                usage_instructions=drug.usage_instructions,
                 batch_number=batch_number,
             )
         )

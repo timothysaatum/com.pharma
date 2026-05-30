@@ -233,12 +233,21 @@ function toPurchaseOrderWithDetails(row: Record<string, unknown>): PurchaseOrder
   const items = parseJsonArray<unknown>(row.items_json) as any[];
   const totalItems = items.length;
   const received = items.filter((item) => typeof item.quantity_received === "number" && typeof item.quantity_ordered === "number" && item.quantity_received >= item.quantity_ordered).length;
+  const supplierName = typeof row.supplier_name === "string" && row.supplier_name.trim()
+    ? row.supplier_name
+    : String(row.supplier_id);
+  const branchName = typeof row.branch_name === "string" && row.branch_name.trim()
+    ? row.branch_name
+    : "";
+  const orderedByName = typeof row.ordered_by_name === "string" && row.ordered_by_name.trim()
+    ? row.ordered_by_name
+    : String(row.ordered_by);
   return {
     ...toPurchaseOrder(row),
     items: items as any,
-    supplier_name: String(row.supplier_id),
-    branch_name: "",
-    ordered_by_name: String(row.ordered_by),
+    supplier_name: supplierName,
+    branch_name: branchName,
+    ordered_by_name: orderedByName,
     approved_by_name: row.approved_by === null ? null : String(row.approved_by),
     is_fully_received: totalItems > 0 ? received >= totalItems : false,
     total_items_received: received,
@@ -575,6 +584,7 @@ export const localRead = {
         tax: (item as any).tax_amount ?? 0,
         total: (item as any).total_price ?? item.quantity * item.unit_price,
         batch_number: (item as any).batch_number ?? null,
+        usage_instructions: (item as any).usage_instructions ?? null,
         insurance_covered: Boolean((item as any).insurance_covered),
         patient_copay: (item as any).patient_copay_amount ?? 0,
       })),

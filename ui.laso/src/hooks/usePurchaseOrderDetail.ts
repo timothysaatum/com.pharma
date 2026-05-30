@@ -9,6 +9,7 @@
  */
 
 import { useState, useEffect, useCallback } from "react";
+import axios from "axios";
 import { purchaseOrdersApi } from "@/api/purchases";
 import { parseApiError, isOfflineError } from "@/api/client";
 import { localRead } from "@/lib/localRead";
@@ -36,7 +37,11 @@ export function usePurchaseOrderDetail(poId: string | null) {
             const data = await purchaseOrdersApi.get(poId);
             setPo(data);
         } catch (err) {
-            if (isOfflineError(err)) {
+            const shouldTryLocal =
+                isOfflineError(err) ||
+                (axios.isAxiosError(err) && err.response?.status === 404);
+
+            if (shouldTryLocal) {
                 const local = await localRead.getPurchaseOrderById(poId);
                 if (local) {
                     setPo(local);

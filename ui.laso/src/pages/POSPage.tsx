@@ -172,6 +172,7 @@ export default function POSPage() {
                         drug_name: item.drug.name,
                         drug_sku: item.drug.sku,
                         drug_generic_name: item.drug.generic_name,
+                        usage_instructions: item.drug.usage_instructions,
                         quantity: item.quantity,
                         batch_id: item.batchId,
                         batch_number: null,
@@ -343,6 +344,7 @@ export default function POSPage() {
                         onSetCustomerName={cart.setCustomerName}
                         onSetPaymentMethod={cart.setPaymentMethod}
                         onSetAmountPaid={cart.setAmountPaid}
+                        onSetSplitPayment={cart.setSplitPayment}
                         onSetPrescriptionId={cart.setPrescriptionId}
                         onSetInsuranceClaimNumber={cart.setInsuranceClaimNumber}
                         onSetInsurancePreAuthNumber={cart.setInsurancePreAuthNumber}

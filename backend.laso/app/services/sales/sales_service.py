@@ -435,20 +435,6 @@ class SalesService:
                     ),
                 )
 
-            # ------------------------------------------------------------------
-            # 12. Payment
-            # ------------------------------------------------------------------
-            amount_paid = _d(sale_data.amount_paid or total_amount)
-            if amount_paid < total_amount:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=(
-                        f"Insufficient payment. "
-                        f"Required: {total_amount}, Paid: {amount_paid}."
-                    ),
-                )
-            change_amount = _r2(amount_paid - total_amount)
-
             # Insurance totals
             patient_copay_amount: Optional[Decimal] = None
             insurance_covered_amount: Optional[Decimal] = None
@@ -458,6 +444,29 @@ class SalesService:
                     Decimal("0"),
                 ))
                 insurance_covered_amount = _r2(total_amount - patient_copay_amount)
+
+            # ------------------------------------------------------------------
+            # 12. Payment
+            # ------------------------------------------------------------------
+            amount_due = (
+                patient_copay_amount
+                if contract.contract_type == "insurance" and patient_copay_amount is not None
+                else total_amount
+            )
+            amount_paid = _d(
+                sale_data.amount_paid
+                if sale_data.amount_paid is not None
+                else amount_due
+            )
+            if amount_paid < amount_due:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Insufficient payment. "
+                        f"Required: {amount_due}, Paid: {amount_paid}."
+                    ),
+                )
+            change_amount = _r2(amount_paid - amount_due)
 
             # ------------------------------------------------------------------
             # 13. Persist Sale — only model-defined fields

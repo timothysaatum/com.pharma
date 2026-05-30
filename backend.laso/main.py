@@ -172,16 +172,23 @@ app = FastAPI(
 # MIDDLEWARE CONFIGURATION
 # ============================================================================
 
+cors_origins = [
+    "http://localhost:1420",
+    "http://127.0.0.1:1420",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://tauri.localhost",
+    "tauri://localhost",
+    "https://tauri.localhost",
+]
+for origin in settings.CORS_ORIGINS:
+    if origin not in cors_origins:
+        cors_origins.append(origin)
+
 # CORS Middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:1420",
-        "http://127.0.0.1:1420",
-        "http://tauri.localhost",
-        "tauri://localhost",
-        "https://tauri.localhost",
-    ],
+    allow_origins=cors_origins,
     allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
     allow_credentials=True,
     allow_methods=["*"],

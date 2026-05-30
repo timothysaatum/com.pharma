@@ -421,6 +421,7 @@ async def get_receipt(
                 "tax": float(item.tax_amount),
                 "total": float(item.total_price),
                 "batch_number": item.batch_number,
+                "usage_instructions": item.usage_instructions,
                 "insurance_covered": item.insurance_covered,
                 "patient_copay": float(item.patient_copay) if item.patient_copay else None,
             }

@@ -126,6 +126,7 @@ export interface ReceiptData {
         tax: number;
         total: number;
         batch_number: string | null;
+        usage_instructions: string | null;
         insurance_covered: boolean;
         patient_copay: number | null;
     }>;

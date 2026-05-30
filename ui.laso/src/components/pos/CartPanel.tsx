@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
-import { CartItem, CartTotals, CartValidationError } from "@/hooks/useCart";
+import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient } from "@/api/client";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
@@ -62,11 +62,12 @@ interface CustomerSearchWidgetProps {
     // onSetCustomerId: (id: string | null) => void;
     onSetCustomerName: (name: string) => void;
     onSetCustomerId: (id: string | null) => void;
+    requireRegistered?: boolean;
     fieldError?: string;
 }
 
 function CustomerSearchWidget({
-    customerName, customerId, onSetCustomerName, onSetCustomerId, fieldError,
+    customerName, customerId, onSetCustomerName, onSetCustomerId, requireRegistered = false, fieldError,
 }: CustomerSearchWidgetProps) {
     const [query, setQuery] = useState("");
     const [results, setResults] = useState<CustomerMatch[]>([]);
@@ -159,7 +160,7 @@ function CustomerSearchWidget({
             </div>
 
             {/* Walk-in name (when no registered customer selected) */}
-            {!query && (
+            {!query && !requireRegistered && (
                 <div className="relative">
                     <User className="absolute left-3 top-3 w-3.5 h-3.5 text-slate-400" />
                     <input
@@ -169,6 +170,11 @@ function CustomerSearchWidget({
                         className={`${inputCls} pl-9 ${fieldError ? "border-red-300 bg-red-50/30" : ""}`}
                     />
                 </div>
+            )}
+            {!query && requireRegistered && (
+                <p className="text-xs text-blue-600 bg-blue-50 border border-blue-100 rounded-lg px-3 py-2">
+                    Search and select a registered customer for insurance checkout.
+                </p>
             )}
 
             {/* Dropdown results */}
@@ -202,7 +208,9 @@ function CustomerSearchWidget({
             )}
 
             {open && query.length >= 2 && results.length === 0 && !searching && (
-                <p className="text-xs text-slate-400 px-1">No customers found — sale will be recorded as walk-in</p>
+                <p className="text-xs text-slate-400 px-1">
+                    {requireRegistered ? "No registered customer found" : "No customers found — sale will be recorded as walk-in"}
+                </p>
             )}
 
             {fieldError && (
@@ -240,6 +248,7 @@ interface CartPanelProps {
     onSetCustomerName: (name: string) => void;
     onSetPaymentMethod: (method: PaymentMethod) => void;
     onSetAmountPaid: (amount: number) => void;
+    onSetSplitPayment: (split: Partial<SplitPayment>) => void;
     onSetPrescriptionId: (id: string | null) => void;
     onSetInsuranceClaimNumber: (n: string) => void;
     onSetInsurancePreAuthNumber: (n: string) => void;
@@ -270,7 +279,7 @@ export function CartPanel({
     insuranceVerified, notes, totals, validationErrors,
     isSubmitting, onSetQuantity, onRemoveItem, onSetPrescriptionVerified,
     onSetContract, onSetCustomerId, onSetCustomerName, onSetPaymentMethod, onSetAmountPaid,
-    onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
+    onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
 }: CartPanelProps) {
     const autoSelectedRef = useRef(false);
@@ -497,6 +506,7 @@ export function CartPanel({
                                     customerId={customerId}
                                     onSetCustomerName={onSetCustomerName}
                                     onSetCustomerId={onSetCustomerId}
+                                    requireRegistered={isInsurance}
                                     fieldError={fieldError("customer")}
                                 />
                             </div>
@@ -520,6 +530,41 @@ export function CartPanel({
                             {isInsurance && (
                                 <div className="space-y-2.5 p-3.5 rounded-xl bg-blue-50 border border-blue-100">
                                     <p className="text-[11px] font-bold text-blue-700 uppercase tracking-widest">Insurance Details</p>
+                                    {/* Patient copay display */}
+                                    <div className="flex items-center justify-between text-sm font-semibold text-blue-700">
+                                        <span>Patient copay</span>
+                                        <span>₵{totals.patientCopay.toFixed(2)}</span>
+                                    </div>
+                                    <div className="flex gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                onSetPaymentMethod("insurance");
+                                                onSetAmountPaid(totals.patientCopay);
+                                            }}
+                                            className="py-1 px-2 rounded bg-white border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                        >
+                                            Set as Amount Paid
+                                        </button>
+                                        <button
+                                            type="button"
+                                            onClick={() => {
+                                                const copay = totals.patientCopay;
+                                                const insuranceShare = Math.max(0, totals.total - copay);
+                                                onSetPaymentMethod("split");
+                                                onSetSplitPayment({ insurance: insuranceShare, cash: copay });
+                                            }}
+                                            className="py-1 px-2 rounded bg-white border border-slate-200 text-xs font-medium text-slate-700 hover:bg-slate-50"
+                                        >
+                                            Apply as Split
+                                        </button>
+                                    </div>
+                                    {(totals.patientCopay === 0 || (amountPaid > 0 && paymentMethod === "insurance")) && (
+                                        <div className="flex items-center justify-between text-xs font-semibold text-blue-700 bg-white/70 border border-blue-100 rounded-lg px-2.5 py-2">
+                                            <span>{totals.patientCopay === 0 ? "No patient copay due" : "Amount paid set"}</span>
+                                            <span>₵{(totals.patientCopay === 0 ? 0 : amountPaid).toFixed(2)}</span>
+                                        </div>
+                                    )}
                                     <input
                                         value={insuranceClaimNumber}
                                         onChange={(e) => onSetInsuranceClaimNumber(e.target.value)}

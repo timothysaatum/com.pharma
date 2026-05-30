@@ -38,20 +38,20 @@ const schema = z.object({
     country: z.string().optional().or(z.literal("")),
 }).superRefine((v, ctx) => {
     if (v.customer_type === "registered") {
-        if (!v.first_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["first_name"], message: "First name required for registered customers" });
-        if (!v.last_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["last_name"], message: "Last name required for registered customers" });
-        if (!v.phone?.trim() && !v.email?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["phone"], message: "Phone or email required for registered customers" });
+        if (!v.first_name?.trim()) ctx.addIssue({ code: "custom", path: ["first_name"], message: "First name required for registered customers" });
+        if (!v.last_name?.trim()) ctx.addIssue({ code: "custom", path: ["last_name"], message: "Last name required for registered customers" });
+        if (!v.phone?.trim() && !v.email?.trim()) ctx.addIssue({ code: "custom", path: ["phone"], message: "Phone or email required for registered customers" });
     }
     if (v.customer_type === "insurance") {
-        if (!v.first_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["first_name"], message: "Full name required for insurance customers" });
-        if (!v.last_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["last_name"], message: "Full name required for insurance customers" });
-        if (!v.insurance_provider_id?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["insurance_provider_id"], message: "Insurance provider required" });
-        if (!v.insurance_member_id?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["insurance_member_id"], message: "Member ID required" });
+        if (!v.first_name?.trim()) ctx.addIssue({ code: "custom", path: ["first_name"], message: "Full name required for insurance customers" });
+        if (!v.last_name?.trim()) ctx.addIssue({ code: "custom", path: ["last_name"], message: "Full name required for insurance customers" });
+        if (!v.insurance_provider_id?.trim()) ctx.addIssue({ code: "custom", path: ["insurance_provider_id"], message: "Insurance provider required" });
+        if (!v.insurance_member_id?.trim()) ctx.addIssue({ code: "custom", path: ["insurance_member_id"], message: "Member ID required" });
     }
     if (v.customer_type === "corporate") {
-        if (!v.first_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["first_name"], message: "Full name required for corporate customers" });
-        if (!v.last_name?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["last_name"], message: "Full name required for corporate customers" });
-        if (!v.preferred_contract_id?.trim()) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["preferred_contract_id"], message: "Preferred contract required for corporate customers" });
+        if (!v.first_name?.trim()) ctx.addIssue({ code: "custom", path: ["first_name"], message: "Full name required for corporate customers" });
+        if (!v.last_name?.trim()) ctx.addIssue({ code: "custom", path: ["last_name"], message: "Full name required for corporate customers" });
+        if (!v.preferred_contract_id?.trim()) ctx.addIssue({ code: "custom", path: ["preferred_contract_id"], message: "Preferred contract required for corporate customers" });
     }
 });
 

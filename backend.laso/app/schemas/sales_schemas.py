@@ -162,6 +162,10 @@ class SaleItemWithDetails(SaleItemResponse):
     """Sale item with additional details"""
     drug_manufacturer: Optional[str] = None
     drug_category: Optional[str] = None
+    usage_instructions: Optional[str] = Field(
+        None,
+        description="Drug usage instructions to print on receipts"
+    )
     pharmacist_notes: Optional[str] = Field(
         None,
         description="Pharmacist notes about this item"

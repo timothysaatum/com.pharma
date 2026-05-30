@@ -54,7 +54,7 @@ const drugSchema = z.object({
     // FIX: controlled substances must have a DEA schedule
     if (data.drug_type === "controlled" && !data.controlled_substance_schedule?.trim()) {
         ctx.addIssue({
-            code: z.ZodIssueCode.custom,
+            code: "custom",
             message: "DEA schedule is required for controlled substances (I–V)",
             path: ["controlled_substance_schedule"],
         });

@@ -185,7 +185,10 @@ class PurchaseOrderService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Branch not found or inactive",
             )
-        if str(po_data.branch_id) not in {str(b) for b in (user.assigned_branches or [])}:
+        if (
+            str(po_data.branch_id) not in {str(b) for b in (user.assigned_branches or [])}
+            and user.role not in ("super_admin", "admin")
+        ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have access to this branch",
@@ -381,13 +384,6 @@ class PurchaseOrderService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot approve a PO with status '{po.status}' — only pending POs can be approved",
-            )
-
-        # Prevent self-approval
-        if po.ordered_by == user.id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You cannot approve a purchase order you created",
             )
 
         po.status = "approved"

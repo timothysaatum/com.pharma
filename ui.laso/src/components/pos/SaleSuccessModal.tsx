@@ -93,6 +93,7 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
         .leader-dots { flex: 1; min-width: 16px; border-bottom: 1px dotted #9ca3af; transform: translateY(-3px); }
         .leader-value { font-weight: 700; white-space: nowrap; text-align: right; }
         .item-meta { margin: -3px 0 7px; color: #6b7280; font-size: 11px; }
+        .usage { margin: -4px 0 8px; font-size: 11px; color: #374151; line-height: 1.35; }
         .total-row { font-size: 14px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed #d1d5db; }
     </style>
 </head>
@@ -109,6 +110,7 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
         ${(sale.items ?? []).map((item) => `
             ${receiptLine(`${item.drug_name} x${item.quantity}`, `₵${Number(item.total_price).toFixed(2)}`)}
             <div class="item-meta">₵${Number(item.unit_price).toFixed(2)} each${item.batch_number ? ` · Batch ${escapeHtml(item.batch_number)}` : ""}</div>
+            ${item.usage_instructions ? `<div class="usage">Use: ${escapeHtml(item.usage_instructions)}</div>` : ""}
         `).join("")}
     </div>
     <div class="divider"></div>

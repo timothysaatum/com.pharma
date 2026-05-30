@@ -29,7 +29,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user, get_organization_id, require_permission
+from app.core.deps import (
+    get_current_user,
+    get_organization_id,
+    require_any_permission,
+    require_permission,
+)
 from app.db.dependencies import get_db
 from app.models.sales.sales_model import PurchaseOrder, Supplier
 from app.models.user.user_model import User
@@ -185,7 +190,7 @@ async def list_suppliers(
     "/",
     response_model=PurchaseOrderResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("manage_inventory"))],
+    dependencies=[Depends(require_any_permission("manage_inventory", "process_sales"))],
     summary="Create purchase order",
 )
 async def create_purchase_order(
@@ -196,7 +201,7 @@ async def create_purchase_order(
     """
     Create a new purchase order in **draft** status.
 
-    **Permissions:** `manage_inventory`
+    **Permissions:** `manage_inventory` or `process_sales`
 
     **Workflow:** draft → pending → approved → (ordered) → received
 
@@ -282,7 +287,7 @@ async def get_purchase_order(
 @router.post(
     "/{po_id}/submit",
     response_model=PurchaseOrderResponse,
-    dependencies=[Depends(require_permission("manage_inventory"))],
+    dependencies=[Depends(require_any_permission("manage_inventory", "process_sales"))],
     summary="Submit PO for approval",
 )
 async def submit_for_approval(
@@ -293,7 +298,7 @@ async def submit_for_approval(
     """
     Transition a draft PO to **pending** (awaiting approval).
 
-    **Permissions:** `manage_inventory`
+    **Permissions:** `manage_inventory` or `process_sales`
     """
     return await PurchaseOrderService.submit_for_approval(db, po_id, current_user)
 

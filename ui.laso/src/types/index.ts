@@ -871,6 +871,7 @@ export interface SaleItem extends TimestampFields {
     drug_name: string;
     drug_sku: string | null;
     drug_generic_name: string | null;
+    usage_instructions: string | null;
     batch_id: string | null;
     batch_number: string | null;
     batch_expiry_date: string | null;
