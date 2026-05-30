@@ -1001,19 +1001,25 @@ class PurchaseOrderService:
     @staticmethod
     async def _generate_po_number(db: AsyncSession, branch_code: str) -> str:
         """
-        Generate a collision-safe PO number.
+            Generate a collision-safe PO number.
 
-        Uses a SELECT … FOR UPDATE on the count of today's POs for this branch
-        so that two concurrent requests cannot receive the same sequence number.
-        Pattern: PO-{BRANCH_CODE}-{YYYYMMDD}-{4-digit sequence}
+            Locks matching rows via a subquery WITH FOR UPDATE, then counts them,
+            so concurrent requests cannot receive the same sequence number.
+            Pattern: PO-{BRANCH_CODE}-{YYYYMMDD}-{4-digit sequence}
         """
         today_str = date.today().strftime("%Y%m%d")
         prefix = f"PO-{branch_code}-{today_str}"
 
-        result = await db.execute(
-            select(func.count(PurchaseOrder.id))
+        # Lock matching rows first (subquery), then count — PostgreSQL does not
+        # allow FOR UPDATE directly on aggregate queries.
+        subq = (
+            select(PurchaseOrder.id)
             .where(PurchaseOrder.po_number.like(f"{prefix}%"))
             .with_for_update()
+            .subquery()
+        )
+        result = await db.execute(
+            select(func.count()).select_from(subq)
         )
         count: int = result.scalar_one() or 0
         return f"{prefix}-{str(count + 1).zfill(4)}"
