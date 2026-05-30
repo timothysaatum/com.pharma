@@ -903,6 +903,7 @@ export interface Sale extends TimestampFields, SyncFields {
     sale_number: string;
     customer_id: string | null;
     customer_name: string | null;
+    customer_full_name?: string | null;
     subtotal: number;
     discount_amount: number;
     tax_amount: number;

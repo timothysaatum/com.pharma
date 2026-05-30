@@ -428,6 +428,11 @@ class SaleResponse(SaleBase, TimestampSchema, SyncSchema):
         None,
         description="Contract type (snapshot)"
     )
+
+    customer_full_name: Optional[str] = Field(
+        None,
+        description="Registered customer full name when available"
+    )
     
     contract_discount_percentage: Optional[Decimal] = Field(
         None,

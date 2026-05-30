@@ -69,6 +69,13 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
         String(255),
         comment="For walk-in customers without registration"
     )
+
+    @property
+    def customer_full_name(self) -> Optional[str]:
+        if self.customer:
+            full_name = f"{self.customer.first_name or ''} {self.customer.last_name or ''}".strip()
+            return full_name or self.customer_name
+        return self.customer_name
     
     # ==================== FINANCIAL DETAILS ====================
     

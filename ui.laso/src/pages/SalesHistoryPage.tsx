@@ -957,7 +957,7 @@ export default function SalesHistoryPage() {
         ? sales.filter(
             (s) =>
                 s.sale_number.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
-                (s.customer_name ?? "").toLowerCase().includes(debouncedSearch.toLowerCase()),
+                ((s.customer_full_name || s.customer_name) ?? "").toLowerCase().includes(debouncedSearch.toLowerCase()),
         )
         : sales;
 
@@ -1143,7 +1143,7 @@ export default function SalesHistoryPage() {
                                                 <div className="flex items-center gap-1.5">
                                                     <User className="w-3.5 h-3.5 text-slate-300 flex-shrink-0" />
                                                     <span className="text-sm text-ink">
-                                                        {sale.customer_name || "Walk-in"}
+                                                        {sale.customer_full_name || sale.customer_name || "Walk-in"}
                                                     </span>
                                                 </div>
                                             </td>

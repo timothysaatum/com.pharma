@@ -213,7 +213,7 @@ async def list_sales(
 
     query = (
         select(Sale)
-        .options(selectinload(Sale.items))
+        .options(selectinload(Sale.items), selectinload(Sale.customer))
         .where(and_(*filters))
         .order_by(Sale.created_at.desc())
     )
