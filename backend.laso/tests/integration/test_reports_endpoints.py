@@ -21,18 +21,39 @@ async def test_daily_sales_endpoint_returns_data(monkeypatch):
     # Patch dependency
     app.dependency_overrides[reports_endpoints.get_current_user] = lambda: fake_user
 
-    sample = [
+    branch_id = str(uuid.uuid4())
+    sample_items = [
         {
             "sale_date": "2026-05-24",
+            "branch_id": branch_id,
             "branch_name": "Test Branch",
+            "contract_id": None,
+            "contract_name": None,
+            "cashier_id": None,
+            "cashier_name": "Test Cashier",
+            "transaction_count": 4,
+            "gross_revenue": 171.0,
+            "total_discount": 0.0,
+            "total_tax": 0.0,
             "net_revenue": 171.0,
             "total_items": 6,
-            "transaction_count": 4,
+            "refund_count": 0
         }
     ]
 
-    async def fake_daily(db, organization_id, start_date, end_date, branch_id=None, contract_id=None, cashier_id=None):
-        return sample
+    sample_response = {
+        "items": sample_items,
+        "total": 1,
+        "page": 1,
+        "page_size": 50,
+        "total_pages": 1,
+        "has_next": False,
+        "has_prev": False
+    }
+
+    async def fake_daily(db, organization_id, start_date, end_date, branch_id=None, contract_id=None, cashier_id=None, pagination=None):
+        from app.utils.pagination import PaginatedResponse
+        return PaginatedResponse(**sample_response)
 
     monkeypatch.setattr(reports_service.ReportsService, 'get_daily_sales_summary', staticmethod(fake_daily))
 
@@ -43,7 +64,7 @@ async def test_daily_sales_endpoint_returns_data(monkeypatch):
         )
 
     assert resp.status_code == 200
-    assert resp.json() == sample
+    assert resp.json() == sample_response
 
     # Cleanup override
     app.dependency_overrides.pop(reports_endpoints.get_current_user, None)

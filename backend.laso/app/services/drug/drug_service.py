@@ -461,6 +461,50 @@ class DrugService:
         await db.commit()
         return True
 
+    @staticmethod
+    async def bulk_import_drugs(
+        db: AsyncSession,
+        organization_id: uuid.UUID,
+        drugs_to_import: List[DrugCreate],
+        created_by_user_id: uuid.UUID,
+    ) -> Tuple[int, List[Dict]]:
+        """
+        Import multiple drugs in bulk.
+
+        Attempts to create each drug. If an error occurs for one drug,
+        it captures the error and continues with others.
+
+        Returns:
+            Tuple of (successful_count, list of error dicts).
+        """
+        successful = 0
+        errors: List[Dict] = []
+
+        for drug_data in drugs_to_import:
+            try:
+                async with db.begin_nested():
+                    # Ensure organization match
+                    if drug_data.organization_id != organization_id:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail="Organization ID mismatch in import data"
+                        )
+
+                    await DrugService.create_drug(
+                        db=db,
+                        drug_data=drug_data,
+                        created_by_user_id=created_by_user_id
+                    )
+                    successful += 1
+            except HTTPException as exc:
+                errors.append({"drug_name": drug_data.name, "error": exc.detail})
+            except Exception as exc:
+                logger.exception("Unexpected error importing drug %s", drug_data.name)
+                errors.append({"drug_name": drug_data.name, "error": str(exc)})
+
+        await db.commit()
+        return successful, errors
+
     # =========================================================================
     # CATEGORY METHODS
     # =========================================================================

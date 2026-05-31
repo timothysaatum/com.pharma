@@ -4,6 +4,7 @@ Tests the various report generation functions
 """
 
 import pytest
+import pytest_asyncio
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 import uuid
@@ -38,10 +39,10 @@ class TestReportsService:
             end_date=end_date,
         )
 
-        assert len(result) > 0
-        assert result[0]["transaction_count"] > 0
-        assert result[0]["net_revenue"] > 0
-        assert result[0]["total_items"] > 0
+        assert result.total > 0
+        assert result.items[0].transaction_count > 0
+        assert result.items[0].net_revenue > 0
+        assert result.items[0].total_items > 0
 
     async def test_daily_sales_summary_with_filters(self, db: AsyncSession, sales_data):
         """Test daily sales summary with branch and contract filters."""
@@ -62,9 +63,9 @@ class TestReportsService:
         )
 
         # All results should be for the filtered branch
-        if result_by_branch:
-            for row in result_by_branch:
-                assert str(row["branch_id"]) == str(branch_id)
+        if result_by_branch.items:
+            for row in result_by_branch.items:
+                assert str(row.branch_id) == str(branch_id)
 
     async def test_contract_performance_report(self, db: AsyncSession, sales_data):
         """Test contract performance metrics."""
@@ -139,70 +140,25 @@ class TestReportsService:
             organization_id=org_id,
             start_date=start_date,
             end_date=end_date,
-            limit=50,
         )
 
-        assert isinstance(result, list)
-        if result:
+        assert result.total > 0
+        if result.items:
             # Should include drug metrics
-            for row in result:
-                assert "drug_name" in row
-                assert "units_sold" in row
-                assert "revenue" in row
-                assert row["units_sold"] > 0
+            for row in result.items:
+                assert row.drug_name
+                assert row.units_sold > 0
+                assert row.revenue > 0
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
 
-@pytest.fixture
-async def sales_data(db: AsyncSession):
+@pytest_asyncio.fixture(scope="function")
+async def sales_data(db: AsyncSession, setup_test_data):
     """Create test sales data for report tests."""
-    org = Organization(
-        id=uuid.uuid4(),
-        organization_name="Test Pharmacy",
-        tax_id="123456789",
-    )
-    
-    branch = Branch(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        name="Test Branch",
-        code="TB001",
-        is_active=True,
-        is_deleted=False,
-    )
-    
-    user = User(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        user_name="cashier",
-        email="cashier@pharmacy.com",
-        hashed_password="hashed_pwd",
-        role="cashier",
-        is_active=True,
-        assigned_branches=[branch.id],
-    )
-    
-    drug = Drug(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        drug_name="Test Drug",
-        sku="TEST001",
-        unit_price=Decimal("50.00"),
-        reorder_level=10,
-        is_active=True,
-        is_deleted=False,
-    )
-    
-    customer = Customer(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        customer_name="Test Customer",
-        phone="0501234567",
-        loyalty_tier="standard",
-        loyalty_points=0,
-    )
-    
+    org, branch, user, drugs, customer = setup_test_data
+    drug = drugs[0]
+
     contract = PriceContract(
         id=uuid.uuid4(),
         organization_id=org.id,
@@ -211,8 +167,11 @@ async def sales_data(db: AsyncSession):
         contract_type="standard",
         discount_type="percentage",
         discount_percentage=Decimal("10.00"),
+        effective_from=date.today() - timedelta(days=1),
+        status="active",
         is_active=True,
         is_deleted=False,
+        created_by=user.id,
     )
     
     # Create a sale for today
@@ -239,11 +198,13 @@ async def sales_data(db: AsyncSession):
         id=uuid.uuid4(),
         sale_id=sale.id,
         drug_id=drug.id,
+        drug_name=drug.name,
         quantity=10,
         unit_price=Decimal("50.00"),
         subtotal=Decimal("500.00"),
-        contract_discount_amount=Decimal("50.00"),
-        total_discount_amount=Decimal("50.00"),
+        discount_percentage=Decimal("10.00"),
+        discount_amount=Decimal("50.00"),
+        tax_rate=Decimal("0.00"),
         tax_amount=Decimal("0.00"),
         total_price=Decimal("450.00"),
     )
@@ -259,7 +220,7 @@ async def sales_data(db: AsyncSession):
     )
     
     db.add_all([
-        org, branch, user, drug, customer, contract, sale, sale_item, inventory
+        contract, sale, sale_item, inventory
     ])
     await db.commit()
     

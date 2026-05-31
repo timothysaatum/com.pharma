@@ -62,7 +62,7 @@ from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pricing.pricing_model import PriceContract
-from app.models.sales.sales_model import Sale, PurchaseOrder
+from app.models.sales.sales_model import Sale, SaleItem, PurchaseOrder
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
@@ -812,6 +812,39 @@ class SyncService:
             sale.sync_status = "synced"
             db.add(sale)
             await db.flush()
+
+            # Sync SaleItems if present in record data
+            items_data = record.data.get("items")
+            if items_data and isinstance(items_data, list):
+                for item_dict in items_data:
+                    # Whitelist SaleItem fields
+                    item_safe = {
+                        k: v for k, v in item_dict.items()
+                        if k in {
+                            "id", "drug_id", "drug_name", "drug_sku", "batch_id",
+                            "quantity", "unit_price", "subtotal", "discount_percentage",
+                            "discount_amount", "tax_rate", "tax_amount", "total_price",
+                            "requires_prescription", "prescription_verified",
+                            "created_at", "updated_at"
+                        }
+                    }
+                    _parse_datetime_fields(item_safe)
+                    item_safe["sale_id"] = sale.id
+
+                    # Verify drug existence
+                    drug_exists = (await db.execute(
+                        select(Drug.id).where(Drug.id == item_safe.get("drug_id"))
+                    )).scalar_one_or_none()
+
+                    if drug_exists:
+                        db.add(SaleItem(**item_safe))
+                    else:
+                        logger.warning(
+                            "Sync: Drug %s missing for sale item in sale %s; skipping item",
+                            item_safe.get("drug_id"), record.local_id
+                        )
+                await db.flush()
+
         except Exception as exc:
             # If we still get a FK constraint violation after validation,
             # it means a referenced record was deleted between validation and flush.
