@@ -79,6 +79,14 @@ export const drugApi = {
     },
 
     /**
+     * POST /drugs/import
+     * Bulk import drugs.
+     */
+    import(drugs: DrugCreate[]): Promise<{ successful: number; failed: number; total: number; errors: any[] }> {
+        return post(`${BASE}/import`, { drugs });
+    },
+
+    /**
      * POST /drugs/search
      * Advanced search via POST body for complex filter combinations.
      * Use `list()` for simple query-parameter searches.

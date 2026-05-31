@@ -18,7 +18,8 @@ from app.services.inventory.inventory_service import InventoryService
 from app.schemas.drugs_schemas import (
     DrugCreate, DrugUpdate, DrugResponse, DrugWithInventory,
     DrugCategoryCreate, DrugCategoryResponse,
-    DrugSearchFilters, BulkDrugUpdate, DrugCategoryTree
+    DrugSearchFilters, BulkDrugUpdate, DrugCategoryTree,
+    BulkDrugImport
 )
 from app.utils.pagination import Paginator, PaginationParams, PaginatedResponse
 
@@ -265,6 +266,37 @@ async def bulk_update_drugs(
         "failed": failed,
         "total": len(bulk_update.drug_ids),
         "message": f"Updated {successful} drug(s) successfully, {failed} failed"
+    }
+
+
+@router.post("/import", status_code=status.HTTP_200_OK)
+async def import_drugs(
+    import_data: BulkDrugImport,
+    current_user: User = Depends(require_permission("manage_drugs")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Import drugs in bulk for pharmacy onboarding.
+
+    **Required Permission**: manage_drugs
+
+    **Request Body**: List of DrugCreate objects
+
+    **Returns**: Count of successful imports and list of errors
+    """
+    successful, errors = await DrugService.bulk_import_drugs(
+        db=db,
+        organization_id=current_user.organization_id,
+        drugs_to_import=import_data.drugs,
+        created_by_user_id=current_user.id
+    )
+
+    return {
+        "successful": successful,
+        "failed": len(errors),
+        "total": len(import_data.drugs),
+        "errors": errors,
+        "message": f"Imported {successful} drug(s) successfully, {len(errors)} failed"
     }
 
 

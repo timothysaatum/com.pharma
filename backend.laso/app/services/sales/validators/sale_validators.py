@@ -219,19 +219,21 @@ async def load_and_validate_contract(
             ),
         )
 
-    # Insurance-specific guards
-    if contract.contract_type == "insurance":
+    # Contract-specific guards
+    if contract.contract_type in ("insurance", "corporate", "wholesale"):
         if not customer_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Insurance contracts require a registered customer.",
+                detail=f"{contract.contract_type.capitalize()} contracts require a registered customer.",
             )
+
+    if contract.requires_verification or contract.contract_type == "insurance":
         if not insurance_verified:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    "Insurance eligibility must be verified before "
-                    "processing an insurance sale."
+                    f"Verification is required for '{contract.contract_name}' "
+                    "before processing the sale."
                 ),
             )
 

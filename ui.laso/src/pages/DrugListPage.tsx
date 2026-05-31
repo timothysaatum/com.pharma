@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
     Search, Plus, Filter, ChevronLeft, ChevronRight,
     Pill, AlertTriangle, Package, Edit2, ToggleLeft,
-    ToggleRight, RefreshCw, X, FolderTree,
+    ToggleRight, RefreshCw, X, FolderTree, Upload,
 } from "lucide-react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
@@ -15,6 +15,7 @@ import { useCategoryTree } from "@/hooks/useCategories";
 import { DrugForm } from "@/components/drugs/DrugForm";
 import { AddBatchForm } from "@/components/inventory/AddBatchForm";
 import { DrugCategoryModal } from "@/components/drugs/DrugCategoryModal";
+import { DrugImportWizard } from "@/components/drugs/DrugImportWizard";
 import { parseApiError } from "@/api/client";
 import { appEvents, useAppEvent } from "@/lib/events";
 import { withTimeout } from "@/lib/withTimeout";
@@ -94,6 +95,7 @@ export default function DrugListPage() {
 
     // Modals
     const [showAddDrug, setShowAddDrug] = useState(false);
+    const [showImportWizard, setShowImportWizard] = useState(false);
     const [editingDrug, setEditingDrug] = useState<Drug | null>(null);
     const [addingBatchFor, setAddingBatchFor] = useState<Drug | null>(null);
     // Category create/edit modal
@@ -281,6 +283,14 @@ export default function DrugListPage() {
                                 >
                                     <FolderTree className="w-4 h-4" />
                                     Categories
+                                </button>
+                                <button
+                                    onClick={() => setShowImportWizard(true)}
+                                    className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-ink-secondary border border-slate-200 hover:text-ink hover:bg-slate-50 rounded-xl transition-colors"
+                                    title="Bulk import drugs"
+                                >
+                                    <Upload className="w-4 h-4" />
+                                    Import
                                 </button>
                                 <button
                                     onClick={() => setShowAddDrug(true)}
@@ -549,6 +559,15 @@ export default function DrugListPage() {
                             setCategoryModal({ open: false });
                         }}
                         onCancel={() => setCategoryModal({ open: false })}
+                    />
+                )}
+                {showImportWizard && (
+                    <DrugImportWizard
+                        onSuccess={() => {
+                            setShowImportWizard(false);
+                            fetchDrugs();
+                        }}
+                        onClose={() => setShowImportWizard(false)}
                     />
                 )}
             </AnimatePresence>

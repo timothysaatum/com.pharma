@@ -13,12 +13,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_current_user, get_db
 from app.models.user.user_model import User
 from app.services.reports.reports_service import ReportsService
+from app.utils.pagination import PaginatedResponse, PaginationParams
+from app.schemas.reports_schemas import DailySalesSummaryRow, DrugTurnoverRow
 
 router = APIRouter(prefix="/reports", tags=["Reports"])
 
 
-@router.get("/daily-sales-summary")
+@router.get("/daily-sales-summary", response_model=PaginatedResponse[DailySalesSummaryRow])
 async def get_daily_sales_summary(
+    pagination: PaginationParams = Depends(),
     start_date: date = Query(...),
     end_date: date = Query(...),
     branch_id: Optional[uuid.UUID] = Query(None),
@@ -47,6 +50,7 @@ async def get_daily_sales_summary(
         branch_id=branch_id,
         contract_id=contract_id,
         cashier_id=cashier_id,
+        pagination=pagination,
     )
 
 
@@ -128,12 +132,12 @@ async def get_top_customers(
     )
 
 
-@router.get("/drug-turnover")
+@router.get("/drug-turnover", response_model=PaginatedResponse[DrugTurnoverRow])
 async def get_drug_turnover(
+    pagination: PaginationParams = Depends(),
     start_date: date = Query(...),
     end_date: date = Query(...),
     branch_id: Optional[uuid.UUID] = Query(None),
-    limit: int = Query(20),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -144,7 +148,6 @@ async def get_drug_turnover(
     - start_date: Start date for report
     - end_date: End date for report
     - branch_id: Optional branch filter
-    - limit: Number of drugs to return (default: 20)
     
     Returns: Drug turnover metrics
     """
@@ -154,5 +157,5 @@ async def get_drug_turnover(
         start_date=start_date,
         end_date=end_date,
         branch_id=branch_id,
-        limit=limit,
+        pagination=pagination,
     )
