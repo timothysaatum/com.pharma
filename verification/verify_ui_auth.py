@@ -14,8 +14,9 @@ async def verify_ui():
         await page.goto("http://localhost:3000/login")
 
         print("Logging in...")
+        admin_password = os.getenv("TEST_ADMIN_PASSWORD", "TemporaryPassword123!")
         await page.fill('input[name="username"]', 'admin')
-        await page.fill('input[name="password"]', 'Admin123!')
+        await page.fill('input[name="password"]', admin_password)
         await page.click('button[type="submit"]')
 
         print("Waiting for dashboard...")

@@ -8,6 +8,7 @@ from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.sales.sales_model import Sale, SaleItem
 from app.core.security import hash_password
+import os
 import uuid
 from datetime import datetime, timedelta
 import random
@@ -50,12 +51,13 @@ async def init_db():
         await db.flush()
 
         print("Creating admin user...")
+        admin_password = os.getenv("TEST_ADMIN_PASSWORD", "TemporaryPassword123!")
         user = User(
             id=uuid.uuid4(),
             username="admin",
             email="admin@example.com",
             full_name="Admin User",
-            password_hash=hash_password("Admin123!"),
+            password_hash=hash_password(admin_password),
             role="admin",
             is_active=True,
             organization_id=org.id,
