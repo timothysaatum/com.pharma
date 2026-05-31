@@ -51,7 +51,7 @@ async def init_db():
         await db.flush()
 
         print("Creating admin user...")
-        admin_password = os.getenv("TEST_ADMIN_PASSWORD", "TemporaryPassword123!")
+        admin_password = os.getenv("TEST_ADMIN_PASSWORD", "test_password_placeholder")
         user = User(
             id=uuid.uuid4(),
             username="admin",
