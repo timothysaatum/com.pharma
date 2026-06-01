@@ -878,6 +878,8 @@ class SyncService:
 
             # ------------------------------------------------------------------
             # 18. Prescription refill decrement (critical for offline sales)
+            #     Uses sync_version to prevent double-decrement when prescription
+            #     refills were already decremented offline.
             # ------------------------------------------------------------------
             if safe_data.get("prescription_id"):
                 try:
@@ -889,17 +891,46 @@ class SyncService:
                     )
                     prescription = rx_res.scalar_one_or_none()
                     if prescription and prescription.refills_remaining > 0:
-                        prescription.refills_remaining -= 1
-                        prescription.last_refill_date = date.today()
-                        prescription.status = (
-                            "filled" if prescription.refills_remaining == 0 else "active"
+                        # Get the prescription sync_version that was stored with this sale
+                        # If it was null/missing, this is likely an online sale or legacy data
+                        prescription_sync_version_at_sale = record.data.get("prescription_sync_version")
+                        
+                        # Only decrement if:
+                        # 1. The prescription exists and has refills
+                        # 2. Either no sync_version was stored (online sale), OR
+                        # 3. The server's current sync_version matches what the client had
+                        #    (meaning the prescription hasn't been modified since the sale)
+                        should_decrement = (
+                            prescription_sync_version_at_sale is None or
+                            prescription.sync_version == prescription_sync_version_at_sale
                         )
-                        prescription.updated_at = datetime.now(timezone.utc)
-                        prescription.mark_as_synced()
-                        logger.info(
-                            "Sync: Decremented refills for prescription %s during sale push",
-                            safe_data["prescription_id"],
-                        )
+                        
+                        if should_decrement:
+                            prescription.refills_remaining -= 1
+                            prescription.sync_version += 1
+                            prescription.last_refill_date = date.today()
+                            prescription.status = (
+                                "filled" if prescription.refills_remaining == 0 else "active"
+                            )
+                            prescription.updated_at = datetime.now(timezone.utc)
+                            prescription.mark_as_synced()
+                            logger.info(
+                                "Sync: Decremented refills for prescription %s during sale push "
+                                "(sync_version: %s → %s, refills: %s → %s)",
+                                safe_data["prescription_id"],
+                                prescription.sync_version - 1,
+                                prescription.sync_version,
+                                prescription.refills_remaining + 1,
+                                prescription.refills_remaining,
+                            )
+                        else:
+                            logger.info(
+                                "Sync: Skipped prescription refill decrement for %s "
+                                "(already decremented; server sync_version %s != client %s)",
+                                safe_data["prescription_id"],
+                                prescription.sync_version,
+                                prescription_sync_version_at_sale,
+                            )
                 except Exception as rx_exc:
                     logger.warning(
                         "Sync: Failed to decrement prescription refills during sale push: %s",

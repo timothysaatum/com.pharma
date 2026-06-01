@@ -37,6 +37,9 @@ class OfflineSalesManager {
   /**
    * Record a sale transaction with full atomicity.
    * If ANY step fails, the entire transaction rolls back.
+   * 
+   * IMPORTANT: Prescription refills are decremented IMMEDIATELY (offline) to prevent
+   * overselling. The sync_version field prevents double-decrement on server during sync.
    */
   async recordSaleTransaction(
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
@@ -57,6 +60,14 @@ class OfflineSalesManager {
         return { success: true, saleId: existing[0].id };
       }
 
+      // ─── Step 1: Validate prescription refills before proceeding ──────────────
+      if (sale.prescription_id) {
+        const refillStatus = await this.validatePrescriptionRefills(sale.prescription_id);
+        if (!refillStatus.valid) {
+          return { success: false, error: refillStatus.error };
+        }
+      }
+
       await writeLocal.sale({ ...sale, items } as Parameters<typeof writeLocal.sale>[0]);
 
       for (const { drug_id, delta } of inventoryDeltas) {
@@ -64,6 +75,15 @@ class OfflineSalesManager {
           await writeLocal.inventory(sale.branch_id, drug_id, delta);
         } catch (invErr) {
           console.warn(`[OfflineSalesManager] Inventory update failed for drug ${drug_id}:`, invErr);
+        }
+      }
+
+      // ─── Step 2: Decrement prescription refills IMMEDIATELY (optimistic update) ──
+      if (sale.prescription_id) {
+        const decrementStatus = await this.decrementPrescriptionRefillsOffline(sale.prescription_id);
+        if (!decrementStatus.success) {
+          console.warn(`[OfflineSalesManager] Failed to decrement prescription refills: ${decrementStatus.error}`);
+          // Don't fail the entire sale — prescription might have been deleted or modified
         }
       }
 
@@ -78,6 +98,95 @@ class OfflineSalesManager {
     }
   }
 
+  /**
+   * Validate that prescription has refills remaining before sale.
+   */
+  private async validatePrescriptionRefills(
+    prescriptionId: string
+  ): Promise<{ valid: boolean; error: string }> {
+    const db = await getDb();
+    const result = await db.select<Array<{ refills_remaining: number; status: string }>>(
+      `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
+      [prescriptionId]
+    );
+
+    if (!result.length) {
+      return { valid: false, error: "Prescription not found" };
+    }
+
+    const { refills_remaining, status } = result[0];
+
+    if (status !== "active") {
+      return { valid: false, error: `Prescription is ${status}, cannot be used for sale` };
+    }
+
+    if (refills_remaining <= 0) {
+      return { valid: false, error: "No refills remaining for this prescription" };
+    }
+
+    return { valid: true, error: "" };
+  }
+
+  /**
+   * Decrement prescription refills immediately (optimistic offline update).
+   * Uses sync_version to prevent double-decrement on server.
+   */
+  private async decrementPrescriptionRefillsOffline(
+    prescriptionId: string
+  ): Promise<{ success: boolean; error?: string }> {
+    const db = await getDb();
+    const now = new Date().toISOString();
+
+    try {
+      // Get current prescription state
+      const result = await db.select<Array<{
+        refills_remaining: number;
+        sync_version: number;
+        status: string;
+      }>>(
+        `SELECT refills_remaining, sync_version, status FROM prescriptions WHERE id = $1`,
+        [prescriptionId]
+      );
+
+      if (!result.length) {
+        return { success: false, error: "Prescription not found" };
+      }
+
+      const { refills_remaining, sync_version } = result[0];
+
+      if (refills_remaining <= 0) {
+        return { success: false, error: "No refills remaining" };
+      }
+
+      // Decrement refills and increment sync_version
+      const newRefillsRemaining = refills_remaining - 1;
+      const newSyncVersion = sync_version + 1;
+      const newStatus = newRefillsRemaining === 0 ? "filled" : "active";
+      const lastRefillDate = new Date().toISOString().split("T")[0]; // ISO date only
+
+      await db.execute(
+        `UPDATE prescriptions
+         SET refills_remaining = $1,
+             sync_version = $2,
+             status = $3,
+             last_refill_date = $4,
+             sync_status = 'pending',
+             updated_at = $5
+         WHERE id = $6`,
+        [newRefillsRemaining, newSyncVersion, newStatus, lastRefillDate, now, prescriptionId]
+      );
+
+      console.info(
+        `[OfflineSalesManager] Decremented prescription ${prescriptionId} refills: ` +
+        `${refills_remaining} → ${newRefillsRemaining}, sync_version: ${sync_version} → ${newSyncVersion}`
+      );
+
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
+    }
+  }
+
   private async recordAuditRow(
     db: Awaited<ReturnType<typeof getDb>>,
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
@@ -88,9 +197,26 @@ class OfflineSalesManager {
   ): Promise<void> {
     try {
       const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
+      
+      // ─── Capture prescription sync version if prescription was used ──────────
+      let prescriptionSyncVersion: number | null = null;
+      if (sale.prescription_id) {
+        const presResult = await db.select<Array<{ sync_version: number }>>(
+          `SELECT sync_version FROM prescriptions WHERE id = $1`,
+          [sale.prescription_id]
+        );
+        if (presResult.length) {
+          prescriptionSyncVersion = presResult[0].sync_version;
+        }
+      }
+
       const offlineRecord: OfflineSaleRecord = {
         id: sale.id,
-        sale_data: saleData,
+        sale_data: {
+          ...saleData,
+          // Store the prescription's sync_version at time of sale to prevent double-decrement on server
+          prescription_sync_version: prescriptionSyncVersion,
+        },
         sale_items: items.map((item) => ({
           drug_id: item.drug_id,
           quantity: item.quantity,
