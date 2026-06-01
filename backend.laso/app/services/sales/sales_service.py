@@ -435,10 +435,10 @@ class SalesService:
                     ),
                 )
 
-            # Insurance totals
+            # Insurance/Corporate totals
             patient_copay_amount: Optional[Decimal] = None
             insurance_covered_amount: Optional[Decimal] = None
-            if contract.contract_type == "insurance":
+            if contract.contract_type in ("insurance", "corporate"):
                 patient_copay_amount     = _r2(sum(
                     (p["patient_copay"] or Decimal("0") for p in item_pricing),
                     Decimal("0"),
@@ -450,7 +450,7 @@ class SalesService:
             # ------------------------------------------------------------------
             amount_due = (
                 patient_copay_amount
-                if contract.contract_type == "insurance" and patient_copay_amount is not None
+                if contract.contract_type in ("insurance", "corporate") and patient_copay_amount is not None
                 else total_amount
             )
             amount_paid = _d(

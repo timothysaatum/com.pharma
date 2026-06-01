@@ -46,6 +46,7 @@ async function runMigrations(db: Database): Promise<void> {
   if (user_version < 7) await migrate_v7(db);
   if (user_version < 8) await migrate_v8(db);
   if (user_version < 9) await migrate_v9(db);
+  if (user_version < 10) await migrate_v10(db);
   await ensureBranchInventorySchema(db);
 }
 
@@ -524,6 +525,44 @@ async function migrate_v9(db: Database): Promise<void> {
     // Already exists or unsupported; safe to ignore.
   }
   await db.execute("PRAGMA user_version = 9");
+}
+
+async function migrate_v10(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS prescriptions (
+      id                    TEXT PRIMARY KEY,
+      organization_id       TEXT NOT NULL,
+      prescription_number   TEXT NOT NULL UNIQUE,
+      customer_id           TEXT NOT NULL,
+      prescriber_name       TEXT NOT NULL,
+      prescriber_license    TEXT NOT NULL,
+      prescriber_phone      TEXT,
+      prescriber_address    TEXT,
+      issue_date            TEXT NOT NULL,
+      expiry_date           TEXT NOT NULL,
+      medications           TEXT NOT NULL, -- JSON array
+      diagnosis             TEXT,
+      notes                 TEXT,
+      special_instructions  TEXT,
+      refills_allowed       INTEGER NOT NULL DEFAULT 0,
+      refills_remaining     INTEGER NOT NULL DEFAULT 0,
+      last_refill_date      TEXT,
+      status                TEXT NOT NULL DEFAULT 'active',
+      verified_by           TEXT,
+      verified_at           TEXT,
+      sync_status           TEXT NOT NULL DEFAULT 'synced',
+      sync_version          INTEGER NOT NULL DEFAULT 1,
+      synced_at             TEXT,
+      updated_at            TEXT NOT NULL,
+      created_at            TEXT NOT NULL
+    )
+  `);
+
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_customer ON prescriptions(customer_id)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_org      ON prescriptions(organization_id)`);
+  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_status   ON prescriptions(status)`);
+
+  await db.execute("PRAGMA user_version = 10");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {

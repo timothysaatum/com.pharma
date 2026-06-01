@@ -185,6 +185,15 @@ _CUSTOMER_WRITABLE: frozenset[str] = frozenset({
     "created_at", "updated_at",
 })
 
+_PRESCRIPTION_WRITABLE: frozenset[str] = frozenset({
+    "id", "prescription_number", "customer_id",
+    "prescriber_name", "prescriber_license", "prescriber_phone",
+    "prescriber_address", "issue_date", "expiry_date",
+    "medications", "diagnosis", "notes", "special_instructions",
+    "refills_allowed", "refills_remaining", "status",
+    "created_at", "updated_at",
+})
+
 
 def _clean(data: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -697,6 +706,7 @@ class SyncService:
             "branch_inventory":  SyncService._push_inventory,
             "purchase_orders":   SyncService._push_purchase_order,
             "customers":         SyncService._push_customer,
+            "prescriptions":      SyncService._push_prescription,
         }.get(record.table_name)
 
         if not handler:
@@ -1252,6 +1262,59 @@ class SyncService:
             local_id=record.local_id,
             table_name="customers",
             server_id=str(customer.id),
+            success=True,
+        ), None
+
+    @staticmethod
+    async def _push_prescription(
+        db: AsyncSession,
+        record: PushRecord,
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        pushed_by: uuid.UUID,
+    ) -> Tuple[PushResult, Optional[PushConflict]]:
+        """Push a prescription created offline."""
+        from app.models.precriptions.prescription_model import Prescription
+        from app.api.v1.endpoints.prescription_endpoints import PrescriptionResponse
+
+        existing = (await db.execute(
+            select(Prescription).where(
+                or_(
+                    Prescription.id == record.local_id,
+                    Prescription.prescription_number == record.data.get("prescription_number")
+                )
+            )
+        )).scalar_one_or_none()
+
+        if existing:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="prescriptions",
+                server_id=str(existing.id),
+                success=True,
+            ), None
+
+        safe = _whitelist(record.data, _PRESCRIPTION_WRITABLE)
+        _parse_datetime_fields(safe)
+        safe["organization_id"] = str(organization_id)
+
+        # Ensure medications is correctly handled (it's JSONB in DB)
+        if "medications" in safe and isinstance(safe["medications"], str):
+            import json
+            try:
+                safe["medications"] = json.loads(safe["medications"])
+            except:
+                pass
+
+        prescription = Prescription(**safe)
+        prescription.sync_status = "synced"
+        db.add(prescription)
+        await db.flush()
+
+        return PushResult(
+            local_id=record.local_id,
+            table_name="prescriptions",
+            server_id=str(prescription.id),
             success=True,
         ), None
 

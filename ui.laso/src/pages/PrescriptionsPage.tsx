@@ -6,7 +6,8 @@ import {
 import { customersApi, type CustomerQuickLookup } from "@/api/customers";
 import { drugApi } from "@/api/drugs";
 import { prescriptionsApi } from "@/api/prescriptions";
-import { parseApiError } from "@/api/client";
+import { localRead } from "@/lib/localRead";
+import { isBackendReachable, parseApiError } from "@/api/client";
 import type { Prescription, PrescriptionMedication, PrescriptionStatus, Drug } from "@/types";
 
 const STATUS_OPTIONS: Array<{ value: "" | PrescriptionStatus; label: string }> = [
@@ -119,8 +120,13 @@ export default function PrescriptionsPage() {
     setLoading(true);
     setError(null);
     try {
-      const response = await prescriptionsApi.list(query);
-      setItems(response.items as PrescriptionRow[]);
+      if (!navigator.onLine || !isBackendReachable()) {
+        const response = await localRead.searchPrescriptions(query);
+        setItems(response.items as PrescriptionRow[]);
+      } else {
+        const response = await prescriptionsApi.list(query);
+        setItems(response.items as PrescriptionRow[]);
+      }
     } catch (err) {
       setError(parseApiError(err));
     } finally {
@@ -156,8 +162,27 @@ export default function PrescriptionsPage() {
     const timer = setTimeout(async () => {
       setCustomerSearching(true);
       try {
-        const result = await customersApi.search(customerSearch.trim(), ctrl.signal);
-        setCustomerMatches(result.matches ?? []);
+        if (!navigator.onLine || !isBackendReachable()) {
+          const result = await localRead.searchCustomers({ search: customerSearch.trim() });
+          setCustomerMatches(
+            result.customers.map((c) => ({
+              id: c.id,
+              full_name: `${c.first_name || ""} ${c.last_name || ""}`.trim() || "Customer",
+              phone: c.phone,
+              email: c.email,
+              customer_type: c.customer_type,
+              loyalty_points: c.loyalty_points ?? 0,
+              loyalty_tier: c.loyalty_tier ?? "bronze",
+              has_insurance: !!c.insurance_provider_id,
+              insurance_provider_name: null,
+              preferred_contract_name: null,
+              eligible_for_senior_discount: false,
+            }))
+          );
+        } else {
+          const result = await customersApi.search(customerSearch.trim(), ctrl.signal);
+          setCustomerMatches(result.matches ?? []);
+        }
       } catch {
         setCustomerMatches([]);
       } finally {
@@ -209,9 +234,16 @@ export default function PrescriptionsPage() {
       // Execute all searches in parallel
       const searchPromises = activeSearches.map(async ({ key, query }) => {
         try {
-          const response = await drugApi.list({ search: query }, ctrl.signal);
-          if (mounted) {
-            resultsMap[key] = response.items;
+          if (!navigator.onLine || !isBackendReachable()) {
+            const response = await localRead.searchDrugs({ search: query });
+            if (mounted) {
+              resultsMap[key] = response.items;
+            }
+          } else {
+            const response = await drugApi.list({ search: query }, ctrl.signal);
+            if (mounted) {
+              resultsMap[key] = response.items;
+            }
           }
         } catch {
           if (mounted) {
@@ -314,7 +346,8 @@ export default function PrescriptionsPage() {
 
     setCreating(true);
     try {
-      await prescriptionsApi.create({
+      const data = {
+        id: crypto.randomUUID(), // Ensure UUID for offline create
         prescription_number: prescriptionNumber.trim(),
         customer_id: selectedCustomer.id,
         prescriber_name: prescriberName.trim(),
@@ -325,7 +358,21 @@ export default function PrescriptionsPage() {
         medications: medications.map(({ _key, ...med }) => med),
         refills_allowed: refillsAllowed,
         notes: notes.trim() || null,
-      });
+      };
+
+      if (!navigator.onLine || !isBackendReachable()) {
+        const { enqueue } = await import("@/lib/localDb");
+        await enqueue("prescriptions", data.id, "create", 1, data);
+        // Also update local DB immediately for UI feedback
+        const db = await (await import("@/lib/localDb")).getDb();
+        await db.execute(
+          `INSERT INTO prescriptions (id, organization_id, prescription_number, customer_id, prescriber_name, prescriber_license, prescriber_phone, issue_date, expiry_date, medications, refills_allowed, refills_remaining, notes, status, sync_status, updated_at, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending', $15, $15)`,
+          [data.id, "", data.prescription_number, data.customer_id, data.prescriber_name, data.prescriber_license, data.prescriber_phone, data.issue_date, data.expiry_date, JSON.stringify(data.medications), data.refills_allowed, data.refills_allowed, data.notes, "active", new Date().toISOString()]
+        );
+      } else {
+        await prescriptionsApi.create(data);
+      }
       resetCreateForm();
       setCreateOpen(false);
       await load();
