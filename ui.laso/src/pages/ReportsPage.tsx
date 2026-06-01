@@ -71,9 +71,10 @@ export default function ReportsPage() {
 
   const [showFilters] = useState(true);
   const [dailySalesFromCache, setDailySalesFromCache] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Daily Sales Query
-  const { data: dailySalesPaginated, isLoading: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
+  const { data: dailySalesPaginated, isFetching: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
     queryKey: ['reports', 'daily-sales', filters],
     queryFn: async () => {
       setDailySalesFromCache(false);
@@ -297,28 +298,33 @@ export default function ReportsPage() {
           <div className="flex gap-2">
             <button
               type="button"
+              disabled={dailySalesLoading}
               onClick={() => {
                 refetchDailySales();
               }}
-              className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-1.5 text-sm transition-colors"
+              className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1.5 text-sm transition-colors"
               title="Refresh data"
             >
-              <RefreshCw size={14} />
-              Refresh
+              <RefreshCw size={14} className={dailySalesLoading ? "animate-spin" : ""} />
+              {dailySalesLoading ? "Refreshing..." : "Refresh"}
             </button>
             <button
               type="button"
               onClick={() => {
                 if (dailySalesData && dailySalesData.length > 0) {
-                  exportToCSV(dailySalesData, 'daily-sales');
+                  setIsExporting(true);
+                  setTimeout(() => {
+                    exportToCSV(dailySalesData, 'daily-sales');
+                    setIsExporting(false);
+                  }, 500);
                 }
               }}
-              disabled={!dailySalesData || dailySalesData.length === 0}
+              disabled={!dailySalesData || dailySalesData.length === 0 || isExporting}
               className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-1.5 text-sm transition-colors"
               title="Export data to CSV"
             >
-              <Download size={14} />
-              Export CSV
+              {isExporting ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+              {isExporting ? "Exporting..." : "Export CSV"}
             </button>
           </div>
         </div>

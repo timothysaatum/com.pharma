@@ -40,6 +40,7 @@ const DEFAULT_SYNC_TABLES = [
     "drug_categories",
     "price_contracts",
     "customers",
+    "prescriptions",
     "branch_inventory",
     "drug_batches",
     "sales",
@@ -158,75 +159,90 @@ class SyncEngine {
     // ── PUSH ─────────────────────────────────────────────────────────
 
     private async push(): Promise<string | null> {
-        const queue = await getPendingQueue(500);
-        if (queue.length === 0) return null;
+        let lastPullTimestamp: string | null = null;
+        let hasMore = true;
+        const batchSize = 100;
 
-        const records: PushRecord[] = queue.map((q) => ({
-            table_name: q.table_name,
-            local_id: q.record_id,
-            operation: q.operation,
-            sync_version: q.sync_version,
-            data: JSON.parse(q.payload_json),
-            created_offline_at: q.created_offline_at,
-        }));
-
-        let response: PushResponse;
-        try {
-            response = await syncApi.push({
-                branch_id: this.branchId!,
-                records,
-            });
-        } catch (err) {
-            console.warn("[SyncEngine] Push network error:", err);
-            this.logError(err, "Push network error");
-            if (isOfflineError(err)) {
-                this.setStatus("offline");
+        while (hasMore) {
+            const queue = await getPendingQueue(batchSize);
+            if (queue.length === 0) {
+                hasMore = false;
+                break;
             }
-            throw err;
-        }
 
-        // Accepted → remove from queue, mark local record as synced
-        for (const item of response.accepted) {
-            await dequeue(item.table_name, item.local_id);
-            await this.markSynced(item.table_name, item.local_id, item.server_id);
-        }
+            const records: PushRecord[] = queue.map((q) => ({
+                table_name: q.table_name,
+                local_id: q.record_id,
+                operation: q.operation,
+                sync_version: q.sync_version,
+                data: JSON.parse(q.payload_json),
+                created_offline_at: q.created_offline_at,
+            }));
 
-        // Conflicts
-        for (const conflict of response.conflicts) {
-            if (conflict.resolution === "server_wins") {
-                await this.applyServerRecord(conflict.table_name, conflict.server_record);
-                await dequeue(conflict.table_name, conflict.local_id);
-                await this.markSynced(conflict.table_name, conflict.local_id);
-            } else {
-                // manual_required — persist conflict for later review
-                await markQueueConflict(
-                    conflict.table_name,
-                    conflict.local_id,
-                    "Conflict: manual resolution required",
-                    conflict
+            let response: PushResponse;
+            try {
+                response = await syncApi.push({
+                    branch_id: this.branchId!,
+                    records,
+                });
+                lastPullTimestamp = response.next_pull_timestamp;
+            } catch (err) {
+                console.warn("[SyncEngine] Push network error:", err);
+                this.logError(err, "Push network error");
+                if (isOfflineError(err)) {
+                    this.setStatus("offline");
+                }
+                throw err;
+            }
+
+            // Accepted → remove from queue, mark local record as synced
+            for (const item of response.accepted) {
+                await dequeue(item.table_name, item.local_id);
+                await this.markSynced(item.table_name, item.local_id, item.server_id);
+            }
+
+            // Conflicts
+            for (const conflict of response.conflicts) {
+                if (conflict.resolution === "server_wins") {
+                    await this.applyServerRecord(conflict.table_name, conflict.server_record);
+                    await dequeue(conflict.table_name, conflict.local_id);
+                    await this.markSynced(conflict.table_name, conflict.local_id);
+                } else {
+                    // manual_required — persist conflict for later review
+                    await markQueueConflict(
+                        conflict.table_name,
+                        conflict.local_id,
+                        "Conflict: manual resolution required",
+                        conflict
+                    );
+                }
+            }
+
+            if (response.total_conflicts > 0) {
+                await this.loadPersistedConflicts();
+            }
+
+            // Failed → increment attempt counter, will retry next cycle
+            for (const item of response.failed) {
+                if (item.error) {
+                    await markQueueError(item.table_name, item.local_id, item.error);
+                }
+            }
+
+            if (response.total_conflicts > 0 || response.total_failed > 0) {
+                console.warn(
+                    `[SyncEngine] Push: ${response.total_accepted} accepted, ` +
+                    `${response.total_conflicts} conflicts, ${response.total_failed} failed`
                 );
             }
-        }
 
-        if (response.total_conflicts > 0) {
-            await this.loadPersistedConflicts();
-        }
-
-        // Failed → increment attempt counter, will retry next cycle
-        for (const item of response.failed) {
-            if (item.error) {
-                await markQueueError(item.table_name, item.local_id, item.error);
+            // If we pushed fewer than batchSize, we're likely done with the current queue
+            if (queue.length < batchSize) {
+                hasMore = false;
             }
         }
 
-        if (response.total_conflicts > 0 || response.total_failed > 0) {
-            console.warn(
-                `[SyncEngine] Push: ${response.total_accepted} accepted, ` +
-                `${response.total_conflicts} conflicts, ${response.total_failed} failed`
-            );
-        }
-
-        return response.next_pull_timestamp;
+        return lastPullTimestamp;
     }
 
     // ── PULL ─────────────────────────────────────────────────────────
@@ -255,7 +271,8 @@ class SyncEngine {
                 console.log(
                     `[SyncEngine] Pull response: drugs=${response.drugs.length}, ` +
                     `categories=${response.drug_categories.length}, contracts=${response.price_contracts.length}, ` +
-                    `customers=${response.customers.length}, inventory=${response.branch_inventory.length}, ` +
+                    `customers=${response.customers.length}, prescriptions=${(response as any).prescriptions?.length ?? 0}, ` +
+                    `inventory=${response.branch_inventory.length}, ` +
                     `batches=${response.drug_batches.length}, sales=${response.sales.length}, ` +
                     `orders=${response.purchase_orders.length}, total=${response.total_records}`
                 );
@@ -392,6 +409,18 @@ class SyncEngine {
                 "insurance_member_id", "preferred_contract_id",
                 "is_active", "is_deleted", "sync_status", "sync_version",
                 "synced_at", "updated_at", "created_at",
+            ]);
+        }
+
+        if ((response as any).prescriptions?.length) {
+            await upsertMany("prescriptions", (response as any).prescriptions, [
+                "id", "organization_id", "prescription_number", "customer_id",
+                "prescriber_name", "prescriber_license", "prescriber_phone",
+                "prescriber_address", "issue_date", "expiry_date", "medications",
+                "diagnosis", "notes", "special_instructions", "refills_allowed",
+                "refills_remaining", "last_refill_date", "status", "verified_by",
+                "verified_at", "sync_status", "sync_version", "synced_at",
+                "updated_at", "created_at",
             ]);
         }
 

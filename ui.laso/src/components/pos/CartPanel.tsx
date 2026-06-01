@@ -292,7 +292,7 @@ export function CartPanel({
     }, [contracts, contract, onSetContract]);
 
     const hasRxItems = items.some((i) => i.requiresPrescription);
-    const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance";
+    const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance" || contract?.type === "corporate";
     const fieldError = (field: string) =>
         validationErrors.find((e) => e.field === field)?.message;
     const hasErrors = validationErrors.length > 0 && items.length > 0;
@@ -526,10 +526,12 @@ export function CartPanel({
                                 </div>
                             )}
 
-                            {/* Insurance */}
+                            {/* Insurance / Corporate */}
                             {isInsurance && (
                                 <div className="space-y-2.5 p-3.5 rounded-xl bg-blue-50 border border-blue-100">
-                                    <p className="text-[11px] font-bold text-blue-700 uppercase tracking-widest">Insurance Details</p>
+                                    <p className="text-[11px] font-bold text-blue-700 uppercase tracking-widest">
+                                        {contract?.type === "corporate" ? "Corporate Details" : "Insurance Details"}
+                                    </p>
                                     {/* Patient copay display */}
                                     <div className="flex items-center justify-between text-sm font-semibold text-blue-700">
                                         <span>Patient copay</span>
@@ -568,7 +570,7 @@ export function CartPanel({
                                     <input
                                         value={insuranceClaimNumber}
                                         onChange={(e) => onSetInsuranceClaimNumber(e.target.value)}
-                                        placeholder="Claim number *"
+                                        placeholder={contract?.type === "corporate" ? "Employee ID / Reference *" : "Claim number *"}
                                         className={`${inputCls} border-blue-200 bg-white ${fieldError("insurance_claim") ? "border-red-300" : ""}`}
                                     />
                                     <input
@@ -584,7 +586,9 @@ export function CartPanel({
                                             onChange={(e) => onSetInsuranceVerified(e.target.checked)}
                                             className="w-4 h-4 rounded accent-blue-600"
                                         />
-                                        <span className="text-sm font-semibold text-blue-700">Card verified ✓</span>
+                                        <span className="text-sm font-semibold text-blue-700">
+                                            {contract?.type === "corporate" ? "Employee verified ✓" : "Card verified ✓"}
+                                        </span>
                                     </label>
                                     {fieldError("insurance") && <p className="text-xs text-red-500">{fieldError("insurance")}</p>}
                                 </div>

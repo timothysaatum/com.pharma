@@ -117,19 +117,11 @@ class ReportsService:
         ).order_by(func.date(Sale.created_at).desc())
 
         paginator = Paginator(db)
-        result = await paginator.paginate(stmt, pagination or PaginationParams())
-
-        # Manually validate to schema to ensure complex grouping returns
-        # full result rows instead of just scalars.
-        items = []
-        # Re-execute paginated query to get rows
-        paginated_stmt = stmt.offset((pagination.page - 1) * pagination.page_size if pagination else 0).limit(pagination.page_size if pagination else 50)
-        res = await db.execute(paginated_stmt)
-        for row in res.all():
-            items.append(DailySalesSummaryRow.model_validate(row))
-
-        result.items = items
-        return result
+        return await paginator.paginate_rows(
+            stmt,
+            pagination or PaginationParams(),
+            schema=DailySalesSummaryRow
+        )
 
     @staticmethod
     async def get_contract_performance(
@@ -405,14 +397,8 @@ class ReportsService:
         )
 
         paginator = Paginator(db)
-        result = await paginator.paginate(stmt, pagination or PaginationParams())
-
-        # Ensure full result rows are captured and validated against the schema
-        items = []
-        paginated_stmt = stmt.offset((pagination.page - 1) * pagination.page_size if pagination else 0).limit(pagination.page_size if pagination else 20)
-        res = await db.execute(paginated_stmt)
-        for row in res.all():
-            items.append(DrugTurnoverRow.model_validate(row))
-
-        result.items = items
-        return result
+        return await paginator.paginate_rows(
+            stmt,
+            pagination or PaginationParams(),
+            schema=DrugTurnoverRow
+        )
