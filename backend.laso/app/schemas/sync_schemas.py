@@ -5,7 +5,7 @@ Defines the pull/push contract between the Tauri desktop client and the server.
 
 Ownership rules encoded here:
   Pull-only  (org-level, branch never writes):
-      drugs, drug_categories, price_contracts, customers
+      drugs, drug_categories, price_contracts
 
   Push+Pull  (branch-level, branch is source of truth):
       branch_inventory, drug_batches, stock_adjustments,
@@ -14,16 +14,18 @@ Ownership rules encoded here:
   Special:
       customers  — org-level but branches CREATE them offline,
                    then push; server deduplicates by phone/email.
+      prescriptions — org-level but branches CREATE them offline,
+                      then push; server deduplicates by prescription number.
 
   Not synced (server-only):
-      insurance_providers, users, suppliers, prescriptions
+      insurance_providers, users, suppliers
       — these are managed exclusively through the web admin and
         are not needed offline by the desktop client.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from pydantic import Field, field_validator
 import uuid
@@ -38,6 +40,34 @@ from app.schemas.price_contract_schemas import PriceContractResponse
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.sales_schemas import SaleResponse
 from app.schemas.purchase_order_schemas import PurchaseOrderResponse
+
+
+class PrescriptionSyncResponse(BaseSchema):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    prescription_number: str
+    customer_id: uuid.UUID
+    prescriber_name: str
+    prescriber_license: str
+    prescriber_phone: Optional[str] = None
+    prescriber_address: Optional[str] = None
+    issue_date: date
+    expiry_date: date
+    medications: List[Dict[str, Any]]
+    diagnosis: Optional[str] = None
+    notes: Optional[str] = None
+    special_instructions: Optional[str] = None
+    refills_allowed: int
+    refills_remaining: int
+    last_refill_date: Optional[date] = None
+    status: str
+    verified_by: Optional[uuid.UUID] = None
+    verified_at: Optional[datetime] = None
+    sync_status: str = "synced"
+    sync_version: int = 1
+    synced_at: Optional[datetime] = None
+    updated_at: datetime
+    created_at: datetime
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -62,6 +92,7 @@ class PullRequest(BaseSchema):
             "drug_categories",
             "price_contracts",
             "customers",
+            "prescriptions",
             # branch-owned tables are also pulled so multi-device branches stay in sync
             "branch_inventory",
             "drug_batches",
@@ -79,6 +110,7 @@ class PullRequest(BaseSchema):
             "drug_categories",
             "price_contracts",
             "customers",
+            "prescriptions",
             "branch_inventory",
             "drug_batches",
             "stock_adjustments",
@@ -103,6 +135,7 @@ class PullResponse(BaseSchema):
     drug_categories: List[DrugCategoryResponse] = Field(default_factory=list)
     price_contracts: List[PriceContractResponse] = Field(default_factory=list)
     customers: List[CustomerResponse] = Field(default_factory=list)
+    prescriptions: List[PrescriptionSyncResponse] = Field(default_factory=list)
 
     # Branch-level (also pulled so multi-device branches stay in sync)
     branch_inventory: List[BranchInventoryResponse] = Field(default_factory=list)
@@ -141,7 +174,8 @@ class PushRecord(BaseSchema):
     table_name: str = Field(
         ...,
         description="One of: branch_inventory, drug_batches, "
-                    "stock_adjustments, sales, purchase_orders, customers",
+                    "stock_adjustments, sales, purchase_orders, customers, "
+                    "prescriptions",
     )
     local_id: str = Field(..., description="Client-side UUID for this record")
     operation: str = Field(..., pattern="^(create|update|delete)$")
@@ -161,6 +195,7 @@ class PushRecord(BaseSchema):
             "sales",
             "purchase_orders",
             "customers",      # special: org-level but created offline
+            "prescriptions",  # special: org-level but created offline
         }
         if v not in pushable:
             raise ValueError(

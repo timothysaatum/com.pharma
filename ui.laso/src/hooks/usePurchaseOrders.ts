@@ -83,6 +83,7 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
             if (supplierFilter) params.supplier_id = supplierFilter;
 
             const data = await purchaseOrdersApi.list(params, controller.signal);
+            await writeLocal.cachePurchaseOrders(data.items);
             setOrders(data.items);
             setTotal(data.total);
             setTotalPages(data.total_pages);

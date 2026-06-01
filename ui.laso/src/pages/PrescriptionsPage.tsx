@@ -7,7 +7,8 @@ import { customersApi, type CustomerQuickLookup } from "@/api/customers";
 import { drugApi } from "@/api/drugs";
 import { prescriptionsApi } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
-import { isBackendReachable, parseApiError } from "@/api/client";
+import { writeLocal } from "@/lib/localWrite";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import type { Prescription, PrescriptionMedication, PrescriptionStatus, Drug } from "@/types";
 
 const STATUS_OPTIONS: Array<{ value: "" | PrescriptionStatus; label: string }> = [
@@ -125,10 +126,21 @@ export default function PrescriptionsPage() {
         setItems(response.items as PrescriptionRow[]);
       } else {
         const response = await prescriptionsApi.list(query);
+        await writeLocal.cachePrescriptions(response.items);
         setItems(response.items as PrescriptionRow[]);
       }
     } catch (err) {
-      setError(parseApiError(err));
+      if (isOfflineError(err) || !isBackendReachable()) {
+        try {
+          const response = await localRead.searchPrescriptions(query);
+          setItems(response.items as PrescriptionRow[]);
+          setError(null);
+        } catch (fallbackErr) {
+          setError(parseApiError(fallbackErr));
+        }
+      } else {
+        setError(parseApiError(err));
+      }
     } finally {
       setLoading(false);
     }
@@ -360,18 +372,33 @@ export default function PrescriptionsPage() {
         notes: notes.trim() || null,
       };
 
+      const now = new Date().toISOString();
+      const localPrescriptionData: Omit<Prescription, "sync_status" | "sync_version"> & { id: string } = {
+        ...data,
+        organization_id: "",
+        prescriber_address: null,
+        diagnosis: null,
+        special_instructions: null,
+        refills_remaining: refillsAllowed,
+        last_refill_date: null,
+        status: "active",
+        verified_by: null,
+        verified_at: null,
+        synced_at: null,
+        created_at: now,
+        updated_at: now,
+      };
+
       if (!navigator.onLine || !isBackendReachable()) {
-        const { enqueue } = await import("@/lib/localDb");
-        await enqueue("prescriptions", data.id, "create", 1, data);
-        // Also update local DB immediately for UI feedback
-        const db = await (await import("@/lib/localDb")).getDb();
-        await db.execute(
-          `INSERT INTO prescriptions (id, organization_id, prescription_number, customer_id, prescriber_name, prescriber_license, prescriber_phone, issue_date, expiry_date, medications, refills_allowed, refills_remaining, notes, status, sync_status, updated_at, created_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'pending', $15, $15)`,
-          [data.id, "", data.prescription_number, data.customer_id, data.prescriber_name, data.prescriber_license, data.prescriber_phone, data.issue_date, data.expiry_date, JSON.stringify(data.medications), data.refills_allowed, data.refills_allowed, data.notes, "active", new Date().toISOString()]
-        );
+        await writeLocal.prescription(localPrescriptionData);
       } else {
-        await prescriptionsApi.create(data);
+        try {
+          const saved = await prescriptionsApi.create(data);
+          await writeLocal.cachePrescriptions([saved]);
+        } catch (err) {
+          if (!isOfflineError(err)) throw err;
+          await writeLocal.prescription(localPrescriptionData);
+        }
       }
       resetCreateForm();
       setCreateOpen(false);

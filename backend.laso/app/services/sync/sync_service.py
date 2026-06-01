@@ -47,7 +47,7 @@ It does NOT strip ``None`` values — intentional nulls (e.g. clearing
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
@@ -62,6 +62,7 @@ from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pricing.pricing_model import PriceContract
+from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import Sale, SaleItem, PurchaseOrder
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
@@ -73,6 +74,7 @@ from app.schemas.sales_schemas import SaleResponse
 from app.schemas.sync_schemas import (
     PullRequest,
     PullResponse,
+    PrescriptionSyncResponse,
     PushConflict,
     PushRecord,
     PushRequest,
@@ -90,6 +92,7 @@ SYNC_TABLES: tuple[str, ...] = (
     "drug_categories",
     "price_contracts",
     "customers",
+    "prescriptions",
     "branch_inventory",
     "drug_batches",
     "sales",
@@ -106,6 +109,7 @@ CONFLICT_RESOLUTION: Dict[str, str] = {
     "stock_adjustments": "server_wins",
     "purchase_orders":   "server_wins",
     "customers":         "manual_required",
+    "prescriptions":     "server_wins",
 }
 
 # ---------------------------------------------------------------------------
@@ -507,6 +511,19 @@ class SyncService:
             result.customers = [CustomerResponse.model_validate(r) for r in rows]
             total += len(rows)
 
+        if "prescriptions" in tables:
+            rows = await SyncService._pull_table(
+                db, Prescription, since,
+                Prescription.organization_id == organization_id,
+            )
+            result.prescriptions = [
+                PrescriptionSyncResponse.model_validate(r).model_copy(
+                    update={"sync_status": "synced"}
+                )
+                for r in rows
+            ]
+            total += len(rows)
+
         if "branch_inventory" in tables:
             rows = await SyncService._pull_table(
                 db, BranchInventory, since,
@@ -560,9 +577,13 @@ class SyncService:
             rows = await SyncService._pull_table(
                 db, PurchaseOrder, since,
                 PurchaseOrder.branch_id == branch_id,
-                PurchaseOrder.sync_status == "synced",
             )
-            result.purchase_orders = [PurchaseOrderResponse.model_validate(r) for r in rows]
+            result.purchase_orders = [
+                PurchaseOrderResponse.model_validate(r).model_copy(
+                    update={"sync_status": "synced"}
+                )
+                for r in rows
+            ]
             total += len(rows)
 
         result.total_records = total
@@ -855,6 +876,38 @@ class SyncService:
                         )
                 await db.flush()
 
+            # ------------------------------------------------------------------
+            # 18. Prescription refill decrement (critical for offline sales)
+            # ------------------------------------------------------------------
+            if safe_data.get("prescription_id"):
+                try:
+                    rx_res = await db.execute(
+                        select(Prescription).where(
+                            Prescription.id == safe_data["prescription_id"],
+                            Prescription.organization_id == organization_id,
+                        )
+                    )
+                    prescription = rx_res.scalar_one_or_none()
+                    if prescription and prescription.refills_remaining > 0:
+                        prescription.refills_remaining -= 1
+                        prescription.last_refill_date = date.today()
+                        prescription.status = (
+                            "filled" if prescription.refills_remaining == 0 else "active"
+                        )
+                        prescription.updated_at = datetime.now(timezone.utc)
+                        prescription.mark_as_synced()
+                        logger.info(
+                            "Sync: Decremented refills for prescription %s during sale push",
+                            safe_data["prescription_id"],
+                        )
+                except Exception as rx_exc:
+                    logger.warning(
+                        "Sync: Failed to decrement prescription refills during sale push: %s",
+                        rx_exc,
+                    )
+                    # Don't fail the entire sale push if refill update fails
+                    # (prescription might have been deleted or modified)
+
         except Exception as exc:
             # If we still get a FK constraint violation after validation,
             # it means a referenced record was deleted between validation and flush.
@@ -868,7 +921,12 @@ class SyncService:
                 )
                 
                 # Remove the sale from the session to start fresh
-                db.expunge(sale)
+                # (may fail if sale is already detached; that's OK)
+                try:
+                    db.expunge(sale)
+                except Exception:
+                    # Sale might not be in session; rollback to clear the failed state
+                    await db.rollback()
                 
                 # Map constraint names to FK fields
                 constraint_to_field = {
