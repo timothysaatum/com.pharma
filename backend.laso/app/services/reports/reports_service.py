@@ -18,7 +18,7 @@ from typing import Dict, List, Optional, Any
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func, and_, case
+from sqlalchemy import select, func, and_, case, String, Integer, Float
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -30,6 +30,8 @@ from app.models.customer.customer_model import Customer
 from app.models.pricing.pricing_model import PriceContract
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import User
+from app.utils.pagination import PaginatedResponse, Paginator, PaginationParams
+from app.schemas.reports_schemas import DailySalesSummaryRow, DrugTurnoverRow
 
 
 class ReportsService:
@@ -44,7 +46,8 @@ class ReportsService:
         branch_id: Optional[uuid.UUID] = None,
         contract_id: Optional[uuid.UUID] = None,
         cashier_id: Optional[uuid.UUID] = None,
-    ) -> List[Dict[str, Any]]:
+        pagination: Optional[PaginationParams] = None,
+    ) -> PaginatedResponse[DailySalesSummaryRow]:
         """
         Daily sales summary grouped by date, branch, contract, and cashier.
         
@@ -58,25 +61,25 @@ class ReportsService:
         """
         stmt = (
             select(
-                func.date(Sale.created_at).label("sale_date"),
-                Sale.branch_id,
+                func.cast(func.date(Sale.created_at), String).label("sale_date"),
+                func.cast(Sale.branch_id, String).label("branch_id"),
                 Branch.name.label("branch_name"),
-                Sale.price_contract_id,
+                func.cast(Sale.price_contract_id, String).label("contract_id"),
                 PriceContract.contract_name,
-                Sale.cashier_id,
+                func.cast(Sale.cashier_id, String).label("cashier_id"),
                 User.full_name.label("cashier_name"),
                 func.count(func.distinct(Sale.id)).label("transaction_count"),
-                func.sum(Sale.subtotal).label("gross_revenue"),
-                func.sum(Sale.discount_amount).label("total_discount"),
-                func.sum(Sale.tax_amount).label("total_tax"),
-                func.sum(Sale.total_amount).label("net_revenue"),
-                func.coalesce(func.sum(SaleItem.quantity), 0).label("total_items"),
-                func.sum(
+                func.cast(func.sum(Sale.subtotal), Float).label("gross_revenue"),
+                func.cast(func.sum(Sale.discount_amount), Float).label("total_discount"),
+                func.cast(func.sum(Sale.tax_amount), Float).label("total_tax"),
+                func.cast(func.sum(Sale.total_amount), Float).label("net_revenue"),
+                func.cast(func.coalesce(func.sum(SaleItem.quantity), 0), Integer).label("total_items"),
+                func.cast(func.sum(
                     case(
                         (Sale.status == "refunded", 1),
                         else_=0,
                     )
-                ).label("refund_count"),
+                ), Integer).label("refund_count"),
             )
             .join(Branch, Sale.branch_id == Branch.id)
             .join(User, Sale.cashier_id == User.id)
@@ -113,28 +116,12 @@ class ReportsService:
             User.full_name,
         ).order_by(func.date(Sale.created_at).desc())
 
-        result = await db.execute(stmt)
-        rows = result.fetchall()
-
-        return [
-            {
-                "sale_date": str(row.sale_date),
-                "branch_id": str(row.branch_id),
-                "branch_name": row.branch_name,
-                "contract_id": str(row.price_contract_id) if row.price_contract_id else None,
-                "contract_name": row.contract_name,
-                "cashier_id": str(row.cashier_id) if row.cashier_id else None,
-                "cashier_name": row.cashier_name,
-                "transaction_count": row.transaction_count,
-                "gross_revenue": float(row.gross_revenue or 0),
-                "total_discount": float(row.total_discount or 0),
-                "total_tax": float(row.total_tax or 0),
-                "net_revenue": float(row.net_revenue or 0),
-                "total_items": int(row.total_items or 0),
-                "refund_count": row.refund_count,
-            }
-            for row in rows
-        ]
+        paginator = Paginator(db)
+        return await paginator.paginate_rows(
+            stmt,
+            pagination or PaginationParams(),
+            schema=DailySalesSummaryRow
+        )
 
     @staticmethod
     async def get_contract_performance(
@@ -220,11 +207,11 @@ class ReportsService:
                     BranchInventory.branch_id,
                     Branch.name.label("branch_name"),
                     Drug.id.label("drug_id"),
-                    Drug.drug_name,
+                    Drug.name.label("drug_name"),
                     Drug.sku,
                     Drug.reorder_level,
                     BranchInventory.quantity,
-                    func.literal("LOW_STOCK").label("alert_type"),
+                    func.cast(func.coalesce(None, "LOW_STOCK"), String).label("alert_type"),
                 )
                 .join(Branch, BranchInventory.branch_id == Branch.id)
                 .join(Drug, BranchInventory.drug_id == Drug.id)
@@ -263,24 +250,21 @@ class ReportsService:
                     DrugBatch.branch_id,
                     Branch.name.label("branch_name"),
                     Drug.id.label("drug_id"),
-                    Drug.drug_name,
+                    Drug.name.label("drug_name"),
                     Drug.sku,
                     DrugBatch.batch_number,
-                    DrugBatch.batch_expiry_date,
+                    DrugBatch.expiry_date.label("batch_expiry_date"),
                     DrugBatch.remaining_quantity,
-                    func.case(
-                        (DrugBatch.batch_expiry_date < today, "EXPIRED"),
-                        (
-                            DrugBatch.batch_expiry_date <= thirty_days_later,
-                            "EXPIRING_SOON",
-                        ),
-                    ).label("alert_type"),
+                    func.cast(case(
+                        (DrugBatch.expiry_date < today, "EXPIRED"),
+                        else_="EXPIRING_SOON"
+                    ), String).label("alert_type"),
                 )
                 .join(Drug, DrugBatch.drug_id == Drug.id)
                 .join(Branch, DrugBatch.branch_id == Branch.id)
                 .where(
                     Drug.organization_id == organization_id,
-                    DrugBatch.batch_expiry_date <= thirty_days_later,
+                    DrugBatch.expiry_date <= thirty_days_later,
                 )
             )
             if branch_id:
@@ -320,7 +304,7 @@ class ReportsService:
         stmt = (
             select(
                 Customer.id,
-                Customer.customer_name,
+                func.concat(Customer.first_name, " ", Customer.last_name).label("customer_name"),
                 Customer.phone,
                 Customer.loyalty_tier,
                 Customer.loyalty_points,
@@ -340,7 +324,8 @@ class ReportsService:
             )
             .group_by(
                 Customer.id,
-                Customer.customer_name,
+                Customer.first_name,
+                Customer.last_name,
                 Customer.phone,
                 Customer.loyalty_tier,
                 Customer.loyalty_points,
@@ -372,21 +357,21 @@ class ReportsService:
         start_date: date,
         end_date: date,
         branch_id: Optional[uuid.UUID] = None,
-        limit: int = 100,
-    ) -> List[Dict[str, Any]]:
+        pagination: Optional[PaginationParams] = None,
+    ) -> PaginatedResponse[DrugTurnoverRow]:
         """
         Drug turnover: units sold, revenue, transaction count by drug and period.
         """
         stmt = (
             select(
-                Drug.id.label("drug_id"),
-                Drug.drug_name,
-                Drug.sku,
-                Drug.category,
-                func.sum(SaleItem.quantity).label("units_sold"),
-                func.sum(SaleItem.total_price).label("revenue"),
+                func.cast(Drug.id, String).label("drug_id"),
+                Drug.name.label("drug_name"),
+                Drug.sku.label("drug_sku"),
+                Drug.category_id.label("category"),
+                func.cast(func.sum(SaleItem.quantity), Integer).label("units_sold"),
+                func.cast(func.sum(SaleItem.total_price), Float).label("revenue"),
                 func.count(func.distinct(Sale.id)).label("transaction_count"),
-                func.avg(SaleItem.unit_price).label("avg_selling_price"),
+                func.cast(func.avg(SaleItem.unit_price), Float).label("avg_selling_price"),
             )
             .join(SaleItem, SaleItem.drug_id == Drug.id)
             .join(Sale, SaleItem.sale_id == Sale.id)
@@ -404,25 +389,16 @@ class ReportsService:
         stmt = (
             stmt.group_by(
                 Drug.id,
-                Drug.drug_name,
+                Drug.name,
                 Drug.sku,
-                Drug.category,
+                Drug.category_id,
             )
             .order_by(func.sum(SaleItem.quantity).desc().nullsfirst())
-            .limit(limit)
         )
 
-        result = await db.execute(stmt)
-        return [
-            {
-                "drug_id": str(row.drug_id),
-                "drug_name": row.drug_name,
-                "drug_sku": row.sku,
-                "category": row.category,
-                "units_sold": row.units_sold or 0,
-                "revenue": float(row.revenue or 0),
-                "transaction_count": row.transaction_count,
-                "avg_selling_price": float(row.avg_selling_price or 0),
-            }
-            for row in result.fetchall()
-        ]
+        paginator = Paginator(db)
+        return await paginator.paginate_rows(
+            stmt,
+            pagination or PaginationParams(),
+            schema=DrugTurnoverRow
+        )

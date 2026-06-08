@@ -4,6 +4,7 @@
  */
 
 import { get } from './client';
+import type { PaginatedResponse } from '@/types';
 
 export interface DailySalesFilter {
   startDate: string;
@@ -11,6 +12,8 @@ export interface DailySalesFilter {
   branchId?: string;
   contractId?: string;
   cashierId?: string;
+  page?: number;
+  page_size?: number;
 }
 
 export interface ContractPerformanceFilter {
@@ -46,7 +49,8 @@ export interface DrugTurnoverFilter {
   startDate: string;
   endDate: string;
   branchId?: string;
-  limit?: number;
+  page?: number;
+  page_size?: number;
 }
 
 class ReportsAPI {
@@ -54,13 +58,15 @@ class ReportsAPI {
     const params = new URLSearchParams({
       start_date: filters.startDate,
       end_date: filters.endDate,
+      page: (filters.page || 1).toString(),
+      page_size: (filters.page_size || 50).toString(),
     });
 
     if (filters.branchId) params.append('branch_id', filters.branchId);
     if (filters.contractId) params.append('contract_id', filters.contractId);
     if (filters.cashierId) params.append('cashier_id', filters.cashierId);
 
-    const response = await get<any[]>(`/reports/daily-sales-summary?${params}`);
+    const response = await get<PaginatedResponse<any>>(`/reports/daily-sales-summary?${params}`);
     return response;
   }
 
@@ -101,12 +107,13 @@ class ReportsAPI {
     const params = new URLSearchParams({
       start_date: filters.startDate,
       end_date: filters.endDate,
-      limit: (filters.limit || 20).toString(),
+      page: (filters.page || 1).toString(),
+      page_size: (filters.page_size || 20).toString(),
     });
 
     if (filters.branchId) params.append('branch_id', filters.branchId);
 
-    const response = await get<any[]>(`/reports/drug-turnover?${params}`);
+    const response = await get<PaginatedResponse<any>>(`/reports/drug-turnover?${params}`);
     return response;
   }
 }

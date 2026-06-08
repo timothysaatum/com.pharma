@@ -285,6 +285,15 @@ function toSupplierFromPurchaseOrders(row: Record<string, unknown>): Supplier {
   };
 }
 
+function toPrescription(row: Record<string, unknown>): any {
+  return {
+    ...row,
+    medications: parseJsonArray(row.medications),
+    refills_allowed: toNumber(row.refills_allowed),
+    refills_remaining: toNumber(row.refills_remaining),
+  };
+}
+
 export const localRead = {
   async searchDrugs(
     params: DrugSearchParams = {},
@@ -1019,5 +1028,70 @@ export const localRead = {
       total_potential_profit,
       profit_margin_percentage: total_selling_value === 0 ? 0 : (total_potential_profit / total_selling_value) * 100,
     };
+  },
+
+  async searchPrescriptions(
+    params: {
+      page?: number;
+      page_size?: number;
+      customer_id?: string;
+      status_filter?: string;
+      include_expired?: boolean;
+      search?: string;
+      organization_id?: string;
+    } = {},
+    page = 1,
+    page_size = 25
+  ): Promise<PaginatedResponse<any>> {
+    const db = await getDb();
+    const qualifiers: string[] = [];
+    const values: unknown[] = [];
+
+    if (params.customer_id) {
+      values.push(params.customer_id);
+      qualifiers.push(`customer_id = $${values.length}`);
+    }
+    if (params.status_filter) {
+      values.push(params.status_filter);
+      qualifiers.push(`status = $${values.length}`);
+    }
+    if (params.include_expired === false) {
+      qualifiers.push(`DATE(expiry_date) >= DATE('now')`);
+    }
+    if (params.organization_id) {
+      values.push(params.organization_id);
+      qualifiers.push(`organization_id = $${values.length}`);
+    }
+    if (params.search) {
+      values.push(sqlLike(params.search));
+      qualifiers.push(`(
+        LOWER(prescription_number) LIKE $${values.length} OR
+        LOWER(prescriber_name) LIKE $${values.length}
+      )`);
+    }
+
+    const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
+    const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM prescriptions ${where}`, values);
+    const total = totalRows[0]?.total ?? 0;
+
+    const offset = (page - 1) * page_size;
+    const rows = await db.select<Record<string, unknown>[]>(
+      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name
+       FROM prescriptions p
+       LEFT JOIN customers c ON c.id = p.customer_id
+       ${where}
+       ORDER BY p.created_at DESC
+       LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      [...values, page_size, offset]
+    );
+
+    return buildPagination(rows.map(toPrescription), page, page_size, total);
+  },
+
+  async getPrescriptionById(id: string): Promise<any | null> {
+    const db = await getDb();
+    const rows = await db.select<Record<string, unknown>[]>(`SELECT * FROM prescriptions WHERE id = $1`, [id]);
+    if (!rows.length) return null;
+    return toPrescription(rows[0]);
   },
 };

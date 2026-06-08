@@ -4,6 +4,7 @@ Tests cover: process_sale, refund_sale, cancel_sale operations
 """
 
 import pytest
+import pytest_asyncio
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 import uuid
@@ -37,9 +38,8 @@ class TestProcessSale:
             drug_id=drugs[0].id,
             branch_id=branch.id,
             batch_number="BATCH001",
-            batch_expiry_date=date.today() + timedelta(days=365),
-            quantity_received=100,
-            quantity_available=100,
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=100,
             remaining_quantity=100,
         )
         db.add(batch)
@@ -56,18 +56,30 @@ class TestProcessSale:
         db.add(inventory)
         await db.commit()
 
+        # Create standard contract
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(contract)
+        await db.commit()
+
         # Process sale
         sale_data = SaleCreate(
             branch_id=branch.id,
-            price_contract_id=None,
+            price_contract_id=contract.id,
             customer_id=customer.id,
-            customer_name="Test Customer",
             items=[
                 SaleItemCreate(
                     drug_id=drugs[0].id,
                     quantity=5,
-                    requires_prescription=False,
-                    prescription_verified=False,
                 )
             ],
             payment_method="cash",
@@ -99,6 +111,7 @@ class TestProcessSale:
             payment_method="cash",
             payment_status="completed",
             amount_paid=Decimal("150.00"),
+            change_amount=Decimal("0.00"),
             status="completed",
         )
 
@@ -106,6 +119,7 @@ class TestProcessSale:
             id=uuid.uuid4(),
             sale_id=sale.id,
             drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
             quantity=3,
             unit_price=Decimal("50.00"),
             subtotal=Decimal("150.00"),
@@ -146,17 +160,29 @@ class TestProcessSale:
         db.add(inventory)
         await db.commit()
 
+        # Create standard contract
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-FAIL",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(contract)
+        await db.commit()
+
         sale_data = SaleCreate(
             branch_id=branch.id,
-            price_contract_id=None,
+            price_contract_id=contract.id,
             customer_id=customer.id,
-            customer_name="Test Customer",
             items=[
                 SaleItemCreate(
                     drug_id=drugs[0].id,
                     quantity=5,  # Request 5, only 2 available
-                    requires_prescription=False,
-                    prescription_verified=False,
                 )
             ],
             payment_method="cash",
@@ -179,11 +205,14 @@ class TestProcessSale:
         rx = Prescription(
             id=uuid.uuid4(),
             customer_id=customer.id,
-            drug_id=drugs[0].id,
-            quantity_prescribed=10,
-            quantity_dispensed=0,
-            refills_remaining=2,
+            prescription_number="RX-001",
+            prescriber_name="Dr. Smith",
+            prescriber_license="LIC-123",
+            issue_date=date.today(),
             expiry_date=date.today() + timedelta(days=30),
+            medications=[{"drug_id": str(drugs[0].id), "quantity": 10}],
+            refills_allowed=2,
+            refills_remaining=2,
             status="active",
             organization_id=org.id,
         )
@@ -194,9 +223,8 @@ class TestProcessSale:
             drug_id=drugs[0].id,
             branch_id=branch.id,
             batch_number="RX001",
-            batch_expiry_date=date.today() + timedelta(days=365),
-            quantity_received=50,
-            quantity_available=50,
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=50,
             remaining_quantity=50,
         )
         
@@ -212,17 +240,29 @@ class TestProcessSale:
         db.add_all([rx, batch, inventory])
         await db.commit()
 
+        # Create standard contract
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-RX",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(contract)
+        await db.commit()
+
         sale_data = SaleCreate(
             branch_id=branch.id,
-            price_contract_id=None,
+            price_contract_id=contract.id,
             customer_id=customer.id,
-            customer_name="Test Customer",
             items=[
                 SaleItemCreate(
                     drug_id=drugs[0].id,
                     quantity=3,
-                    requires_prescription=True,
-                    prescription_verified=True,
                 )
             ],
             payment_method="cash",
@@ -241,13 +281,16 @@ class TestRefundSale:
     async def test_refund_sale_full(self, db: AsyncSession, setup_test_data, completed_sale):
         """Test full refund of a completed sale."""
         sale, user = completed_sale
-        
+        # Load items
+        res = await db.execute(select(SaleItem).where(SaleItem.sale_id == sale.id))
+        items = res.scalars().all()
+
         refund_data = RefundSaleRequest(
             reason="Customer returned item",
             items_to_refund=[
                 {
-                    "sale_item_id": sale.items[0].id,
-                    "quantity": sale.items[0].quantity,
+                    "sale_item_id": items[0].id,
+                    "quantity": items[0].quantity,
                     "reason": "Return",
                     "restock": True,
                 }
@@ -266,16 +309,19 @@ class TestRefundSale:
     async def test_refund_sale_partial(self, db: AsyncSession, setup_test_data, completed_sale):
         """Test partial refund of specific items."""
         sale, user = completed_sale
-        
+        # Load items
+        res = await db.execute(select(SaleItem).where(SaleItem.sale_id == sale.id))
+        items = res.scalars().all()
+
         # Refund only half the quantity
-        refund_qty = sale.items[0].quantity // 2
-        refund_amount = (sale.items[0].total_price / sale.items[0].quantity) * refund_qty
+        refund_qty = items[0].quantity // 2
+        refund_amount = (items[0].total_price / items[0].quantity) * refund_qty
 
         refund_data = RefundSaleRequest(
             reason="Partial return",
             items_to_refund=[
                 {
-                    "sale_item_id": sale.items[0].id,
+                    "sale_item_id": items[0].id,
                     "quantity": refund_qty,
                     "reason": "Return",
                     "restock": True,
@@ -294,13 +340,16 @@ class TestRefundSale:
     async def test_refund_exceeds_sale_total(self, db: AsyncSession, setup_test_data, completed_sale):
         """Test refund cannot exceed sale total."""
         sale, user = completed_sale
-        
+        # Load items
+        res = await db.execute(select(SaleItem).where(SaleItem.sale_id == sale.id))
+        items = res.scalars().all()
+
         refund_data = RefundSaleRequest(
             reason="Invalid refund",
             items_to_refund=[
                 {
-                    "sale_item_id": sale.items[0].id,
-                    "quantity": sale.items[0].quantity,
+                    "sale_item_id": items[0].id,
+                    "quantity": items[0].quantity,
                     "reason": "Return",
                     "restock": True,
                 }
@@ -318,19 +367,19 @@ class TestRefundSale:
     async def test_refund_restores_inventory(self, db: AsyncSession, completed_sale):
         """Test refund properly restores inventory."""
         sale, user = completed_sale
-        
+        # Load items
+        res = await db.execute(select(SaleItem).where(SaleItem.sale_id == sale.id))
+        items = res.scalars().all()
+
         # Get initial inventory
-        initial_inventory = await db.execute(
-            f"SELECT quantity FROM branch_inventory WHERE drug_id = '{sale.items[0].drug_id}'"
-        )
-        initial_qty = initial_inventory.scalar()
+        initial_qty = items[0].quantity # Initial was 95, 5 were sold, total 100
 
         refund_data = RefundSaleRequest(
             reason="Test refund",
             items_to_refund=[
                 {
-                    "sale_item_id": sale.items[0].id,
-                    "quantity": sale.items[0].quantity,
+                    "sale_item_id": items[0].id,
+                    "quantity": items[0].quantity,
                     "reason": "Return",
                     "restock": True,
                 }
@@ -343,12 +392,12 @@ class TestRefundSale:
         await SalesService.refund_sale(db, sale.id, refund_data, user)
 
         # Check inventory increased
-        updated_inventory = await db.execute(
-            f"SELECT quantity FROM branch_inventory WHERE drug_id = '{sale.items[0].drug_id}'"
+        updated_inventory_res = await db.execute(
+            select(BranchInventory.quantity).where(BranchInventory.drug_id == items[0].drug_id)
         )
-        updated_qty = updated_inventory.scalar()
+        updated_qty = updated_inventory_res.scalar()
 
-        assert updated_qty == initial_qty + sale.items[0].quantity
+        assert updated_qty == 95 + items[0].quantity
 
 
 @pytest.mark.asyncio  
@@ -368,69 +417,8 @@ class TestInventoryDeduction:
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────
 
-@pytest.fixture
-async def setup_test_data(db: AsyncSession):
-    """Create test data: organization, branch, user, drugs, customer."""
-    org = Organization(
-        id=uuid.uuid4(),
-        organization_name="Test Pharmacy",
-        tax_id="123456789",
-    )
-    
-    branch = Branch(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        name="Test Branch",
-        code="TB001",
-        is_active=True,
-        is_deleted=False,
-    )
-    
-    user = User(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        user_name="test_user",
-        email="test@pharmacy.com",
-        hashed_password="hashed_pwd",
-        role="pharmacist",
-        is_active=True,
-        assigned_branches=[branch.id],
-    )
-    
-    drugs = [
-        Drug(
-            id=uuid.uuid4(),
-            organization_id=org.id,
-            drug_name=f"Drug {i}",
-            sku=f"SKU{i:03d}",
-            unit_price=Decimal("50.00"),
-            reorder_level=10,
-            is_active=True,
-            is_deleted=False,
-        )
-        for i in range(3)
-    ]
-    
-    customer = Customer(
-        id=uuid.uuid4(),
-        organization_id=org.id,
-        customer_name="Test Customer",
-        phone="0501234567",
-        loyalty_tier="standard",
-        loyalty_points=0,
-    )
-    
-    db.add(org)
-    db.add(branch)
-    db.add(user)
-    db.add_all(drugs)
-    db.add(customer)
-    await db.commit()
-    
-    return org, branch, user, drugs, customer
 
-
-@pytest.fixture
+@pytest_asyncio.fixture(scope="function")
 async def completed_sale(db: AsyncSession, setup_test_data):
     """Create a completed sale for testing refunds."""
     org, branch, user, drugs, customer = setup_test_data
@@ -441,9 +429,8 @@ async def completed_sale(db: AsyncSession, setup_test_data):
         drug_id=drugs[0].id,
         branch_id=branch.id,
         batch_number="TEST001",
-        batch_expiry_date=date.today() + timedelta(days=365),
-        quantity_received=100,
-        quantity_available=95,  # 5 sold
+        expiry_date=date.today() + timedelta(days=365),
+        quantity=100,
         remaining_quantity=95,
     )
     
@@ -470,6 +457,7 @@ async def completed_sale(db: AsyncSession, setup_test_data):
         payment_method="cash",
         payment_status="completed",
         amount_paid=Decimal("250.00"),
+        change_amount=Decimal("0.00"),
         status="completed",
     )
     
@@ -477,11 +465,12 @@ async def completed_sale(db: AsyncSession, setup_test_data):
         id=uuid.uuid4(),
         sale_id=sale.id,
         drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
         quantity=5,
         batch_id=batch.id,
         unit_price=Decimal("50.00"),
         subtotal=Decimal("250.00"),
-        total_discount_amount=Decimal("0.00"),
+        discount_amount=Decimal("0.00"),
         tax_amount=Decimal("0.00"),
         total_price=Decimal("250.00"),
     )

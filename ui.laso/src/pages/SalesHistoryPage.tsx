@@ -852,8 +852,8 @@ export default function SalesHistoryPage() {
     const [search, setSearch] = useState("");
     const [statusFilter, setStatusFilter] = useState("");
     const [paymentFilter, setPaymentFilter] = useState("");
-    const [startDate, setStartDate] = useState("");
-    const [endDate, setEndDate] = useState("");
+    const [startDate, setStartDate] = useState(() => new Date().toISOString().slice(0, 10));
+    const [endDate, setEndDate] = useState(() => new Date().toISOString().slice(0, 10));
     const debouncedSearch = useDebounce(search, 350);
 
     // ── Selected sale (detail panel) ──────────────────────────
@@ -1166,6 +1166,18 @@ export default function SalesHistoryPage() {
                                             </td>
                                         </tr>
                                     ))}
+                                    {/* Summary Row */}
+                                    {filtered.length > 0 && (
+                                        <tr className="bg-slate-50/50 font-bold border-t-2 border-slate-200">
+                                            <td colSpan={4} className="px-4 py-4 text-right text-xs uppercase tracking-wider text-slate-500">
+                                                Total Sales (This Page)
+                                            </td>
+                                            <td className="px-4 py-4 text-sm text-brand-700">
+                                                {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
+                                            </td>
+                                            <td></td>
+                                        </tr>
+                                    )}
                                 </tbody>
                             </table>
                         )}

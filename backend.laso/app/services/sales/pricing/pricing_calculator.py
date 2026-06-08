@@ -205,8 +205,8 @@ def compute_item_pricing(
                         else Decimal("0")
                     )
 
-            # Insurance copay
-            if contract.contract_type == "insurance":
+            # Insurance/Corporate copay
+            if contract.contract_type in ("insurance", "corporate"):
                 insurance_covered = True
                 if contract.copay_amount is not None:
                     patient_copay = r2(d(contract.copay_amount) * qty)

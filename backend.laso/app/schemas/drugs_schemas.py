@@ -196,3 +196,8 @@ class BulkDrugUpdate(BaseSchema):
     """Schema for bulk updating multiple drugs"""
     drug_ids: List[uuid.UUID] = Field(..., min_length=1, max_length=100)
     updates: DrugUpdate
+
+
+class BulkDrugImport(BaseSchema):
+    """Schema for bulk importing multiple drugs"""
+    drugs: List[DrugCreate] = Field(..., min_length=1)

@@ -62,7 +62,7 @@ from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pricing.pricing_model import PriceContract
-from app.models.sales.sales_model import Sale, PurchaseOrder
+from app.models.sales.sales_model import Sale, SaleItem, PurchaseOrder
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
@@ -182,6 +182,15 @@ _CUSTOMER_WRITABLE: frozenset[str] = frozenset({
     "preferred_contact_method", "marketing_consent",
     "insurance_provider_id", "insurance_member_id",
     "is_active",
+    "created_at", "updated_at",
+})
+
+_PRESCRIPTION_WRITABLE: frozenset[str] = frozenset({
+    "id", "prescription_number", "customer_id",
+    "prescriber_name", "prescriber_license", "prescriber_phone",
+    "prescriber_address", "issue_date", "expiry_date",
+    "medications", "diagnosis", "notes", "special_instructions",
+    "refills_allowed", "refills_remaining", "status",
     "created_at", "updated_at",
 })
 
@@ -697,6 +706,7 @@ class SyncService:
             "branch_inventory":  SyncService._push_inventory,
             "purchase_orders":   SyncService._push_purchase_order,
             "customers":         SyncService._push_customer,
+            "prescriptions":      SyncService._push_prescription,
         }.get(record.table_name)
 
         if not handler:
@@ -812,6 +822,39 @@ class SyncService:
             sale.sync_status = "synced"
             db.add(sale)
             await db.flush()
+
+            # Sync SaleItems if present in record data
+            items_data = record.data.get("items")
+            if items_data and isinstance(items_data, list):
+                for item_dict in items_data:
+                    # Whitelist SaleItem fields
+                    item_safe = {
+                        k: v for k, v in item_dict.items()
+                        if k in {
+                            "id", "drug_id", "drug_name", "drug_sku", "batch_id",
+                            "quantity", "unit_price", "subtotal", "discount_percentage",
+                            "discount_amount", "tax_rate", "tax_amount", "total_price",
+                            "requires_prescription", "prescription_verified",
+                            "created_at", "updated_at"
+                        }
+                    }
+                    _parse_datetime_fields(item_safe)
+                    item_safe["sale_id"] = sale.id
+
+                    # Verify drug existence
+                    drug_exists = (await db.execute(
+                        select(Drug.id).where(Drug.id == item_safe.get("drug_id"))
+                    )).scalar_one_or_none()
+
+                    if drug_exists:
+                        db.add(SaleItem(**item_safe))
+                    else:
+                        logger.warning(
+                            "Sync: Drug %s missing for sale item in sale %s; skipping item",
+                            item_safe.get("drug_id"), record.local_id
+                        )
+                await db.flush()
+
         except Exception as exc:
             # If we still get a FK constraint violation after validation,
             # it means a referenced record was deleted between validation and flush.
@@ -1219,6 +1262,59 @@ class SyncService:
             local_id=record.local_id,
             table_name="customers",
             server_id=str(customer.id),
+            success=True,
+        ), None
+
+    @staticmethod
+    async def _push_prescription(
+        db: AsyncSession,
+        record: PushRecord,
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        pushed_by: uuid.UUID,
+    ) -> Tuple[PushResult, Optional[PushConflict]]:
+        """Push a prescription created offline."""
+        from app.models.precriptions.prescription_model import Prescription
+        from app.api.v1.endpoints.prescription_endpoints import PrescriptionResponse
+
+        existing = (await db.execute(
+            select(Prescription).where(
+                or_(
+                    Prescription.id == record.local_id,
+                    Prescription.prescription_number == record.data.get("prescription_number")
+                )
+            )
+        )).scalar_one_or_none()
+
+        if existing:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="prescriptions",
+                server_id=str(existing.id),
+                success=True,
+            ), None
+
+        safe = _whitelist(record.data, _PRESCRIPTION_WRITABLE)
+        _parse_datetime_fields(safe)
+        safe["organization_id"] = str(organization_id)
+
+        # Ensure medications is correctly handled (it's JSONB in DB)
+        if "medications" in safe and isinstance(safe["medications"], str):
+            import json
+            try:
+                safe["medications"] = json.loads(safe["medications"])
+            except:
+                pass
+
+        prescription = Prescription(**safe)
+        prescription.sync_status = "synced"
+        db.add(prescription)
+        await db.flush()
+
+        return PushResult(
+            local_id=record.local_id,
+            table_name="prescriptions",
+            server_id=str(prescription.id),
             success=True,
         ), None
 

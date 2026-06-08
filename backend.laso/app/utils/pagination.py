@@ -120,6 +120,46 @@ class Paginator:
             has_next=has_next,
             has_prev=has_prev
         )
+
+    async def paginate_rows(
+        self,
+        query: Select,
+        params: PaginationParams,
+        schema: Optional[type] = None
+    ) -> PaginatedResponse:
+        """
+        Paginate a SQLAlchemy query returning rows instead of scalars (useful for aggregations)
+        """
+        # Get total count
+        count_query = select(func.count()).select_from(query.subquery())
+        result = await self.db.execute(count_query)
+        total = result.scalar() or 0
+
+        # Calculate pagination metadata
+        total_pages = ceil(total / params.page_size) if total > 0 else 0
+        has_next = params.page < total_pages
+        has_prev = params.page > 1
+
+        # Apply pagination to query
+        paginated_query = query.offset(params.skip).limit(params.limit)
+
+        # Execute query
+        result = await self.db.execute(paginated_query)
+        items = result.all()
+
+        # Convert to schema if provided
+        if schema:
+            items = [schema.model_validate(item) for item in items]
+
+        return PaginatedResponse(
+            items=items,
+            total=total,
+            page=params.page,
+            page_size=params.page_size,
+            total_pages=total_pages,
+            has_next=has_next,
+            has_prev=has_prev
+        )
     
     async def paginate_raw_query(
         self,

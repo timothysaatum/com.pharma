@@ -4,15 +4,16 @@
  * Supports: Daily Sales, Contracts, Inventory Alerts, Customers, Drug Turnover
  */
 
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { BarChart2, Download, RefreshCw, AlertCircle } from 'lucide-react';
+import { BarChart2, Download, RefreshCw, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
 import { isOfflineError } from '@/api/client';
 import { localRead } from '@/lib/localRead';
 import { offlineCache } from '@/lib/storage';
 import { DataFreshnessIndicator } from '@/components/DataFreshnessIndicator';
+import type { PaginatedResponse } from '@/types';
 
 interface FilterState {
   startDate: string;
@@ -20,7 +21,8 @@ interface FilterState {
   branchId?: string;
   contractId?: string;
   cashierId?: string;
-  limit?: number;
+  page?: number;
+  page_size?: number;
 }
 
 interface DailySalesRow {
@@ -63,13 +65,16 @@ export default function ReportsPage() {
   const [filters, setFilters] = useState<FilterState>({
     startDate: format(subDays(new Date(), 30), 'yyyy-MM-dd'),
     endDate: format(new Date(), 'yyyy-MM-dd'),
+    page: 1,
+    page_size: 50,
   });
 
   const [showFilters] = useState(true);
   const [dailySalesFromCache, setDailySalesFromCache] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
   // Daily Sales Query
-  const { data: dailySalesData, isLoading: dailySalesLoading, refetch: refetchDailySales } = useQuery<DailySalesRow[]>({
+  const { data: dailySalesPaginated, isFetching: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
     queryKey: ['reports', 'daily-sales', filters],
     queryFn: async () => {
       setDailySalesFromCache(false);
@@ -80,18 +85,20 @@ export default function ReportsPage() {
           branchId: filters.branchId,
           contractId: filters.contractId,
           cashierId: filters.cashierId,
+          page: filters.page,
+          page_size: filters.page_size,
         });
       } catch (err) {
         // If offline, fall back to local DB aggregation
         if (isOfflineError(err)) {
           setDailySalesFromCache(true);
           // fetch all sales from local DB within date range
-          const pageSize = 1000;
+          const localPageSize = 1000;
           const local = await localRead.searchSales({
             start_date: filters.startDate,
             end_date: filters.endDate,
             branch_id: filters.branchId,
-          }, 1, pageSize);
+          }, 1, localPageSize);
 
           // Enrich local sales with items count and branch name
           const rows: DailySalesRow[] = [];
@@ -145,7 +152,21 @@ export default function ReportsPage() {
             }
           }
 
-          return Object.keys(grouped).sort().map((k) => grouped[k]);
+          const allRows = Object.keys(grouped).sort().reverse().map((k) => grouped[k]);
+          const page = filters.page || 1;
+          const pageSize = filters.page_size || 50;
+          const start = (page - 1) * pageSize;
+          const paginatedRows = allRows.slice(start, start + pageSize);
+
+          return {
+            items: paginatedRows,
+            total: allRows.length,
+            page,
+            page_size: pageSize,
+            total_pages: Math.ceil(allRows.length / pageSize),
+            has_next: start + pageSize < allRows.length,
+            has_prev: page > 1,
+          };
         }
 
         // rethrow other errors
@@ -154,6 +175,7 @@ export default function ReportsPage() {
     },
     enabled: activeTab === 'daily-sales',
   });
+  const dailySalesData = dailySalesPaginated?.items || [];
 
   // Contract Performance Query
   const { data: contractData, isLoading: contractLoading } = useQuery<ContractPerformanceRow[]>({
@@ -177,23 +199,30 @@ export default function ReportsPage() {
   });
 
   // Drug Turnover Query
-  const { data: drugTurnoverData, isLoading: drugTurnoverLoading } = useQuery<any[]>({
+  const { data: drugTurnoverPaginated, isLoading: drugTurnoverLoading } = useQuery<PaginatedResponse<any>>({
     queryKey: ['reports', 'drug-turnover', filters],
     queryFn: () => reportsApi.getDrugTurnover({
       startDate: filters.startDate,
       endDate: filters.endDate,
       branchId: filters.branchId,
-      limit: 50,
+      page: filters.page,
+      page_size: filters.page_size || 20,
     }),
     enabled: activeTab === 'drugs',
   });
+  const drugTurnoverData = drugTurnoverPaginated?.items || [];
 
   const handleFilterChange = useCallback((key: keyof FilterState, value: any) => {
     setFilters(prev => ({
       ...prev,
       [key]: value,
+      page: (key === 'page' || key === 'page_size') ? value : 1, // Reset to page 1 on filter changes except page itself
     }));
   }, []);
+
+  useEffect(() => {
+    setFilters(prev => ({ ...prev, page: 1 }));
+  }, [activeTab]);
 
   const exportToCSV = (data: any[], filename: string) => {
     if (!data || data.length === 0) return;
@@ -269,28 +298,33 @@ export default function ReportsPage() {
           <div className="flex gap-2">
             <button
               type="button"
+              disabled={dailySalesLoading}
               onClick={() => {
                 refetchDailySales();
               }}
-              className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 flex items-center gap-1.5 text-sm transition-colors"
+              className="px-3 py-1.5 bg-blue-600 text-white rounded-md hover:bg-blue-700 disabled:opacity-50 flex items-center gap-1.5 text-sm transition-colors"
               title="Refresh data"
             >
-              <RefreshCw size={14} />
-              Refresh
+              <RefreshCw size={14} className={dailySalesLoading ? "animate-spin" : ""} />
+              {dailySalesLoading ? "Refreshing..." : "Refresh"}
             </button>
             <button
               type="button"
               onClick={() => {
                 if (dailySalesData && dailySalesData.length > 0) {
-                  exportToCSV(dailySalesData, 'daily-sales');
+                  setIsExporting(true);
+                  setTimeout(() => {
+                    exportToCSV(dailySalesData, 'daily-sales');
+                    setIsExporting(false);
+                  }, 500);
                 }
               }}
-              disabled={!dailySalesData || dailySalesData.length === 0}
+              disabled={!dailySalesData || dailySalesData.length === 0 || isExporting}
               className="px-3 py-1.5 bg-green-600 text-white rounded-md hover:bg-green-700 disabled:bg-gray-400 disabled:cursor-not-allowed flex items-center gap-1.5 text-sm transition-colors"
               title="Export data to CSV"
             >
-              <Download size={14} />
-              Export CSV
+              {isExporting ? <RefreshCw size={14} className="animate-spin" /> : <Download size={14} />}
+              {isExporting ? "Exporting..." : "Export CSV"}
             </button>
           </div>
         </div>
@@ -305,29 +339,55 @@ export default function ReportsPage() {
       {dailySalesLoading ? (
         <div className="bg-white p-8 rounded-lg text-center text-gray-500">Loading sales data...</div>
       ) : dailySalesData && dailySalesData.length > 0 ? (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Date</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Branch</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Revenue</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Items</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Transactions</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {dailySalesData.map((row: any, idx: number) => (
-                <tr key={idx} className="hover:bg-gray-50">
-                  <td className="px-6 py-3 text-sm text-gray-900">{row.sale_date}</td>
-                  <td className="px-6 py-3 text-sm text-gray-900">{row.branch_name || '-'}</td>
-                  <td className="px-6 py-3 text-sm font-semibold text-gray-900">${parseFloat((row.net_revenue ?? row.gross_revenue) || 0).toFixed(2)}</td>
-                  <td className="px-6 py-3 text-sm text-gray-900">{row.total_items || 0}</td>
-                  <td className="px-6 py-3 text-sm text-gray-900">{row.transaction_count || 0}</td>
+        <div className="space-y-4">
+          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Date</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Branch</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Revenue</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Items</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Transactions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {dailySalesData.map((row: any, idx: number) => (
+                  <tr key={idx} className="hover:bg-gray-50">
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.sale_date}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.branch_name || '-'}</td>
+                    <td className="px-6 py-3 text-sm font-semibold text-gray-900">${parseFloat((row.net_revenue ?? row.gross_revenue) || 0).toFixed(2)}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.total_items || 0}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.transaction_count || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* Pagination Controls */}
+          {dailySalesPaginated && dailySalesPaginated.total_pages > 1 && (
+            <div className="flex items-center justify-between bg-white px-4 py-3 border border-gray-200 rounded-lg">
+              <div className="text-sm text-gray-700">
+                Showing page <span className="font-medium">{dailySalesPaginated.page}</span> of <span className="font-medium">{dailySalesPaginated.total_pages}</span> ({dailySalesPaginated.total} total)
+              </div>
+              <div className="flex gap-2">
+                <button
+                  disabled={!dailySalesPaginated.has_prev}
+                  onClick={() => handleFilterChange('page', (filters.page || 1) - 1)}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 hover:bg-gray-50 flex items-center gap-1"
+                >
+                  <ChevronLeft size={16} /> Previous
+                </button>
+                <button
+                  disabled={!dailySalesPaginated.has_next}
+                  onClick={() => handleFilterChange('page', (filters.page || 1) + 1)}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 hover:bg-gray-50 flex items-center gap-1"
+                >
+                  Next <ChevronRight size={16} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="bg-white p-8 rounded-lg text-center text-gray-500">No data available for selected period</div>
@@ -429,29 +489,55 @@ export default function ReportsPage() {
       {drugTurnoverLoading ? (
         <div className="bg-white p-8 rounded-lg text-center text-gray-500">Loading drug turnover data...</div>
       ) : drugTurnoverData && drugTurnoverData.length > 0 ? (
-        <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
-          <table className="w-full">
-            <thead className="bg-gray-50 border-b border-gray-200">
-              <tr>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Drug</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Units Sold</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Revenue</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Category</th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Avg Price</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-200">
-              {drugTurnoverData.map((row: any, idx: number) => (
-                <tr key={idx} className="hover:bg-gray-50">
-                  <td className="px-6 py-3 text-sm font-medium text-gray-900">{row.drug_name || 'Unknown'}</td>
-                  <td className="px-6 py-3 text-sm text-gray-900">{row.units_sold || 0}</td>
-                  <td className="px-6 py-3 text-sm font-semibold text-gray-900">${parseFloat(row.revenue || 0).toFixed(2)}</td>
-                  <td className="px-6 py-3 text-sm text-gray-600">{row.category ? row.category.toUpperCase() : '-'}</td>
-                  <td className="px-6 py-3 text-sm text-gray-900">${parseFloat(row.avg_selling_price || 0).toFixed(2)}</td>
+        <div className="space-y-4">
+          <div className="bg-white rounded-lg border border-gray-200 overflow-hidden">
+            <table className="w-full">
+              <thead className="bg-gray-50 border-b border-gray-200">
+                <tr>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Drug</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Units Sold</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Revenue</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Category</th>
+                  <th className="px-6 py-3 text-left text-xs font-medium text-gray-700 uppercase">Avg Price</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-gray-200">
+                {drugTurnoverData.map((row: any, idx: number) => (
+                  <tr key={idx} className="hover:bg-gray-50">
+                    <td className="px-6 py-3 text-sm font-medium text-gray-900">{row.drug_name || 'Unknown'}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">{row.units_sold || 0}</td>
+                    <td className="px-6 py-3 text-sm font-semibold text-gray-900">${parseFloat(row.revenue || 0).toFixed(2)}</td>
+                    <td className="px-6 py-3 text-sm text-gray-600">{row.category ? row.category.toUpperCase() : '-'}</td>
+                    <td className="px-6 py-3 text-sm text-gray-900">${parseFloat(row.avg_selling_price || 0).toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {/* Pagination Controls */}
+          {drugTurnoverPaginated && drugTurnoverPaginated.total_pages > 1 && (
+            <div className="flex items-center justify-between bg-white px-4 py-3 border border-gray-200 rounded-lg">
+              <div className="text-sm text-gray-700">
+                Showing page <span className="font-medium">{drugTurnoverPaginated.page}</span> of <span className="font-medium">{drugTurnoverPaginated.total_pages}</span> ({drugTurnoverPaginated.total} total)
+              </div>
+              <div className="flex gap-2">
+                <button
+                  disabled={!drugTurnoverPaginated.has_prev}
+                  onClick={() => handleFilterChange('page', (filters.page || 1) - 1)}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 hover:bg-gray-50 flex items-center gap-1"
+                >
+                  <ChevronLeft size={16} /> Previous
+                </button>
+                <button
+                  disabled={!drugTurnoverPaginated.has_next}
+                  onClick={() => handleFilterChange('page', (filters.page || 1) + 1)}
+                  className="px-3 py-1 border border-gray-300 rounded-md text-sm disabled:opacity-50 hover:bg-gray-50 flex items-center gap-1"
+                >
+                  Next <ChevronRight size={16} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       ) : (
         <div className="bg-white p-8 rounded-lg text-center text-gray-500">No drug turnover data available for selected period</div>

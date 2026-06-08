@@ -185,7 +185,6 @@ class SaleBase(BaseSchema):
     
     customer_name: Optional[str] = Field(
         None,
-        min_length=1,
         max_length=255,
         description="For walk-in customers without registration"
     )
@@ -314,18 +313,6 @@ class SaleCreate(SaleBase):
         
         return v
     
-    @model_validator(mode='after')
-    def validate_customer_for_contract(self) -> 'SaleCreate':
-        """Validate customer requirements for specific contract types"""
-        # Insurance and corporate contracts require registered customer
-        # This will be further validated on the server side against the actual contract
-        
-        if not self.customer_id and not self.customer_name:
-            raise ValueError(
-                "Either customer_id (registered) or customer_name (walk-in) required"
-            )
-        
-        return self
     
     @model_validator(mode='after')
     def validate_insurance_fields(self) -> 'SaleCreate':
