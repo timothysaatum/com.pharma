@@ -1383,6 +1383,7 @@ export interface PullResponse {
     drug_categories: DrugCategory[];
     price_contracts: PriceContract[];
     customers: Customer[];
+    prescriptions: Prescription[];
     branch_inventory: BranchInventory[];
     drug_batches: DrugBatch[];
     sales: Sale[];

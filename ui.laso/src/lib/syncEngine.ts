@@ -312,12 +312,23 @@ class SyncEngine {
                 const r = row as Record<string, unknown>;
                 const localId = r.id;
                 if (typeof localId === "string") {
-                    const existing = await db.select<{ sync_status: string }[]>(
-                        `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
-                        [localId]
-                    );
+                    const existing = table === "purchase_orders"
+                        ? await db.select<{ sync_status: string; po_number?: string }[]>(
+                            "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
+                            [localId]
+                        )
+                        : await db.select<{ sync_status: string; po_number?: string }[]>(
+                            `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
+                            [localId]
+                        );
                     const localStatus = existing[0]?.sync_status;
-                    if (localStatus === "pending" || localStatus === "conflict") {
+                    const isProtectedOfflinePurchaseOrder =
+                        table === "purchase_orders"
+                        && (existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false);
+                    if (
+                        (localStatus === "pending" || localStatus === "conflict")
+                        && (table !== "purchase_orders" || isProtectedOfflinePurchaseOrder)
+                    ) {
                         continue;
                     }
                 }
@@ -557,7 +568,7 @@ class SyncEngine {
     ): Promise<void> {
         const base: Record<string, unknown> = {
             drugs: [], drug_categories: [], price_contracts: [],
-            customers: [], branch_inventory: [], drug_batches: [],
+            customers: [], prescriptions: [], branch_inventory: [], drug_batches: [],
             sales: [], purchase_orders: [],
             sync_timestamp: new Date().toISOString(),
             has_more: false,

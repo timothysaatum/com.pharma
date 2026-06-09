@@ -23,6 +23,7 @@ import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient } from "@/api/client";
+import { localRead } from "@/lib/localRead";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
 const CONTRACT_TYPE_COLORS: Record<string, string> = {
@@ -100,7 +101,9 @@ function CustomerSearchWidget({
                 setResults(data.matches ?? []);
                 setOpen(true);
             } catch {
-                setResults([]);
+                const matches = await localRead.searchCustomerMatches(q, 10);
+                setResults(matches);
+                setOpen(true);
             } finally {
                 setSearching(false);
             }
