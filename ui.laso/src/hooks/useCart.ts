@@ -58,6 +58,8 @@ export interface CartState {
     customerId: string | null;
     paymentMethod: PaymentMethod;
     amountPaid: number;
+    /** If true, we stop auto-following the total when items/contract change */
+    isManualAmountPaid: boolean;
     splitPayment: Partial<SplitPayment>;
     prescriptionId: string | null;
     insuranceClaimNumber: string;
@@ -85,6 +87,7 @@ type CartAction =
     | { type: "SET_INSURANCE_PREAUTH"; number: string }
     | { type: "SET_INSURANCE_VERIFIED"; verified: boolean }
     | { type: "SET_NOTES"; notes: string }
+    | { type: "RESET_AMOUNT_PAID" }
     | { type: "CLEAR_CART" };
 
 // ── Initial state ─────────────────────────────────────────────────────────────
@@ -96,6 +99,7 @@ const INITIAL_STATE: CartState = {
     customerId: null,
     paymentMethod: "cash",
     amountPaid: 0,
+    isManualAmountPaid: false,
     splitPayment: {},
     prescriptionId: null,
     insuranceClaimNumber: "",
@@ -107,12 +111,13 @@ const INITIAL_STATE: CartState = {
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
 function cartReducer(state: CartState, action: CartAction): CartState {
+    let nextState: CartState;
+
     switch (action.type) {
         case "ADD_ITEM": {
             const exists = state.items.find((i) => i.drug.id === action.drug.id);
             if (exists) {
-                // Increment quantity if already in cart
-                return {
+                nextState = {
                     ...state,
                     items: state.items.map((i) =>
                         i.drug.id === action.drug.id
@@ -120,43 +125,48 @@ function cartReducer(state: CartState, action: CartAction): CartState {
                             : i
                     ),
                 };
+            } else {
+                nextState = {
+                    ...state,
+                    items: [
+                        ...state.items,
+                        {
+                            drug: action.drug,
+                            quantity: 1,
+                            requiresPrescription: action.drug.requires_prescription,
+                            prescriptionVerified: false,
+                            batchId: null,
+                        },
+                    ],
+                };
             }
-            return {
-                ...state,
-                items: [
-                    ...state.items,
-                    {
-                        drug: action.drug,
-                        quantity: 1,
-                        requiresPrescription: action.drug.requires_prescription,
-                        prescriptionVerified: false,
-                        batchId: null,
-                    },
-                ],
-            };
+            break;
         }
 
         case "REMOVE_ITEM":
-            return {
+            nextState = {
                 ...state,
                 items: state.items.filter((i) => i.drug.id !== action.drugId),
             };
+            break;
 
         case "SET_QUANTITY": {
             if (action.quantity <= 0) {
-                return {
+                nextState = {
                     ...state,
                     items: state.items.filter((i) => i.drug.id !== action.drugId),
                 };
+            } else {
+                // Cap at 1000 per item (matches SaleItemCreate.quantity le=1000)
+                const qty = Math.min(action.quantity, 1000);
+                nextState = {
+                    ...state,
+                    items: state.items.map((i) =>
+                        i.drug.id === action.drugId ? { ...i, quantity: qty } : i
+                    ),
+                };
             }
-            // Cap at 1000 per item (matches SaleItemCreate.quantity le=1000)
-            const qty = Math.min(action.quantity, 1000);
-            return {
-                ...state,
-                items: state.items.map((i) =>
-                    i.drug.id === action.drugId ? { ...i, quantity: qty } : i
-                ),
-            };
+            break;
         }
 
         case "SET_PRESCRIPTION_VERIFIED":
@@ -180,7 +190,7 @@ function cartReducer(state: CartState, action: CartAction): CartState {
             };
 
         case "SET_CONTRACT":
-            return {
+            nextState = {
                 ...state,
                 contract: action.contract,
                 paymentMethod: (action.contract?.type === "insurance" || action.contract?.type === "corporate")
@@ -198,6 +208,7 @@ function cartReducer(state: CartState, action: CartAction): CartState {
                     ? state.insuranceClaimNumber
                     : "",
             };
+            break;
 
         case "SET_CUSTOMER_NAME":
             return { ...state, customerName: action.name, customerId: null };
@@ -206,14 +217,15 @@ function cartReducer(state: CartState, action: CartAction): CartState {
             return { ...state, customerId: action.id };
 
         case "SET_PAYMENT_METHOD":
-            return {
+            nextState = {
                 ...state,
                 paymentMethod: action.method,
                 splitPayment: action.method === "split" ? state.splitPayment : {},
             };
+            break;
 
         case "SET_AMOUNT_PAID":
-            return { ...state, amountPaid: action.amount };
+            return { ...state, amountPaid: action.amount, isManualAmountPaid: true };
 
         case "SET_SPLIT_PAYMENT":
             return { ...state, splitPayment: action.split };
@@ -233,12 +245,26 @@ function cartReducer(state: CartState, action: CartAction): CartState {
         case "SET_NOTES":
             return { ...state, notes: action.notes };
 
+        case "RESET_AMOUNT_PAID":
+            nextState = { ...state, isManualAmountPaid: false };
+            break;
+
         case "CLEAR_CART":
             return INITIAL_STATE;
 
         default:
             return state;
     }
+
+    // Auto-update amountPaid if it hasn't been manually set by the user
+    if (!nextState.isManualAmountPaid) {
+        const totals = computeTotals(nextState);
+        nextState.amountPaid = (nextState.contract?.type === "insurance" || nextState.contract?.type === "corporate")
+            ? totals.patientCopay
+            : totals.total;
+    }
+
+    return nextState;
 }
 
 // ── Derived totals ────────────────────────────────────────────────────────────
@@ -484,6 +510,7 @@ export function useCart() {
 
     return {
         state,
+        isManualAmountPaid: state.isManualAmountPaid,
         totals,
         validationErrors,
         isValid,
@@ -560,6 +587,10 @@ export function useCart() {
         ),
         setNotes: useCallback(
             (notes: string) => dispatch({ type: "SET_NOTES", notes }),
+            []
+        ),
+        resetAmountPaid: useCallback(
+            () => dispatch({ type: "RESET_AMOUNT_PAID" }),
             []
         ),
         clearCart: useCallback(() => dispatch({ type: "CLEAR_CART" }), []),

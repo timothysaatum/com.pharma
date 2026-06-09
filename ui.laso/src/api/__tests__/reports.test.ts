@@ -76,7 +76,7 @@ describe('reportsApi', () => {
     });
 
     expect(typedGet).toHaveBeenCalledTimes(1);
-    expect(typedGet).toHaveBeenCalledWith('/reports/daily-sales-summary?start_date=2025-02-01&end_date=2025-02-28&branch_id=branch-1&contract_id=contract-1&cashier_id=cashier-1');
+    expect(typedGet).toHaveBeenCalledWith('/reports/daily-sales-summary?start_date=2025-02-01&end_date=2025-02-28&page=1&page_size=50&branch_id=branch-1&contract_id=contract-1&cashier_id=cashier-1');
     expect(result).toBe(payload);
   });
 });

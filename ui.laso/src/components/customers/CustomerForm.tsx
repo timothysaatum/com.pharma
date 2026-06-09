@@ -12,14 +12,12 @@ import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { motion } from "framer-motion";
-import { X, User, AlertCircle, Shield, Building2, ChevronDown, Loader2 } from "lucide-react";
+import { X, User, AlertCircle, Shield, Building2 } from "lucide-react";
 import { customersApi, type CustomerCreate, type CustomerUpdate, type CustomerWithDetails } from "@/api/customers";
-import { contractsApi, type ContractResponse } from "@/api/contracts";
-import { InsuranceProviderSelector } from "@/components/contracts/InsuranceProviderSelector";
 import { useAuthStore } from "@/stores/authStore";
 import { isOfflineError, parseApiError } from "@/api/client";
 import { writeLocal } from "@/lib/localWrite";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 
 // ── Zod schema ────────────────────────────────────────────────────────────────
 
@@ -62,153 +60,17 @@ type FormValues = z.infer<typeof schema>;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const CUSTOMER_TYPES = [
-    { value: "registered", label: "Registered" },
-    { value: "insurance", label: "Insurance" },
-    { value: "corporate", label: "Corporate" },
-] as const;
+    { value: "walk_in", label: "Walk-in", desc: "Anonymous, no account needed" },
+    { value: "registered", label: "Registered", desc: "Named account with contact info" },
+    { value: "insurance", label: "Insurance", desc: "Has insurance coverage" },
+    { value: "corporate", label: "Corporate", desc: "Corporate account with contract" },
+];
 
 const inputCls = "w-full h-10 px-3 rounded-xl border border-slate-200 text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500";
 const labelCls = "block text-sm font-medium text-ink mb-1.5";
 function Err({ msg }: { msg?: string }) {
     if (!msg) return null;
     return <p className="text-xs text-red-500 mt-1 flex items-center gap-1"><AlertCircle className="w-3 h-3" />{msg}</p>;
-}
-
-function CorporateContractSelector({
-    value,
-    onChange,
-    error,
-}: {
-    value: string | null;
-    onChange: (id: string | null) => void;
-    error?: string;
-}) {
-    const [contracts, setContracts] = useState<ContractResponse[]>([]);
-    const [searchQuery, setSearchQuery] = useState("");
-    const [showDropdown, setShowDropdown] = useState(false);
-    const [loading, setLoading] = useState(false);
-
-    const loadContracts = useCallback(async () => {
-        setLoading(true);
-        try {
-            const result = await contractsApi.list({
-                contract_type: "corporate",
-                status: "active",
-                is_active: true,
-                search: searchQuery,
-                page_size: 25,
-            });
-            setContracts(result.contracts);
-        } catch (err) {
-            console.error("Failed to load corporate contracts:", err);
-            setContracts([]);
-        } finally {
-            setLoading(false);
-        }
-    }, [searchQuery]);
-
-    useEffect(() => {
-        const timer = setTimeout(() => void loadContracts(), 300);
-        return () => clearTimeout(timer);
-    }, [loadContracts]);
-
-    const selectedContract = useMemo(
-        () => contracts.find((contract) => contract.id === value) ?? null,
-        [contracts, value]
-    );
-
-    return (
-        <div className="space-y-2">
-            <div className="relative">
-                <button
-                    type="button"
-                    onClick={() => setShowDropdown((open) => !open)}
-                    className={`${inputCls} flex items-center justify-between cursor-pointer ${error ? "border-red-300 bg-red-50/30" : ""}`}
-                >
-                    <span className="text-left min-w-0">
-                        {selectedContract ? (
-                            <span className="block min-w-0">
-                                <span className="block font-semibold text-ink truncate">{selectedContract.contract_name}</span>
-                                <span className="block text-xs text-ink-muted truncate">
-                                    {selectedContract.contract_code} · {selectedContract.discount_percentage}% discount
-                                </span>
-                            </span>
-                        ) : (
-                            <span className="text-slate-400">Select corporate contract...</span>
-                        )}
-                    </span>
-                    <ChevronDown className={`w-4 h-4 text-slate-400 transition-transform ${showDropdown ? "rotate-180" : ""}`} />
-                </button>
-
-                {value && (
-                    <button
-                        type="button"
-                        onClick={() => onChange(null)}
-                        className="absolute right-10 top-2.5 p-1 text-slate-400 hover:text-red-500"
-                        title="Clear selection"
-                    >
-                        <X className="w-4 h-4" />
-                    </button>
-                )}
-
-                {showDropdown && (
-                    <div className="absolute top-full left-0 right-0 mt-1 bg-white border border-slate-200 rounded-lg shadow-lg z-50">
-                        <div className="p-2 border-b border-slate-100">
-                            <input
-                                type="text"
-                                placeholder="Search contracts..."
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                className={inputCls}
-                                autoFocus
-                            />
-                        </div>
-
-                        {loading ? (
-                            <div className="p-3 text-center text-slate-500">
-                                <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
-                                Loading contracts...
-                            </div>
-                        ) : contracts.length > 0 ? (
-                            <div className="max-h-64 overflow-y-auto">
-                                {contracts.map((contract) => (
-                                    <button
-                                        key={contract.id}
-                                        type="button"
-                                        onClick={() => {
-                                            onChange(contract.id);
-                                            setShowDropdown(false);
-                                        }}
-                                        className={`w-full px-3 py-2.5 text-left text-sm hover:bg-brand-50 border-b border-slate-50 last:border-b-0 ${
-                                            value === contract.id ? "bg-brand-50 border-l-2 border-l-brand-500" : ""
-                                        }`}
-                                    >
-                                        <span className="block font-semibold text-ink truncate">{contract.contract_name}</span>
-                                        <span className="block text-xs text-slate-500 truncate">
-                                            {contract.contract_code} · {contract.discount_percentage}% discount
-                                        </span>
-                                    </button>
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="p-3 text-center text-slate-500 text-sm">
-                                No active corporate contracts found
-                            </div>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {error && (
-                <p className="text-xs text-red-600 flex items-center gap-1">
-                    <AlertCircle className="w-3 h-3" />
-                    {error}
-                </p>
-            )}
-
-            <p className="text-xs text-slate-500">Search and select an active corporate contract.</p>
-        </div>
-    );
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -225,10 +87,10 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [apiError, setApiError] = useState<string | null>(null);
 
-    const { register, handleSubmit, watch, setValue, formState: { errors } } = useForm<FormValues>({
+    const { register, handleSubmit, watch, formState: { errors } } = useForm<FormValues>({
         resolver: zodResolver(schema),
         defaultValues: {
-            customer_type: (customer?.customer_type as FormValues["customer_type"]) ?? "registered",
+            customer_type: (customer?.customer_type as FormValues["customer_type"]) ?? "walk_in",
             first_name: customer?.first_name ?? "",
             last_name: customer?.last_name ?? "",
             phone: customer?.phone ?? "",
@@ -246,8 +108,6 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
     });
 
     const watchType = watch("customer_type");
-    const selectedInsuranceProviderId = watch("insurance_provider_id");
-    const selectedContractId = watch("preferred_contract_id");
     const needsFullInfo = watchType !== "walk_in";
 
     const onSubmit = async (values: FormValues) => {
@@ -391,26 +251,18 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                     {!isEdit && (
                         <div>
                             <label className={labelCls}>Customer Type <span className="text-red-500">*</span></label>
-                            <select
-                                {...register("customer_type", {
-                                    onChange: (event) => {
-                                        const nextType = event.target.value as FormValues["customer_type"];
-                                        if (nextType !== "insurance") {
-                                            setValue("insurance_provider_id", "");
-                                            setValue("insurance_member_id", "");
-                                        }
-                                        if (nextType !== "corporate") {
-                                            setValue("preferred_contract_id", "");
-                                        }
-                                    },
-                                })}
-                                className={inputCls}
-                            >
+                            <div className="grid grid-cols-2 gap-2">
                                 {CUSTOMER_TYPES.map((t) => (
-                                    <option key={t.value} value={t.value}>{t.label}</option>
+                                    <label key={t.value} className={`flex items-start gap-2 p-3 rounded-xl border cursor-pointer transition-colors ${watchType === t.value ? "border-brand-500 bg-brand-50" : "border-slate-200 hover:bg-slate-50"
+                                        }`}>
+                                        <input type="radio" value={t.value} {...register("customer_type")} className="mt-0.5" />
+                                        <div>
+                                            <p className="text-sm font-semibold text-ink">{t.label}</p>
+                                            <p className="text-xs text-ink-muted">{t.desc}</p>
+                                        </div>
+                                    </label>
                                 ))}
-                            </select>
-                            <Err msg={errors.customer_type?.message} />
+                            </div>
                         </div>
                     )}
 
@@ -463,13 +315,9 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                                 <Shield className="w-3.5 h-3.5" />Insurance
                             </p>
                             <div>
-                                <label className={labelCls}>Insurance Provider <span className="text-red-500">*</span></label>
-                                <InsuranceProviderSelector
-                                    value={selectedInsuranceProviderId || null}
-                                    onChange={(id) => setValue("insurance_provider_id", id || "", { shouldDirty: true, shouldValidate: true })}
-                                    error={errors.insurance_provider_id?.message}
-                                    allowCreate={false}
-                                />
+                                <label className={labelCls}>Insurance Provider ID <span className="text-red-500">*</span></label>
+                                <input {...register("insurance_provider_id")} placeholder="Provider UUID" className={inputCls} />
+                                <Err msg={errors.insurance_provider_id?.message} />
                             </div>
                             <div>
                                 <label className={labelCls}>Member ID <span className="text-red-500">*</span></label>
@@ -486,12 +334,9 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                                 <Building2 className="w-3.5 h-3.5" />Corporate
                             </p>
                             <div>
-                                <label className={labelCls}>Preferred Contract <span className="text-red-500">*</span></label>
-                                <CorporateContractSelector
-                                    value={selectedContractId || null}
-                                    onChange={(id) => setValue("preferred_contract_id", id || "", { shouldDirty: true, shouldValidate: true })}
-                                    error={errors.preferred_contract_id?.message}
-                                />
+                                <label className={labelCls}>Preferred Contract ID <span className="text-red-500">*</span></label>
+                                <input {...register("preferred_contract_id")} placeholder="Contract UUID" className={inputCls} />
+                                <Err msg={errors.preferred_contract_id?.message} />
                             </div>
                         </div>
                     )}

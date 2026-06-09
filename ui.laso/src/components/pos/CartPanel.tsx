@@ -23,7 +23,6 @@ import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient } from "@/api/client";
-import { localRead } from "@/lib/localRead";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
 const CONTRACT_TYPE_COLORS: Record<string, string> = {
@@ -101,9 +100,7 @@ function CustomerSearchWidget({
                 setResults(data.matches ?? []);
                 setOpen(true);
             } catch {
-                const matches = await localRead.searchCustomerMatches(q, 10);
-                setResults(matches);
-                setOpen(true);
+                setResults([]);
             } finally {
                 setSearching(false);
             }
@@ -239,6 +236,7 @@ interface CartPanelProps {
     insurancePreAuthNumber: string;
     insuranceVerified: boolean;
     notes: string;
+    isManualAmountPaid: boolean;
     totals: CartTotals;
     validationErrors: CartValidationError[];
     isSubmitting: boolean;
@@ -257,6 +255,7 @@ interface CartPanelProps {
     onSetInsurancePreAuthNumber: (n: string) => void;
     onSetInsuranceVerified: (v: boolean) => void;
     onSetNotes: (n: string) => void;
+    onResetAmountPaid: () => void;
     onCheckout: () => void;
     onClearCart: () => void;
 }
@@ -277,13 +276,13 @@ function SectionLabel({ icon: Icon, children }: { icon: React.ElementType; child
 
 export function CartPanel({
     items, contract, contracts, contractsLoading,
-    customerName, customerId, paymentMethod, amountPaid,
+    customerName, customerId, paymentMethod, amountPaid, isManualAmountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
     insuranceVerified, notes, totals, validationErrors,
     isSubmitting, onSetQuantity, onRemoveItem, onSetPrescriptionVerified,
     onSetContract, onSetCustomerId, onSetCustomerName, onSetPaymentMethod, onSetAmountPaid,
     onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
-    onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
+    onSetInsuranceVerified, onSetNotes, onResetAmountPaid, onCheckout, onClearCart,
 }: CartPanelProps) {
     const autoSelectedRef = useRef(false);
     useEffect(() => {
@@ -620,7 +619,18 @@ export function CartPanel({
                             {/* Amount tendered */}
                             {(paymentMethod === "cash" || paymentMethod === "split") && (
                                 <div>
-                                    <SectionLabel icon={Banknote}>Amount Tendered (GHS)</SectionLabel>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <SectionLabel icon={Banknote}>Amount Tendered (GHS)</SectionLabel>
+                                        {isManualAmountPaid && (
+                                            <button
+                                                type="button"
+                                                onClick={onResetAmountPaid}
+                                                className="text-[10px] font-bold text-brand-600 hover:text-brand-700 uppercase tracking-wider"
+                                            >
+                                                Auto-follow total
+                                            </button>
+                                        )}
+                                    </div>
                                     <div className="relative">
                                         <span className="absolute left-3 top-2.5 text-sm font-semibold text-slate-400">₵</span>
                                         <input

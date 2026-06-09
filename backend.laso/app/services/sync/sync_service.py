@@ -47,7 +47,7 @@ It does NOT strip ``None`` values — intentional nulls (e.g. clearing
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 import uuid
 
@@ -73,7 +73,6 @@ from app.schemas.sales_schemas import SaleResponse
 from app.schemas.sync_schemas import (
     PullRequest,
     PullResponse,
-    PrescriptionSyncResponse,
     PushConflict,
     PushRecord,
     PushRequest,
@@ -91,7 +90,6 @@ SYNC_TABLES: tuple[str, ...] = (
     "drug_categories",
     "price_contracts",
     "customers",
-    "prescriptions",
     "branch_inventory",
     "drug_batches",
     "sales",
@@ -108,7 +106,6 @@ CONFLICT_RESOLUTION: Dict[str, str] = {
     "stock_adjustments": "server_wins",
     "purchase_orders":   "server_wins",
     "customers":         "manual_required",
-    "prescriptions":     "server_wins",
 }
 
 # ---------------------------------------------------------------------------
@@ -510,19 +507,6 @@ class SyncService:
             result.customers = [CustomerResponse.model_validate(r) for r in rows]
             total += len(rows)
 
-        if "prescriptions" in tables:
-            rows = await SyncService._pull_table(
-                db, Prescription, since,
-                Prescription.organization_id == organization_id,
-            )
-            result.prescriptions = [
-                PrescriptionSyncResponse.model_validate(r).model_copy(
-                    update={"sync_status": "synced"}
-                )
-                for r in rows
-            ]
-            total += len(rows)
-
         if "branch_inventory" in tables:
             rows = await SyncService._pull_table(
                 db, BranchInventory, since,
@@ -576,13 +560,9 @@ class SyncService:
             rows = await SyncService._pull_table(
                 db, PurchaseOrder, since,
                 PurchaseOrder.branch_id == branch_id,
+                PurchaseOrder.sync_status == "synced",
             )
-            result.purchase_orders = [
-                PurchaseOrderResponse.model_validate(r).model_copy(
-                    update={"sync_status": "synced"}
-                )
-                for r in rows
-            ]
+            result.purchase_orders = [PurchaseOrderResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         result.total_records = total
@@ -888,12 +868,7 @@ class SyncService:
                 )
                 
                 # Remove the sale from the session to start fresh
-                # (may fail if sale is already detached; that's OK)
-                try:
-                    db.expunge(sale)
-                except Exception:
-                    # Sale might not be in session; rollback to clear the failed state
-                    await db.rollback()
+                db.expunge(sale)
                 
                 # Map constraint names to FK fields
                 constraint_to_field = {
@@ -1299,8 +1274,7 @@ class SyncService:
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
         """Push a prescription created offline."""
-        from app.models.precriptions.prescription_model import Prescription
-        from app.api.v1.endpoints.prescription_endpoints import PrescriptionResponse
+        from app.models.prescriptions.prescription_model import Prescription
 
         existing = (await db.execute(
             select(Prescription).where(

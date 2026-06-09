@@ -21,13 +21,12 @@ import uuid
 from app.core.deps import get_current_user, require_any_permission, require_permission
 from app.db.dependencies import get_db
 from app.models.user.user_model import User
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 from app.models.customer.customer_model import Customer
 from app.models.pharmacy.pharmacy_model import Organization
 from app.schemas.sales_schemas import SaleCreate
-from app.schemas.base_schemas import TimestampSchema, SyncSchema
 from app.utils.pagination import PaginatedResponse, Paginator, PaginationParams
-from pydantic import BaseModel, Field, ConfigDict, field_validator, field_serializer, model_validator
+from pydantic import BaseModel, Field
 from decimal import Decimal
 
 router = APIRouter(prefix="/prescriptions", tags=["Prescriptions"])
@@ -133,10 +132,9 @@ class MedicationResponse(MedicationItem):
     pass
 
 
-class PrescriptionResponse(TimestampSchema, SyncSchema):
+class PrescriptionResponse(BaseModel):
     """Prescription response"""
     id: uuid.UUID
-    organization_id: uuid.UUID
     prescription_number: str
     customer_id: uuid.UUID
     customer_name: Optional[str] = None
@@ -164,15 +162,8 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
     verified_by: Optional[uuid.UUID] = None
     verified_at: Optional[datetime] = None
     
-    model_config = ConfigDict(from_attributes=True)
-    
-    @model_validator(mode='before')
-    @classmethod
-    def map_last_synced_at(cls, data):
-        """Map last_synced_at from DB model to synced_at"""
-        if isinstance(data, dict) and 'last_synced_at' in data and 'synced_at' not in data:
-            data['synced_at'] = data.pop('last_synced_at')
-        return data
+    created_at: datetime
+    updated_at: datetime
 
 
 class PrescriptionSearchResponse(BaseModel):

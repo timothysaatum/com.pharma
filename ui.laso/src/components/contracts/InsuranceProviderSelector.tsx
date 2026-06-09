@@ -19,7 +19,6 @@ interface InsuranceProviderSelectorProps {
     onChange: (id: string | null) => void;
     onCreated?: (id: string) => void;
     error?: string;
-    allowCreate?: boolean;
 }
 
 const inputCls = "w-full h-10 px-3 rounded-lg border border-slate-200 text-sm text-ink bg-white " +
@@ -30,7 +29,6 @@ export function InsuranceProviderSelector({
     onChange,
     onCreated,
     error,
-    allowCreate = true,
 }: InsuranceProviderSelectorProps) {
     const [providers, setProviders] = useState<InsuranceProviderSearchItem[]>([]);
     const [loading, setLoading] = useState(false);
@@ -204,19 +202,17 @@ export function InsuranceProviderSelector({
                         )}
 
                         {/* Create new button */}
-                        {allowCreate && (
-                            <button
-                                type="button"
-                                onClick={() => setShowCreateForm(!showCreateForm)}
-                                className="w-full px-3 py-2.5 text-sm font-semibold text-brand-600 hover:bg-brand-50 border-t border-slate-100 flex items-center justify-center gap-1.5"
-                            >
-                                <Plus className="w-4 h-4" />
-                                {showCreateForm ? "Cancel" : "Create New Provider"}
-                            </button>
-                        )}
+                        <button
+                            type="button"
+                            onClick={() => setShowCreateForm(!showCreateForm)}
+                            className="w-full px-3 py-2.5 text-sm font-semibold text-brand-600 hover:bg-brand-50 border-t border-slate-100 flex items-center justify-center gap-1.5"
+                        >
+                            <Plus className="w-4 h-4" />
+                            {showCreateForm ? "Cancel" : "Create New Provider"}
+                        </button>
 
                         {/* Create form */}
-                        {allowCreate && showCreateForm && (
+                        {showCreateForm && (
                             <div className="space-y-2.5 p-3 border-t border-slate-100 bg-brand-50/30">
                                 <div className="grid grid-cols-2 gap-2">
                                     <div>
@@ -341,9 +337,7 @@ export function InsuranceProviderSelector({
 
             {/* Help text */}
             <p className="text-xs text-slate-500">
-                {allowCreate
-                    ? "Select an insurance provider or create a new one. New providers will be marked active and available for other contracts."
-                    : "Search and select an active insurance provider."}
+                Select an insurance provider or create a new one. New providers will be marked active and available for other contracts.
             </p>
         </div>
     );

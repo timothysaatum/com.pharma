@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, FilePlus2, FileText, Loader2, Plus, RefreshCw, X } from "lucide-react";
-import { isOfflineError, parseApiError } from "@/api/client";
+import { parseApiError } from "@/api/client";
 import { prescriptionsApi, type PrescriptionSearchItem } from "@/api/prescriptions";
-import { localRead } from "@/lib/localRead";
-import { writeLocal } from "@/lib/localWrite";
 import type { CartItem } from "@/hooks/useCart";
-import type { Prescription, PrescriptionMedication } from "@/types";
+import type { PrescriptionMedication } from "@/types";
 
 interface PrescriptionSelectorProps {
     customerId: string | null;
@@ -44,25 +42,6 @@ function itemToMedication(item: CartItem): PrescriptionMedication {
         frequency: "As directed",
         duration: "As directed",
         quantity: item.quantity,
-    };
-}
-
-function toSearchItem(rx: Prescription): PrescriptionSearchItem {
-    const expiry = new Date(rx.expiry_date);
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-
-    return {
-        id: rx.id,
-        prescription_number: rx.prescription_number,
-        prescriber_name: rx.prescriber_name,
-        medications_count: rx.medications.length,
-        issue_date: rx.issue_date,
-        expiry_date: rx.expiry_date,
-        is_expired: !Number.isNaN(expiry.getTime()) && expiry < todayStart,
-        status: rx.status,
-        refills_remaining: rx.refills_remaining,
-        refills_allowed: rx.refills_allowed,
     };
 }
 
@@ -126,18 +105,8 @@ export function PrescriptionSelector({
             setPrescriptions(result.items ?? []);
         } catch (err) {
             if (err instanceof Error && err.name === "AbortError") return;
-            try {
-                const fallback = await localRead.searchPrescriptions(
-                    { customer_id: customerId, status_filter: "active", include_expired: false },
-                    1,
-                    10
-                );
-                setPrescriptions(fallback.items.map(toSearchItem));
-                setLoadError(null);
-            } catch {
-                setLoadError(parseApiError(err));
-                setPrescriptions([]);
-            }
+            setLoadError(parseApiError(err));
+            setPrescriptions([]);
         } finally {
             setLoading(false);
         }
@@ -173,7 +142,7 @@ export function PrescriptionSelector({
 
         setCreating(true);
         try {
-            const payload = {
+            const saved = await prescriptionsApi.create({
                 prescription_number: prescriptionNumber.trim(),
                 customer_id: customerId,
                 prescriber_name: prescriberName.trim(),
@@ -184,36 +153,19 @@ export function PrescriptionSelector({
                 medications,
                 refills_allowed: refillsAllowed,
                 notes: notes.trim() || null,
+            });
+            const savedSearchItem: PrescriptionSearchItem = {
+                id: saved.id,
+                prescription_number: saved.prescription_number,
+                prescriber_name: saved.prescriber_name,
+                medications_count: saved.medications.length,
+                issue_date: saved.issue_date,
+                expiry_date: saved.expiry_date,
+                is_expired: false,
+                status: saved.status,
+                refills_remaining: saved.refills_remaining,
+                refills_allowed: saved.refills_allowed,
             };
-            let saved: Prescription;
-            try {
-                saved = await prescriptionsApi.create(payload);
-                await writeLocal.cachePrescriptions([saved]);
-            } catch (err) {
-                if (!isOfflineError(err)) throw err;
-
-                const now = new Date().toISOString();
-                saved = {
-                    id: crypto.randomUUID(),
-                    organization_id: "",
-                    ...payload,
-                    prescriber_address: null,
-                    diagnosis: null,
-                    special_instructions: null,
-                    refills_remaining: payload.refills_allowed,
-                    last_refill_date: null,
-                    status: "active",
-                    verified_by: null,
-                    verified_at: null,
-                    sync_status: "pending",
-                    sync_version: 1,
-                    synced_at: null,
-                    created_at: now,
-                    updated_at: now,
-                };
-                await writeLocal.prescription(saved);
-            }
-            const savedSearchItem = toSearchItem(saved);
             setPrescriptions((prev) => [savedSearchItem, ...prev.filter((rx) => rx.id !== saved.id)]);
             selectPrescription(saved.id);
             setPrescriptionNumber(makePrescriptionNumber());

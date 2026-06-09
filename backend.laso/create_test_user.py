@@ -6,6 +6,7 @@ from app.db.session import engine, AsyncSessionLocal
 from app.models.user.user_model import User
 from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.models.inventory.inventory_model import Drug, DrugCategory
+from app.models.inventory.branch_inventory import BranchInventory
 from app.models.sales.sales_model import Sale, SaleItem
 from app.core.security import hash_password
 import os
@@ -95,6 +96,17 @@ async def init_db():
             )
             db.add(drug)
             drugs.append(drug)
+
+            # Create inventory for each drug in the branch
+            inv = BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch.id,
+                drug_id=drug.id,
+                quantity=100,
+                reserved_quantity=0
+            )
+            db.add(inv)
+
         await db.flush()
 
         print("Creating 120 sample sales...")

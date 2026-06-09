@@ -1055,18 +1055,40 @@ export default function InventoryPage() {
         if (activeView === "valuation" && !valuationFetchedRef.current) fetchValuation();
     }, [activeView, fetchValuation]);
 
-    useAppEvent("inventory:changed", fetchInventory);
-    useAppEvent("inventory:changed", fetchLowStock);
-    useAppEvent("inventory:changed", fetchExpiring);
+    // Stabilize event listeners by using a ref for the latest callbacks.
+    // This prevents useAppEvent from re-subscribing every time dependencies change.
+    const callbacksRef = useRef({ fetchInventory, fetchLowStock, fetchExpiring });
+    useEffect(() => {
+        callbacksRef.current = { fetchInventory, fetchLowStock, fetchExpiring };
+    }, [fetchInventory, fetchLowStock, fetchExpiring]);
 
-    const prevFilters = useRef({ debouncedSearch, lowStockOnly, includeZeroStock });
+    useAppEvent("inventory:changed", useCallback(() => {
+        callbacksRef.current.fetchInventory();
+        callbacksRef.current.fetchLowStock();
+        callbacksRef.current.fetchExpiring();
+    }, []));
+
+    // Reset to page 1 when filters or branch change.
+    // Explicitly handling branch change ensures we don't try to fetch a high page
+    // number that doesn't exist for the new branch.
+    const prevFilters = useRef({ activeBranchId, debouncedSearch, lowStockOnly, includeZeroStock });
     useEffect(() => {
         const prev = prevFilters.current;
-        if (prev.debouncedSearch !== debouncedSearch || prev.lowStockOnly !== lowStockOnly || prev.includeZeroStock !== includeZeroStock) {
+        const branchChanged = prev.activeBranchId !== activeBranchId;
+        const filtersChanged =
+            prev.debouncedSearch !== debouncedSearch ||
+            prev.lowStockOnly !== lowStockOnly ||
+            prev.includeZeroStock !== includeZeroStock;
+
+        if (branchChanged || filtersChanged) {
             setPage(1);
-            prevFilters.current = { debouncedSearch, lowStockOnly, includeZeroStock };
+            if (branchChanged) {
+                valuationFetchedRef.current = false;
+                setValuation(null);
+            }
+            prevFilters.current = { activeBranchId, debouncedSearch, lowStockOnly, includeZeroStock };
         }
-    }, [debouncedSearch, lowStockOnly, includeZeroStock]);
+    }, [activeBranchId, debouncedSearch, lowStockOnly, includeZeroStock]);
 
     // ── Handlers ──────────────────────────────────────────────
     const handleAddStockForItem = async (item: BranchInventoryWithDetails) => {

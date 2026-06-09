@@ -128,17 +128,7 @@ export default function PrescriptionsPage() {
         setItems(response.items as PrescriptionRow[]);
       }
     } catch (err) {
-      if (isOfflineError(err) || !isBackendReachable()) {
-        try {
-          const response = await localRead.searchPrescriptions(query);
-          setItems(response.items as PrescriptionRow[]);
-          setError(null);
-        } catch (fallbackErr) {
-          setError(parseApiError(fallbackErr));
-        }
-      } else {
-        setError(parseApiError(err));
-      }
+      setError(parseApiError(err));
     } finally {
       setLoading(false);
     }

@@ -94,35 +94,6 @@ export default function POSPage() {
         setCheckoutError(null);
 
         const payload = cart.buildSaleCreate(activeBranchId);
-        
-        // ─── Pre-flight check: Validate prescription refills if used ───────────────
-        if (payload.prescription_id) {
-            const db = await (await import("@/lib/localDb")).getDb();
-            const presResult = await db.select<Array<{ refills_remaining: number; status: string }>>(
-                `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
-                [payload.prescription_id]
-            );
-            
-            if (!presResult.length) {
-                setCheckoutError("Prescription not found. Please select a valid prescription.");
-                setIsSubmitting(false);
-                return;
-            }
-            
-            const { refills_remaining, status } = presResult[0];
-            if (status !== "active") {
-                setCheckoutError(`Prescription is ${status} — cannot be used for this sale.`);
-                setIsSubmitting(false);
-                return;
-            }
-            
-            if (refills_remaining <= 0) {
-                setCheckoutError("No refills remaining on this prescription. Please use a different prescription.");
-                setIsSubmitting(false);
-                return;
-            }
-        }
-        
         const backendWasReachable = isBackendReachable();
         const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
             const saleId = crypto.randomUUID();
@@ -362,6 +333,7 @@ export default function POSPage() {
                         insurancePreAuthNumber={cart.state.insurancePreAuthNumber}
                         insuranceVerified={cart.state.insuranceVerified}
                         notes={cart.state.notes}
+                        isManualAmountPaid={cart.isManualAmountPaid}
                         totals={cart.totals}
                         validationErrors={cart.validationErrors}
                         isSubmitting={isSubmitting}
@@ -379,6 +351,7 @@ export default function POSPage() {
                         onSetInsurancePreAuthNumber={cart.setInsurancePreAuthNumber}
                         onSetInsuranceVerified={cart.setInsuranceVerified}
                         onSetNotes={cart.setNotes}
+                        onResetAmountPaid={cart.resetAmountPaid}
                         onCheckout={handleCheckout}
                         onClearCart={cart.clearCart}
                     />

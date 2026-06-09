@@ -25,7 +25,7 @@ from app.models.inventory.branch_inventory import (
 from app.models.customer.customer_model import Customer
 
 # 7. Prescriptions
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 
 # 8. Sales
 from app.models.sales.sales_model import (

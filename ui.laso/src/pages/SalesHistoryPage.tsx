@@ -98,12 +98,6 @@ function fmtGHS(n: number | string | null | undefined) {
     return `₵${Number(n ?? 0).toFixed(2)}`;
 }
 
-function dateToIsoDateTime(dateStr: string | null | undefined, endOfDay = false): string | undefined {
-    if (!dateStr) return undefined;
-    const time = endOfDay ? "T23:59:59Z" : "T00:00:00Z";
-    return `${dateStr}${time}`;
-}
-
 function escapeReceiptHtml(value: unknown): string {
     return String(value ?? "")
         .replace(/&/g, "&amp;")
@@ -911,8 +905,8 @@ export default function SalesHistoryPage() {
                         branch_id: activeBranchId ?? undefined,
                         status: statusFilter || undefined,
                         payment_method: paymentFilter || undefined,
-                        start_date: dateToIsoDateTime(startDate, false),
-                        end_date: dateToIsoDateTime(endDate, true),
+                        start_date: startDate || undefined,
+                        end_date: endDate || undefined,
                     },
                     controller.signal,
                 ),

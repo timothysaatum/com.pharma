@@ -18,7 +18,7 @@
 import { getDb, enqueue } from "@/lib/localDb";
 import type {
     Sale, DrugBatch, StockAdjustmentCreate,
-    PurchaseOrder, Customer, Prescription,
+    PurchaseOrder, Customer,
 } from "@/types";
 
 const SALE_COLUMNS = new Set([
@@ -62,59 +62,6 @@ const SALE_COLUMNS = new Set([
     "receipt_emailed",
     "items_json",
     "items_count",
-    "sync_status",
-    "sync_version",
-    "synced_at",
-    "updated_at",
-    "created_at",
-]);
-
-const PURCHASE_ORDER_COLUMNS = new Set([
-    "id",
-    "organization_id",
-    "branch_id",
-    "po_number",
-    "supplier_id",
-    "subtotal",
-    "tax_amount",
-    "shipping_cost",
-    "total_amount",
-    "status",
-    "ordered_by",
-    "approved_by",
-    "approved_at",
-    "expected_delivery_date",
-    "received_date",
-    "notes",
-    "items_json",
-    "sync_status",
-    "sync_version",
-    "synced_at",
-    "updated_at",
-    "created_at",
-]);
-
-const PRESCRIPTION_COLUMNS = new Set([
-    "id",
-    "organization_id",
-    "prescription_number",
-    "customer_id",
-    "prescriber_name",
-    "prescriber_license",
-    "prescriber_phone",
-    "prescriber_address",
-    "issue_date",
-    "expiry_date",
-    "medications",
-    "diagnosis",
-    "notes",
-    "special_instructions",
-    "refills_allowed",
-    "refills_remaining",
-    "last_refill_date",
-    "status",
-    "verified_by",
-    "verified_at",
     "sync_status",
     "sync_version",
     "synced_at",
@@ -344,115 +291,6 @@ export const writeLocal = {
             payload as Record<string, unknown>,
             operation
         );
-    },
-
-    cachePurchaseOrders: async (orders: PurchaseOrder[]): Promise<void> => {
-        if (orders.length === 0) return;
-
-        const db = await getDb();
-        for (const order of orders) {
-            const existing = await db.select<{ sync_status: string; po_number: string }[]>(
-                "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
-                [order.id]
-            );
-            const localStatus = existing[0]?.sync_status;
-            const isOfflineDraft = existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false;
-            if ((localStatus === "pending" || localStatus === "conflict") && isOfflineDraft) {
-                continue;
-            }
-
-            const payload = pickColumns(
-                {
-                    ...order,
-                    items_json: "[]",
-                    sync_status: "synced",
-                    synced_at: order.synced_at ?? new Date().toISOString(),
-                } as Record<string, unknown>,
-                PURCHASE_ORDER_COLUMNS
-            );
-            const cols = Object.keys(payload);
-            const vals = cols.map((c) => {
-                const v = payload[c];
-                if (typeof v === "boolean") return v ? 1 : 0;
-                if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
-                return v ?? null;
-            });
-            const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-            const updates = cols
-                .filter((c) => c !== "id")
-                .map((c) => `${c} = excluded.${c}`)
-                .join(", ");
-
-            await db.execute(
-                `INSERT INTO purchase_orders (${cols.join(", ")}) VALUES (${placeholders})
-                 ON CONFLICT(id) DO UPDATE SET ${updates}`,
-                vals
-            );
-        }
-    },
-
-    cachePrescriptions: async (prescriptions: Prescription[]): Promise<void> => {
-        if (prescriptions.length === 0) return;
-
-        const db = await getDb();
-        for (const prescription of prescriptions) {
-            const existing = await db.select<{ sync_status: string }[]>(
-                "SELECT sync_status FROM prescriptions WHERE id = $1 LIMIT 1",
-                [prescription.id]
-            );
-            const localStatus = existing[0]?.sync_status;
-            if (localStatus === "pending" || localStatus === "conflict") {
-                continue;
-            }
-
-            const payload = pickColumns(
-                {
-                    ...prescription,
-                    medications: JSON.stringify(prescription.medications ?? []),
-                    sync_status: "synced",
-                    synced_at: prescription.synced_at ?? new Date().toISOString(),
-                } as Record<string, unknown>,
-                PRESCRIPTION_COLUMNS
-            );
-            const cols = Object.keys(payload);
-            const vals = cols.map((c) => {
-                const v = payload[c];
-                if (typeof v === "boolean") return v ? 1 : 0;
-                if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
-                return v ?? null;
-            });
-            const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-            const updates = cols
-                .filter((c) => c !== "id")
-                .map((c) => `${c} = excluded.${c}`)
-                .join(", ");
-
-            await db.execute(
-                `INSERT INTO prescriptions (${cols.join(", ")}) VALUES (${placeholders})
-                 ON CONFLICT(id) DO UPDATE SET ${updates}`,
-                vals
-            );
-        }
-    },
-
-    prescription: async (
-        prescription: Omit<Prescription, "sync_status" | "sync_version"> & { id: string },
-        operation: "create" | "update" = "create"
-    ): Promise<void> => {
-        const now = new Date().toISOString();
-        const payload = pickColumns(
-            {
-                ...prescription,
-                medications: JSON.stringify(prescription.medications ?? []),
-                refills_remaining: prescription.refills_remaining ?? prescription.refills_allowed ?? 0,
-                status: prescription.status ?? "active",
-                updated_at: prescription.updated_at ?? now,
-                created_at: prescription.created_at ?? now,
-            } as Record<string, unknown>,
-            PRESCRIPTION_COLUMNS
-        );
-
-        await upsertAndEnqueue("prescriptions", payload, operation);
     },
 
     /**
