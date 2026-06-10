@@ -160,7 +160,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.PROJECT_NAME,
     version=settings.VERSION,
-    description="Comprehensive pharmacy management system with inventory, sales, and prescription management",
+    description="Pharmacy management system with inventory, sales, and prescription management",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",

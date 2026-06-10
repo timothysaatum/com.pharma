@@ -9,7 +9,7 @@ Features:
 - Audit trail
 - Security controls
 """
-from pydantic import Field, field_validator, model_validator, ConfigDict, computed_field
+from pydantic import Field, field_validator, model_validator, ConfigDict, computed_field, AliasChoices
 from typing import Optional, List, Dict, Any
 from datetime import datetime, date
 from decimal import Decimal
@@ -104,7 +104,7 @@ class SaleItemResponse(TimestampSchema):
     # Total discount
     total_discount_amount: Decimal = Field(
         default=Decimal('0.00'),
-        validation_alias='discount_amount',
+        validation_alias=AliasChoices('total_discount_amount', 'discount_amount'),
         description="contract_discount_amount + additional_discount_amount"
     )
     
@@ -316,15 +316,14 @@ class SaleCreate(SaleBase):
     
     @model_validator(mode='after')
     def validate_customer_for_contract(self) -> 'SaleCreate':
-        """Validate customer requirements for specific contract types"""
-        # Insurance and corporate contracts require registered customer
-        # This will be further validated on the server side against the actual contract
-        
-        if not self.customer_id and not self.customer_name:
+        """Validate customer requirements based on payment type"""
+        is_insurance_payment = self.payment_method == 'insurance'
+
+        if is_insurance_payment and not self.customer_id and not self.customer_name:
             raise ValueError(
-                "Either customer_id (registered) or customer_name (walk-in) required"
+                "Either customer_id (registered) or customer_name (walk-in) required for insurance sales"
             )
-        
+
         return self
     
     @model_validator(mode='after')
@@ -406,7 +405,7 @@ class SaleResponse(SaleBase, TimestampSchema, SyncSchema):
     
     total_discount_amount: Decimal = Field(
         default=Decimal('0.00'),
-        validation_alias='discount_amount',
+        validation_alias=AliasChoices('total_discount_amount', 'discount_amount'),
         description="contract_discount_amount + additional_discount_amount"
     )
     

@@ -92,51 +92,6 @@ async def process_sale(
 
 
 @router.get(
-    "/{sale_id}",
-    response_model=SaleWithDetails
-)
-async def get_sale(
-    sale_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
-    """
-    Get sale by ID with full details
-    
-    Returns sale with:
-    - All sale items with drug details
-    - Customer information
-    - Cashier information
-    - Branch information
-    - Loyalty points earned
-    """
-    from sqlalchemy import select
-    from sqlalchemy.orm import selectinload
-
-    result = await db.execute(
-        select(Sale)
-        .options(selectinload(Sale.items))
-        .where(Sale.id == sale_id)
-    )
-    sale = result.scalar_one_or_none()
-    
-    if not sale:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Sale not found"
-        )
-    
-    # Check organization access
-    if sale.organization_id != current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
-        )
-    
-    return await build_sale_with_details(db, sale)
-
-
-@router.get(
     "/",
     response_model=PaginatedResponse[SaleResponse]
 )
@@ -229,6 +184,51 @@ async def list_sales(
     
     paginator = Paginator(db)
     return await paginator.paginate(query, pagination, SaleResponse)
+
+
+@router.get(
+    "/{sale_id}",
+    response_model=SaleWithDetails
+)
+async def get_sale(
+    sale_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Get sale by ID with full details
+    
+    Returns sale with:
+    - All sale items with drug details
+    - Customer information
+    - Cashier information
+    - Branch information
+    - Loyalty points earned
+    """
+    from sqlalchemy import select
+    from sqlalchemy.orm import selectinload
+
+    result = await db.execute(
+        select(Sale)
+        .options(selectinload(Sale.items))
+        .where(Sale.id == sale_id)
+    )
+    sale = result.scalar_one_or_none()
+    
+    if not sale:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Sale not found"
+        )
+    
+    # Check organization access
+    if sale.organization_id != current_user.organization_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access denied"
+        )
+    
+    return await build_sale_with_details(db, sale)
 
 
 # ============================================

@@ -1,4 +1,3 @@
-
 import asyncio
 from sqlalchemy import select, delete
 from app.db.base import Base

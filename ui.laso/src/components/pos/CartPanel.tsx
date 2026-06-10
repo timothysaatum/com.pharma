@@ -294,6 +294,16 @@ export function CartPanel({
         }
     }, [contracts, contract, onSetContract]);
 
+    // Auto-set amount paid to total when payment method is cash/split and total changes
+    useEffect(() => {
+        if ((paymentMethod === "cash" || paymentMethod === "split") && items.length > 0) {
+            // Only auto-set if amount hasn't been manually entered yet (is 0)
+            if (amountPaid === 0) {
+                onSetAmountPaid(totals.total);
+            }
+        }
+    }, [totals.total, paymentMethod, items.length, amountPaid, onSetAmountPaid]);
+
     const hasRxItems = items.some((i) => i.requiresPrescription);
     const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance" || contract?.type === "corporate";
     const fieldError = (field: string) =>

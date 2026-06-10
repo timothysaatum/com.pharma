@@ -50,6 +50,7 @@ from app.schemas.inventory_schemas import (
     BranchInventoryWithDetails,
     DrugBatchCreate,
     DrugBatchResponse,
+    DrugBatchUpdate,
     ExpiringBatchItem,
     ExpiringBatchReport,
     InventoryValuationItem,
@@ -862,6 +863,63 @@ class InventoryService:
                 )
                 inventory.mark_as_pending_sync()
                 db.add(inventory)
+
+        await db.commit()
+        await db.refresh(batch)
+        return batch
+
+    @staticmethod
+    async def update_batch(
+        db: AsyncSession,
+        batch_id: uuid.UUID,
+        batch_data: DrugBatchUpdate,
+    ) -> DrugBatch:
+        """
+        Update a drug batch fields (batch_number, remaining_quantity, cost_price, selling_price, supplier).
+
+        Updates the batch and synchronizes inventory changes if selling_price changes.
+
+        Raises:
+            HTTPException(404): Batch not found.
+        """
+        from sqlalchemy.orm import selectinload
+
+        result = await db.execute(
+            select(DrugBatch)
+            .where(DrugBatch.id == batch_id)
+            .options(selectinload(DrugBatch.branch_rel))
+        )
+        batch = result.scalar_one_or_none()
+
+        if not batch:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Batch not found.",
+            )
+
+        async with db.begin_nested():
+            # Update batch fields
+            update_data = batch_data.model_dump(exclude_unset=True)
+            for field, value in update_data.items():
+                if value is not None or field in update_data:
+                    setattr(batch, field, value)
+
+            batch.updated_at = datetime.now(timezone.utc)
+            batch.mark_as_pending_sync()
+
+            # If selling_price changed, sync with BranchInventory
+            if "selling_price" in update_data and update_data["selling_price"] is not None:
+                inv_res = await db.execute(
+                    select(BranchInventory).where(
+                        BranchInventory.branch_id == batch.branch_id,
+                        BranchInventory.drug_id == batch.drug_id,
+                    )
+                )
+                inventory = inv_res.scalar_one_or_none()
+                if inventory:
+                    inventory.selling_price = update_data["selling_price"]
+                    inventory.updated_at = datetime.now(timezone.utc)
+                    inventory.mark_as_pending_sync()
 
         await db.commit()
         await db.refresh(batch)

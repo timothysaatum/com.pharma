@@ -322,7 +322,11 @@ function validateCart(
         errors.push({ field: "contract", message: "Select a price contract" });
     }
 
-    if (!state.customerId && !state.customerName.trim()) {
+    // Check if customer is required: only for insurance/corporate or prescription items
+    const isInsurancePayment = state.paymentMethod === "insurance" || state.contract?.type === "insurance" || state.contract?.type === "corporate";
+    const hasRxItems = state.items.some((i) => i.requiresPrescription);
+    
+    if ((isInsurancePayment || hasRxItems) && !state.customerId && !state.customerName.trim()) {
         errors.push({
             field: "customer",
             message: "Enter customer name or select a registered customer",
@@ -330,7 +334,7 @@ function validateCart(
     }
 
     // Insurance/Corporate validations
-    if (state.paymentMethod === "insurance" || state.contract?.type === "insurance" || state.contract?.type === "corporate") {
+    if (isInsurancePayment) {
         const isCorp = state.contract?.type === "corporate";
         if (!state.customerId) {
             errors.push({
@@ -363,7 +367,6 @@ function validateCart(
     }
 
     // Prescription validations
-    const hasRxItems = state.items.some((i) => i.requiresPrescription);
     if (hasRxItems) {
         const unverified = state.items.filter(
             (i) => i.requiresPrescription && !i.prescriptionVerified

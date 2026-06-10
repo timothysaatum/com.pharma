@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { AnimatePresence } from "framer-motion";
 import {
     Search, Package, AlertTriangle, Clock, RefreshCw,
@@ -849,6 +849,12 @@ export default function InventoryPage() {
 
     const abortRef = useRef<AbortController | null>(null);
 
+    // Memoize filter parameters to prevent unnecessary re-renders
+    const filterKey = useMemo(
+        () => JSON.stringify({ debouncedSearch, lowStockOnly, includeZeroStock }),
+        [debouncedSearch, lowStockOnly, includeZeroStock]
+    );
+
     // ── Fetch inventory ───────────────────────────────────────
     const fetchInventory = useCallback(async () => {
         if (!activeBranchId) return;
@@ -930,7 +936,7 @@ export default function InventoryPage() {
         } finally {
             if (!controller.signal.aborted) setIsLoading(false);
         }
-    }, [activeBranchId, page, debouncedSearch, lowStockOnly, includeZeroStock]);
+    }, [activeBranchId, page, filterKey]);
 
     const fetchLowStock = useCallback(async () => {
         if (!activeBranchId) return;

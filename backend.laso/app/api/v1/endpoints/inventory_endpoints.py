@@ -12,10 +12,11 @@ from app.core.deps import (
     require_permission
 )
 from app.models.user.user_model import User
+from app.models.inventory.branch_inventory import DrugBatch
 from app.services.inventory.inventory_service import InventoryService
 from app.schemas.inventory_schemas import (
     BranchInventoryCreate, BranchInventoryResponse, BranchInventoryUpdate,
-    BranchInventoryWithDetails, DrugBatchCreate, DrugBatchResponse, StockAdjustmentCreate,
+    BranchInventoryWithDetails, DrugBatchCreate, DrugBatchResponse, DrugBatchUpdate, StockAdjustmentCreate,
     StockAdjustmentResponse, StockTransferCreate, StockTransferResponse,
     LowStockReport, ExpiringBatchReport, InventoryValuationResponse
 )
@@ -406,6 +407,49 @@ async def get_drug_batches(
     )
     
     return result
+
+
+@router.patch("/batches/{batch_id}", response_model=DrugBatchResponse)
+async def update_drug_batch(
+    batch_id: uuid.UUID,
+    batch_data: DrugBatchUpdate,
+    current_user: User = Depends(require_permission("manage_inventory")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Update an existing drug batch
+    
+    **Required Permission**: manage_inventory
+    
+    **Use Case**: Correcting batch information after entry
+    
+    **Updatable Fields**:
+    - batch_number: Unique identifier for batch
+    - remaining_quantity: Correcting stock count
+    - cost_price: Update cost basis
+    - selling_price: Adjust sale price
+    - supplier: Correct supplier info
+    
+    **Returns**: Updated batch record
+    
+    **Errors**:
+    - 404: Batch not found
+    """
+    batch = await db.get(DrugBatch, batch_id)
+    if not batch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch not found"
+        )
+    
+    if str(batch.branch_id) not in [str(b) for b in current_user.assigned_branches]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this branch"
+        )
+    
+    batch = await InventoryService.update_batch(db=db, batch_id=batch_id, batch_data=batch_data)
+    return batch
 
 
 @router.post("/batches/{batch_id}/consume", response_model=DrugBatchResponse)
