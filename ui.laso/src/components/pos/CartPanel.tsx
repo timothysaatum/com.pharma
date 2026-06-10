@@ -286,6 +286,13 @@ export function CartPanel({
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
 }: CartPanelProps) {
     const autoSelectedRef = useRef(false);
+
+    // FIX: Track whether the user has manually edited the amount tendered.
+    // When true, we stop auto-syncing so their typed value is preserved.
+    // Reset to false whenever the payment method changes or the cart is cleared,
+    // so the field tracks the total again on the next fresh session.
+    const amountManuallyEdited = useRef(false);
+
     useEffect(() => {
         if (!autoSelectedRef.current && contracts.length > 0 && !contract) {
             const def = contracts.find((c) => c.is_default) ?? contracts[0];
@@ -294,15 +301,28 @@ export function CartPanel({
         }
     }, [contracts, contract, onSetContract]);
 
-    // Auto-set amount paid to total when payment method is cash/split and total changes
+    // FIX: Reset the manual-edit flag when the payment method changes or the
+    // cart is emptied so the field re-syncs to the new total automatically.
+    useEffect(() => {
+        amountManuallyEdited.current = false;
+    }, [paymentMethod]);
+
+    useEffect(() => {
+        if (items.length === 0) {
+            amountManuallyEdited.current = false;
+        }
+    }, [items.length]);
+
+    // FIX: Always sync amountPaid to totals.total unless the user has manually
+    // overridden the field. The old guard (`if (amountPaid === 0)`) caused the
+    // amount to freeze after the first item was added.
     useEffect(() => {
         if ((paymentMethod === "cash" || paymentMethod === "split") && items.length > 0) {
-            // Only auto-set if amount hasn't been manually entered yet (is 0)
-            if (amountPaid === 0) {
+            if (!amountManuallyEdited.current) {
                 onSetAmountPaid(totals.total);
             }
         }
-    }, [totals.total, paymentMethod, items.length, amountPaid, onSetAmountPaid]);
+    }, [totals.total, paymentMethod, items.length, onSetAmountPaid]);
 
     const hasRxItems = items.some((i) => i.requiresPrescription);
     const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance" || contract?.type === "corporate";
@@ -638,7 +658,12 @@ export function CartPanel({
                                             min={0}
                                             step="0.01"
                                             value={amountPaid || ""}
-                                            onChange={(e) => onSetAmountPaid(parseFloat(e.target.value) || 0)}
+                                            onChange={(e) => {
+                                                // FIX: Mark as manually edited so the auto-sync effect
+                                                // stops overwriting what the cashier has typed.
+                                                amountManuallyEdited.current = true;
+                                                onSetAmountPaid(parseFloat(e.target.value) || 0);
+                                            }}
                                             placeholder={totals.total.toFixed(2)}
                                             className={`${inputCls} pl-7 ${fieldError("amount_paid") ? "border-red-300 bg-red-50/30" : ""}`}
                                         />
