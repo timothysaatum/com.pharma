@@ -1172,22 +1172,25 @@ export default function SalesHistoryPage() {
                                             </td>
                                         </tr>
                                     ))}
-                                    {/* Summary Row */}
-                                    {filtered.length > 0 && (
-                                        <tr className="bg-slate-50/50 font-bold border-t-2 border-slate-200">
-                                            <td colSpan={4} className="px-4 py-4 text-right text-xs uppercase tracking-wider text-slate-500">
-                                                Total Sales (This Page)
-                                            </td>
-                                            <td className="px-4 py-4 text-sm text-brand-700">
-                                                {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
-                                            </td>
-                                            <td></td>
-                                        </tr>
-                                    )}
                                 </tbody>
                             </table>
                         )}
                     </div>
+
+                    {/* Summary Bar - Non-scrollable */}
+                    {filtered.length > 0 && (
+                        <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between flex-shrink-0">
+                            <div className="flex items-center gap-2">
+                                <TrendingUp className="w-4 h-4 text-brand-600" />
+                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                                    Total Sales (This Page)
+                                </span>
+                            </div>
+                            <span className="text-lg font-bold text-brand-700">
+                                {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
+                            </span>
+                        </div>
+                    )}
 
                     {/* Pagination */}
                     {totalPages > 1 && (

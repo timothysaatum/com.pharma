@@ -32,8 +32,10 @@ import { AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
+import { statsApi } from "@/api/stats";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
+import { localRead } from "@/lib/localRead";
 import { appEvents } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
@@ -47,6 +49,47 @@ export default function POSPage() {
     const { user, activeBranchId } = useAuthStore();
     const { status: syncStatus } = useSyncStatus();
     const isOffline = syncStatus === "offline";
+
+    // ── Daily Sales state ──────────────────────────────────────────────────────
+    const [todaySales, setTodaySales] = useState<number>(0);
+
+    const fetchTodaySales = useCallback(async () => {
+        if (!activeBranchId) return;
+
+        try {
+            if (navigator.onLine && !isOffline) {
+                const stats = await statsApi.getBranchStats(activeBranchId);
+                setTodaySales(stats.total_sales_today);
+            } else {
+                // Offline fallback: calculate from local database
+                const today = new Date().toISOString().slice(0, 10);
+                const localSales = await localRead.searchSales({
+                    branch_id: activeBranchId,
+                    start_date: today,
+                    end_date: today,
+                    status: "completed",
+                    page_size: 1000 // Assume no more than 1000 sales per day for offline calculation
+                });
+                const total = localSales.items.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
+                setTodaySales(total);
+            }
+        } catch (error) {
+            console.error("Failed to fetch today's sales:", error);
+        }
+    }, [activeBranchId, isOffline]);
+
+    useEffect(() => {
+        fetchTodaySales();
+
+        const handleSalesChanged = () => {
+            fetchTodaySales();
+        };
+
+        appEvents.on("sales:changed", handleSalesChanged);
+        return () => {
+            appEvents.off("sales:changed", handleSalesChanged);
+        };
+    }, [fetchTodaySales]);
 
     // ── Cart state ─────────────────────────────────────────────────────────────
     const cart = useCart();
@@ -324,6 +367,8 @@ export default function POSPage() {
     // Drug IDs already in cart — used to show "In cart" state in search panel
     const cartDrugIds = new Set(cart.state.items.map((i) => i.drug.id));
 
+    const fmtGHS = (n: number) => `₵${n.toFixed(2)}`;
+
     return (
         <div className="flex flex-col h-full bg-surface">
             {/* Header */}
@@ -333,6 +378,13 @@ export default function POSPage() {
                     <p className="text-sm text-ink-muted mt-0.5">
                         {user?.full_name} · {user?.role}
                     </p>
+                </div>
+
+                <div className="flex items-center gap-4">
+                    <div className="text-right border-l border-slate-100 pl-4">
+                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Today's Sales</p>
+                        <p className="text-xl font-bold text-brand-600">{fmtGHS(todaySales)}</p>
+                    </div>
                 </div>
             </div>
 
