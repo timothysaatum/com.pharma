@@ -4,9 +4,9 @@ Business logic for branch/location management
 """
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func, or_, and_
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date
 import uuid
 
 from app.models.pharmacy.pharmacy_model import Branch, Organization
@@ -439,15 +439,87 @@ class BranchService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Branch not found"
             )
-        
-        stats = {
+
+        from app.models.inventory.branch_inventory import BranchInventory
+        from app.models.inventory.inventory_model import Drug
+        from app.models.sales.sales_model import Sale
+
+        # 1. Inventory stats
+        # Total items and value
+        inv_query = await db.execute(
+            select(
+                func.count(BranchInventory.id).label('total_items'),
+                func.sum(BranchInventory.quantity * Drug.unit_price).label('total_value')
+            )
+            .join(Drug, BranchInventory.drug_id == Drug.id)
+            .where(BranchInventory.branch_id == branch_id)
+        )
+        inv_res = inv_query.one()
+
+        # Low stock count
+        low_stock_query = await db.execute(
+            select(func.count(BranchInventory.id))
+            .join(Drug, BranchInventory.drug_id == Drug.id)
+            .where(
+                and_(
+                    BranchInventory.branch_id == branch_id,
+                    BranchInventory.quantity <= Drug.reorder_level
+                )
+            )
+        )
+        low_stock_count = low_stock_query.scalar() or 0
+
+        # 2. Sales stats
+        today = date.today()
+        first_of_month = today.replace(day=1)
+
+        # Today's sales
+        sales_today_query = await db.execute(
+            select(func.sum(Sale.total_amount))
+            .where(
+                and_(
+                    Sale.branch_id == branch_id,
+                    Sale.status == 'completed',
+                    func.date(Sale.created_at) == today
+                )
+            )
+        )
+        sales_today = sales_today_query.scalar() or 0.0
+
+        # Month's sales
+        sales_month_query = await db.execute(
+            select(func.sum(Sale.total_amount))
+            .where(
+                and_(
+                    Sale.branch_id == branch_id,
+                    Sale.status == 'completed',
+                    func.date(Sale.created_at) >= first_of_month
+                )
+            )
+        )
+        sales_month = sales_month_query.scalar() or 0.0
+
+        # 3. Active users
+        users_query = await db.execute(
+            select(func.count(User.id))
+            .where(
+                and_(
+                    User.organization_id == organization_id,
+                    User.is_active == True,
+                    User.is_deleted == False,
+                    # Check if branch_id is in assigned_branches (PostgreSQL ARRAY)
+                    User.assigned_branches.contains([branch_id])
+                )
+            )
+        )
+        active_users_count = users_query.scalar() or 0
+
+        return {
             'branch': branch,
-            'total_inventory_items': 0,
-            'total_inventory_value': 0.0,
-            'low_stock_count': 0,
-            'total_sales_today': 0.0,
-            'total_sales_month': 0.0,
-            'active_users_count': 0
+            'total_inventory_items': inv_res.total_items or 0,
+            'total_inventory_value': float(inv_res.total_value or 0),
+            'low_stock_count': low_stock_count,
+            'total_sales_today': float(sales_today),
+            'total_sales_month': float(sales_month),
+            'active_users_count': active_users_count
         }
-        
-        return stats
