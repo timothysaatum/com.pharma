@@ -35,8 +35,7 @@ import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { statsApi } from "@/api/stats";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
-import { localRead } from "@/lib/localRead";
-import { appEvents } from "@/lib/events";
+import { appEvents, useAppEvent } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
 import { localRead } from "@/lib/localRead";
@@ -80,16 +79,9 @@ export default function POSPage() {
 
     useEffect(() => {
         fetchTodaySales();
-
-        const handleSalesChanged = () => {
-            fetchTodaySales();
-        };
-
-        appEvents.on("sales:changed", handleSalesChanged);
-        return () => {
-            appEvents.off("sales:changed", handleSalesChanged);
-        };
     }, [fetchTodaySales]);
+
+    useAppEvent("sales:changed", fetchTodaySales);
 
     // ── Cart state ─────────────────────────────────────────────────────────────
     const cart = useCart();
