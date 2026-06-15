@@ -1,0 +1,9 @@
+
+> pharmacare@0.1.0 dev
+> vite --port 3000
+
+
+  VITE v7.3.5  ready in 835 ms
+
+  ➜  Local:   http://localhost:3000/
+3:18:20 PM [vite] (client) hmr update /src/App.css, /src/pages/OnboardingPage.tsx

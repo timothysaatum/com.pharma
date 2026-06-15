@@ -75,7 +75,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        if (user?.assigned_branches && user.assigned_branches.length > 1) {
+        if (user?.assigned_branches && user.assigned_branches.length > 0) {
             branchApi.list({ is_active: true, page_size: 100 })
                 .then(r => {
                     const assigned = r.items.filter(b => user.assigned_branches?.includes(b.id));
@@ -191,21 +191,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </div>
 
                 {/* Branch switcher / pill */}
-                {!collapsed && activeBranchId && (
+                {!collapsed && (activeBranchId || branches.length > 0) && (
                     <div className="relative mx-3 mt-3" ref={dropdownRef}>
                         <button
-                            onClick={() => branches.length > 1 && setIsBranchSwitcherOpen(!isBranchSwitcherOpen)}
-                            className={`w-full px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2 transition-colors ${branches.length > 1 ? "hover:bg-white/10 cursor-pointer text-left" : "cursor-default"
+                            onClick={() => branches.length > 0 && setIsBranchSwitcherOpen(!isBranchSwitcherOpen)}
+                            className={`w-full px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2 transition-colors ${branches.length > 0 ? "hover:bg-white/10 cursor-pointer text-left" : "cursor-default"
                                 }`}
                         >
                             <Building2 className="w-3.5 h-3.5 text-white/40 flex-shrink-0" />
                             <div className="flex-1 min-w-0">
                                 <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest leading-none mb-1">Active Branch</p>
                                 <p className="text-xs text-white/70 truncate font-semibold">
-                                    {branchName === undefined ? "Loading…" : branchName ?? "Branch unavailable"}
+                                    {branchName === undefined ? "Loading…" : branchName ?? "Select Branch"}
                                 </p>
                             </div>
-                            {branches.length > 1 && (
+                            {branches.length > 0 && (
                                 <ChevronDown className={`w-3.5 h-3.5 text-white/30 transition-transform ${isBranchSwitcherOpen ? "rotate-180" : ""}`} />
                             )}
                         </button>
