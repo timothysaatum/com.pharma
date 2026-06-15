@@ -5,7 +5,7 @@ import {
     ChevronLeft, ChevronRight, X, TrendingDown, Plus, BarChart3,
     Layers, ArrowRightLeft, SlidersHorizontal,
     Wrench, Timer, ShieldOff, Undo2, ClipboardEdit,
-    Trash2,
+    Trash2, Building2,
 } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
 import { drugApi } from "@/api/drugs";
@@ -1157,7 +1157,9 @@ export default function InventoryPage() {
                     </button>
                     <button
                         onClick={() => setAddDrugOpen(true)}
-                        className="h-9 px-3 rounded-lg inline-flex items-center gap-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 transition-colors"
+                        disabled={!activeBranchId}
+                        className="h-9 px-3 rounded-lg inline-flex items-center gap-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                        title={!activeBranchId ? "Select a branch first" : "Add drugs to this branch"}
                     >
                         <Plus className="w-4 h-4" />
                         Add Drugs
@@ -1274,6 +1276,12 @@ export default function InventoryPage() {
                                 {isLoading ? (
                                     <div className="flex items-center justify-center h-64">
                                         <RefreshCw className="w-6 h-6 text-brand-500 animate-spin" />
+                                    </div>
+                                ) : !activeBranchId ? (
+                                    <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted px-6 text-center">
+                                        <Building2 className="w-12 h-12 opacity-20 mb-2" />
+                                        <p className="text-base font-semibold text-ink">No branch selected</p>
+                                        <p className="text-sm max-w-xs">Please select a branch from the sidebar to view and manage inventory.</p>
                                     </div>
                                 ) : inventory.length === 0 ? (
                                     <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">

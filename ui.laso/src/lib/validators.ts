@@ -50,38 +50,41 @@ export const orgStepSchema = z.object({
 });
 
 // ── Step 2: Admin account ─────────────────────────────────
-export const adminStepSchema = z
-    .object({
-        username: z
-            .string()
-            .min(3, "Minimum 3 characters")
-            .max(100, "Too long")
-            .regex(/^[a-zA-Z0-9_-]+$/, "Only letters, numbers, hyphens and underscores"),
-        admin_email: z.string().email("Valid email required"),
-        full_name: z.string().min(2, "Enter your full name").max(255, "Too long"),
-        password: z
-            .string()
-            .min(8, "Minimum 8 characters")
-            .max(100, "Too long")
-            .refine((v) => /[A-Z]/.test(v), "Must contain an uppercase letter")
-            .refine((v) => /[a-z]/.test(v), "Must contain a lowercase letter")
-            .refine((v) => /[0-9]/.test(v), "Must contain a number")
-            .refine(
-                (v) => /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(v),
-                "Must contain a special character"
-            )
-            .refine(
-                (v) => !["password", "12345678", "qwerty", "abc123"].includes(v.toLowerCase()),
-                "Password is too common"
-            ),
-        confirm_password: z.string(),
-        admin_phone: phone,
-        employee_id: z.string().max(50).optional().or(z.literal("")),
-    })
-    .refine((d) => d.password === d.confirm_password, {
+export const adminStepFields = z.object({
+    username: z
+        .string()
+        .min(3, "Minimum 3 characters")
+        .max(100, "Too long")
+        .regex(/^[a-zA-Z0-9_-]+$/, "Only letters, numbers, hyphens and underscores"),
+    admin_email: z.string().email("Valid email required"),
+    full_name: z.string().min(2, "Enter your full name").max(255, "Too long"),
+    password: z
+        .string()
+        .min(8, "Minimum 8 characters")
+        .max(100, "Too long")
+        .refine((v) => /[A-Z]/.test(v), "Must contain an uppercase letter")
+        .refine((v) => /[a-z]/.test(v), "Must contain a lowercase letter")
+        .refine((v) => /[0-9]/.test(v), "Must contain a number")
+        .refine(
+            (v) => /[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/.test(v),
+            "Must contain a special character"
+        )
+        .refine(
+            (v) => !["password", "12345678", "qwerty", "abc123"].includes(v.toLowerCase()),
+            "Password is too common"
+        ),
+    confirm_password: z.string(),
+    admin_phone: phone,
+    employee_id: z.string().max(50).optional().or(z.literal("")),
+});
+
+export const adminStepSchema = adminStepFields.refine(
+    (d) => d.password === d.confirm_password,
+    {
         message: "Passwords do not match",
         path: ["confirm_password"],
-    });
+    }
+);
 
 // ── Step 3: Branches (mirrors BranchCreate Pydantic schema) ──
 const branchSchema = z.object({
@@ -93,9 +96,25 @@ const branchSchema = z.object({
     address: addressSchema.optional(),
 });
 
-export const branchesStepSchema = z
-    .object({
-        branches: z.array(branchSchema).max(10, "Maximum 10 branches allowed"),
+export const branchesStepFields = z.object({
+    branches: z.array(branchSchema).max(10, "Maximum 10 branches allowed"),
+});
+
+export const branchesStepSchema = branchesStepFields.refine(
+    (d) => {
+        const names = d.branches.map((b) => b.name.trim().toLowerCase());
+        return names.length === new Set(names).size;
+    },
+    { message: "Branch names must be unique", path: ["branches"] }
+);
+
+// ── Full combined schema ──────────────────────────────────
+export const onboardingSchema = orgStepSchema
+    .merge(adminStepFields)
+    .merge(branchesStepFields)
+    .refine((d) => d.password === d.confirm_password, {
+        message: "Passwords do not match",
+        path: ["confirm_password"],
     })
     .refine(
         (d) => {
@@ -104,11 +123,6 @@ export const branchesStepSchema = z
         },
         { message: "Branch names must be unique", path: ["branches"] }
     );
-
-// ── Full combined schema ──────────────────────────────────
-export const onboardingSchema = orgStepSchema
-    .merge(adminStepSchema)
-    .merge(branchesStepSchema);
 
 export type OrgStepValues = z.infer<typeof orgStepSchema>;
 export type AdminStepValues = z.infer<typeof adminStepSchema>;
