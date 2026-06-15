@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { salesApi } from "@/api/sales";
+import { statsApi } from "@/api/stats";
 import { isBackendReachable, parseApiError, isOfflineError } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { cacheSales } from "@/lib/localDb";
@@ -848,6 +849,7 @@ export default function SalesHistoryPage() {
     // ── List state ────────────────────────────────────────────
     const [sales, setSales] = useState<Sale[]>([]);
     const [total, setTotal] = useState(0);
+    const [grandTotal, setGrandTotal] = useState<number | null>(null);
     const [page, setPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
     const [loading, setLoading] = useState(false);
@@ -879,69 +881,107 @@ export default function SalesHistoryPage() {
         setSalesFromCache(false);
 
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
-                const local = await localRead.searchSales(
-                    {
-                        page: targetPage,
-                        page_size: PAGE_SIZE,
-                        branch_id: activeBranchId ?? undefined,
-                        status: statusFilter || undefined,
-                        payment_method: paymentFilter || undefined,
-                        start_date: startDate || undefined,
-                        end_date: endDate || undefined,
-                    },
-                    targetPage,
-                    PAGE_SIZE,
-                );
-                if (!controller.signal.aborted) {
-                    setSales(local.items);
-                    setTotal(local.total);
-                    setTotalPages(local.total_pages);
-                    setPage(targetPage);
-                    setSalesFromCache(true);
-                }
-                return;
-            }
+            // Simultaneously fetch grand total if we are on the first page or filters changed
+            const shouldFetchSummary = targetPage === 1;
 
-            const timeoutResult = await withTimeout(
-                () => salesApi.list(
-                    {
-                        page: targetPage,
-                        page_size: PAGE_SIZE,
-                        branch_id: activeBranchId ?? undefined,
-                        status: statusFilter || undefined,
-                        payment_method: paymentFilter || undefined,
-                        start_date: dateToIsoDateTime(startDate, false),
-                        end_date: dateToIsoDateTime(endDate, true),
-                    },
-                    controller.signal,
-                ),
-                () => localRead.searchSales(
-                    {
-                        page: targetPage,
-                        page_size: PAGE_SIZE,
-                        branch_id: activeBranchId ?? undefined,
-                        status: statusFilter || undefined,
-                        payment_method: paymentFilter || undefined,
-                        start_date: startDate || undefined,
-                        end_date: endDate || undefined,
-                    },
-                    targetPage,
-                    PAGE_SIZE,
-                ),
-                { timeoutMs: 15000, dataKey: `sales:${targetPage}:${statusFilter}:${paymentFilter}` }
-            );
+            const listPromise = (async () => {
+                if (!navigator.onLine || !isBackendReachable()) {
+                    return localRead.searchSales(
+                        {
+                            page: targetPage,
+                            page_size: PAGE_SIZE,
+                            branch_id: activeBranchId ?? undefined,
+                            status: statusFilter || undefined,
+                            payment_method: paymentFilter || undefined,
+                            start_date: startDate || undefined,
+                            end_date: endDate || undefined,
+                        },
+                        targetPage,
+                        PAGE_SIZE,
+                    );
+                }
+
+                const result = await withTimeout(
+                    () => salesApi.list(
+                        {
+                            page: targetPage,
+                            page_size: PAGE_SIZE,
+                            branch_id: activeBranchId ?? undefined,
+                            status: statusFilter || undefined,
+                            payment_method: paymentFilter || undefined,
+                            start_date: dateToIsoDateTime(startDate, false),
+                            end_date: dateToIsoDateTime(endDate, true),
+                        },
+                        controller.signal,
+                    ),
+                    () => localRead.searchSales(
+                        {
+                            page: targetPage,
+                            page_size: PAGE_SIZE,
+                            branch_id: activeBranchId ?? undefined,
+                            status: statusFilter || undefined,
+                            payment_method: paymentFilter || undefined,
+                            start_date: startDate || undefined,
+                            end_date: endDate || undefined,
+                        },
+                        targetPage,
+                        PAGE_SIZE,
+                    ),
+                    { timeoutMs: 15000, dataKey: `sales:${targetPage}:${statusFilter}:${paymentFilter}:${startDate}:${endDate}` }
+                );
+                return result;
+            })();
+
+            const summaryPromise = shouldFetchSummary ? (async () => {
+                if (!activeBranchId) return null;
+                try {
+                    if (navigator.onLine && isBackendReachable()) {
+                        const summary = await statsApi.getSalesSummary(
+                            dateToIsoDateTime(startDate, false)!,
+                            dateToIsoDateTime(endDate, true)!,
+                            activeBranchId,
+                            controller.signal
+                        );
+                        return summary.summary.total_revenue;
+                    } else {
+                        // Rough offline summary from the first 1000 items
+                        const local = await localRead.searchSales({
+                            branch_id: activeBranchId,
+                            start_date: startDate,
+                            end_date: endDate,
+                            status: "completed",
+                            page_size: 1000
+                        });
+                        return local.items.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
+                    }
+                } catch (e) {
+                    console.error("Failed to fetch sales summary:", e);
+                    return null;
+                }
+            })() : Promise.resolve(grandTotal);
+
+            const [listResult, summaryResult] = await Promise.all([listPromise, summaryPromise]);
 
             if (!controller.signal.aborted) {
-                const items = timeoutResult.data.items || [];
-                setSales(items);
-                setTotal(timeoutResult.data.total);
-                setTotalPages(timeoutResult.data.total_pages);
-                setPage(targetPage);
-                setSalesFromCache(timeoutResult.isFromCache);
-                if (!timeoutResult.isFromCache) {
-                    void cacheSales(items);
+                if ('items' in listResult) {
+                    // It's a Raw/Offline result
+                    setSales(listResult.items);
+                    setTotal(listResult.total);
+                    setTotalPages(listResult.total_pages);
+                    setSalesFromCache(true);
+                } else {
+                    // It's a withTimeout result
+                    const items = listResult.data.items || [];
+                    setSales(items);
+                    setTotal(listResult.data.total);
+                    setTotalPages(listResult.data.total_pages);
+                    setSalesFromCache(listResult.isFromCache);
+                    if (!listResult.isFromCache) {
+                        void cacheSales(items);
+                    }
                 }
+                setPage(targetPage);
+                setGrandTotal(summaryResult);
             }
         } catch (err: unknown) {
             if (!controller.signal.aborted) {
@@ -951,7 +991,7 @@ export default function SalesHistoryPage() {
         } finally {
             if (!controller.signal.aborted) setLoading(false);
         }
-    }, [activeBranchId, statusFilter, paymentFilter, startDate, endDate]);
+    }, [activeBranchId, statusFilter, paymentFilter, startDate, endDate, grandTotal]);
 
     useEffect(() => {
         fetchSales(1);
@@ -1178,17 +1218,32 @@ export default function SalesHistoryPage() {
                     </div>
 
                     {/* Summary Bar - Non-scrollable */}
-                    {filtered.length > 0 && (
+                    {(filtered.length > 0 || grandTotal !== null) && (
                         <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between flex-shrink-0">
-                            <div className="flex items-center gap-2">
-                                <TrendingUp className="w-4 h-4 text-brand-600" />
-                                <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-                                    Total Sales (This Page)
-                                </span>
+                            <div className="flex items-center gap-6">
+                                <div className="flex items-center gap-2">
+                                    <TrendingUp className="w-4 h-4 text-brand-600" />
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                        Page Total
+                                    </span>
+                                    <span className="text-sm font-bold text-ink">
+                                        {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
+                                    </span>
+                                </div>
+                                {grandTotal !== null && (
+                                    <div className="flex items-center gap-2 border-l border-slate-200 pl-6">
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                            Grand Total
+                                        </span>
+                                        <span className="text-lg font-bold text-brand-700">
+                                            {fmtGHS(grandTotal)}
+                                        </span>
+                                    </div>
+                                )}
                             </div>
-                            <span className="text-lg font-bold text-brand-700">
-                                {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
-                            </span>
+                            <div className="text-[10px] font-medium text-slate-400 italic">
+                                {startDate && endDate ? `${fmtDate(startDate)} – ${fmtDate(endDate)}` : "All time"}
+                            </div>
                         </div>
                     )}
 
