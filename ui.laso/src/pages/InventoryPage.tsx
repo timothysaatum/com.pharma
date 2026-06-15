@@ -857,7 +857,10 @@ export default function InventoryPage() {
 
     // ── Fetch inventory ───────────────────────────────────────
     const fetchInventory = useCallback(async () => {
-        if (!activeBranchId) return;
+        if (!activeBranchId) {
+            setIsLoading(false);
+            return;
+        }
         abortRef.current?.abort();
         const controller = new AbortController();
         abortRef.current = controller;

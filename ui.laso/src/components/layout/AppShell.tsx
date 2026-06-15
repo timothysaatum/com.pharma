@@ -1,12 +1,13 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
     ShoppingCart, Users, BarChart2, FileText,
     LogOut, Building2, Menu, X,
-    Receipt, Settings, UserCog, Cog,
+    Receipt, Settings, UserCog, Cog, ChevronDown, Check,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
+import type { BranchListItem } from "@/types";
 import { organizationApi } from "@/api/organization";
 import { offlineCache } from "@/lib/storage";
 import { APP_NAME } from "@/lib/appConfig";
@@ -61,12 +62,38 @@ const ROLE_LABELS: Record<string, string> = {
 };
 
 export function AppShell({ children }: { children: React.ReactNode }) {
-    const { user, logout, activeBranchId } = useAuthStore();
+    const { user, logout, activeBranchId, setActiveBranch } = useAuthStore();
     const navigate = useNavigate();
     const [collapsed, setCollapsed] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
     const [branchName, setBranchName] = useState<string | null | undefined>(undefined);
     const [organizationName, setOrganizationName] = useState<string | null | undefined>(undefined);
+
+    // ── Branch switcher state ──────────────────────────────────────────────────
+    const [branches, setBranches] = useState<BranchListItem[]>([]);
+    const [isBranchSwitcherOpen, setIsBranchSwitcherOpen] = useState(false);
+    const dropdownRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (user?.assigned_branches && user.assigned_branches.length > 1) {
+            branchApi.list({ is_active: true, page_size: 100 })
+                .then(r => {
+                    const assigned = r.items.filter(b => user.assigned_branches?.includes(b.id));
+                    setBranches(assigned);
+                })
+                .catch(() => setBranches([]));
+        }
+    }, [user]);
+
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+                setIsBranchSwitcherOpen(false);
+            }
+        };
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => document.removeEventListener("mousedown", handleClickOutside);
+    }, []);
 
     useEffect(() => {
         if (!activeBranchId) {
@@ -163,16 +190,54 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     </button>
                 </div>
 
-                {/* Branch pill */}
+                {/* Branch switcher / pill */}
                 {!collapsed && activeBranchId && (
-                    <div className="mx-3 mt-3 px-2.5 py-1.5 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2">
-                        <Building2 className="w-3 h-3 text-white/40 flex-shrink-0" />
-                        <span
-                            className="text-xs text-white/60 truncate"
-                            title={branchName || undefined}
+                    <div className="relative mx-3 mt-3" ref={dropdownRef}>
+                        <button
+                            onClick={() => branches.length > 1 && setIsBranchSwitcherOpen(!isBranchSwitcherOpen)}
+                            className={`w-full px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2 transition-colors ${branches.length > 1 ? "hover:bg-white/10 cursor-pointer text-left" : "cursor-default"
+                                }`}
                         >
-                            {branchName === undefined ? "Loading…" : branchName ?? "Branch unavailable"}
-                        </span>
+                            <Building2 className="w-3.5 h-3.5 text-white/40 flex-shrink-0" />
+                            <div className="flex-1 min-w-0">
+                                <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest leading-none mb-1">Active Branch</p>
+                                <p className="text-xs text-white/70 truncate font-semibold">
+                                    {branchName === undefined ? "Loading…" : branchName ?? "Branch unavailable"}
+                                </p>
+                            </div>
+                            {branches.length > 1 && (
+                                <ChevronDown className={`w-3.5 h-3.5 text-white/30 transition-transform ${isBranchSwitcherOpen ? "rotate-180" : ""}`} />
+                            )}
+                        </button>
+
+                        {/* Dropdown Menu */}
+                        {isBranchSwitcherOpen && (
+                            <div className="absolute left-0 right-0 mt-1 z-50 rounded-xl bg-ink border border-white/10 shadow-2xl overflow-hidden py-1.5">
+                                <p className="px-3 py-1.5 text-[10px] font-bold text-white/30 uppercase tracking-widest border-b border-white/5 mb-1.5">Switch Branch</p>
+                                <div className="max-h-64 overflow-y-auto">
+                                    {branches.map((b) => (
+                                        <button
+                                            key={b.id}
+                                            onClick={() => {
+                                                setActiveBranch(b.id);
+                                                setIsBranchSwitcherOpen(false);
+                                            }}
+                                            className="w-full px-3 py-2 text-left flex items-center justify-between hover:bg-white/5 transition-colors group"
+                                        >
+                                            <div className="min-w-0">
+                                                <p className={`text-sm truncate ${activeBranchId === b.id ? "text-brand-400 font-bold" : "text-white/70 font-medium"}`}>
+                                                    {b.name}
+                                                </p>
+                                                <p className="text-[10px] text-white/30 font-mono">{b.code}</p>
+                                            </div>
+                                            {activeBranchId === b.id && (
+                                                <Check className="w-4 h-4 text-brand-400 flex-shrink-0" />
+                                            )}
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
                     </div>
                 )}
 
