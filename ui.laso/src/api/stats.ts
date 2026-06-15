@@ -29,7 +29,28 @@ export interface TopSellingDrug {
     average_price: number;
 }
 
+export interface BranchStats {
+    id: string;
+    organization_id: string;
+    name: string;
+    code: string;
+    total_inventory_items: number;
+    total_inventory_value: number;
+    low_stock_count: number;
+    total_sales_today: number;
+    total_sales_month: number;
+    active_users_count: number;
+}
+
 export const statsApi = {
+    /**
+     * GET /stats/{branch_id}
+     * Fetches comprehensive branch statistics.
+     */
+    getBranchStats(branchId: string, signal?: AbortSignal): Promise<BranchStats> {
+        return get<BranchStats>(`/stats/${branchId}`, { signal });
+    },
+
     /**
      * GET /stats/reports/summary
      * Fetches sales summary data for the requested date range.
