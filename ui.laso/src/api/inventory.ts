@@ -10,6 +10,7 @@ import type {
     BranchInventoryWithDetails,
     DrugBatch,
     DrugBatchCreate,
+    DrugBatchUpdate,
     InventoryValuationResponse,
     PaginatedResponse,
     StockAdjustmentCreate,
@@ -115,6 +116,10 @@ export const inventoryApi = {
         data: { location?: string | null; selling_price?: number | null }
     ): Promise<BranchInventory> {
         return patch<BranchInventory>(`${BASE}/branch/${branchId}/drugs/${drugId}`, data);
+    },
+
+    updateBatch(batchId: string, data: DrugBatchUpdate): Promise<DrugBatch> {
+        return patch<DrugBatch>(`${BASE}/batches/${batchId}`, data);
     },
 
     removeBranchDrug(branchId: string, drugId: string): Promise<void> {

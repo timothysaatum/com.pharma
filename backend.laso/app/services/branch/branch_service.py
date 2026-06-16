@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
 from typing import List, Optional, Dict, Any
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 import uuid
 
 from app.models.pharmacy.pharmacy_model import Branch, Organization
@@ -470,36 +470,41 @@ class BranchService:
         low_stock_count = low_stock_query.scalar() or 0
 
         # 2. Sales stats
-        today = date.today()
-        first_of_month = today.replace(day=1)
+        now = datetime.now(timezone.utc)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_start = today_start + timedelta(days=1)
+        first_of_month = today_start.replace(day=1)
 
-        # Today's sales
+        # Today's sales (UTC-aware range)
         sales_today_query = await db.execute(
             select(func.sum(Sale.total_amount))
             .where(
                 and_(
                     Sale.branch_id == branch_id,
                     Sale.status == 'completed',
-                    func.date(Sale.created_at) == today
+                    Sale.created_at >= today_start,
+                    Sale.created_at < tomorrow_start,
                 )
             )
         )
         sales_today = sales_today_query.scalar() or 0.0
 
-        # Month's sales
+        # Month's sales (UTC-aware range)
         sales_month_query = await db.execute(
             select(func.sum(Sale.total_amount))
             .where(
                 and_(
                     Sale.branch_id == branch_id,
                     Sale.status == 'completed',
-                    func.date(Sale.created_at) >= first_of_month
+                    Sale.created_at >= first_of_month
                 )
             )
         )
         sales_month = sales_month_query.scalar() or 0.0
 
         # 3. Active users
+        # Note: assigned_branches is a custom ARRAY type (stored as JSON string in SQLite)
+        # We use a LIKE check for compatibility with the SQLite implementation.
         users_query = await db.execute(
             select(func.count(User.id))
             .where(
@@ -507,8 +512,7 @@ class BranchService:
                     User.organization_id == organization_id,
                     User.is_active == True,
                     User.is_deleted == False,
-                    # Check if branch_id is in assigned_branches (PostgreSQL ARRAY)
-                    User.assigned_branches.contains([branch_id])
+                    User.assigned_branches.like(f'%{str(branch_id)}%')
                 )
             )
         )

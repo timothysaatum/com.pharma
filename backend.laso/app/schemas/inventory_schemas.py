@@ -122,7 +122,10 @@ class DrugBatchCreate(DrugBatchBase):
 
 class DrugBatchUpdate(BaseSchema):
     """Schema for updating a drug batch"""
+    batch_number: Optional[str] = Field(None, min_length=1, max_length=100)
     remaining_quantity: Optional[int] = Field(None, ge=0)
+    manufacturing_date: Optional[date] = None
+    expiry_date: Optional[date] = None
     cost_price: Optional[Money] = Field(
         None,
         description="Cost/acquisition price"
@@ -132,6 +135,14 @@ class DrugBatchUpdate(BaseSchema):
         description="Selling price"
     )
     supplier: Optional[str] = None
+
+    @field_validator('expiry_date')
+    @classmethod
+    def validate_expiry(cls, v: Optional[date]) -> Optional[date]:
+        """Ensure expiry date is in the future if provided"""
+        if v is not None and v < date.today():
+            raise ValueError('Expiry date must be in the future')
+        return v
 
 
 class DrugBatchResponse(DrugBatchBase, TimestampSchema, SyncSchema):

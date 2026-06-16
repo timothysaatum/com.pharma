@@ -578,6 +578,16 @@ export interface DrugBatchCreate {
     supplier?: string;
 }
 
+export interface DrugBatchUpdate {
+    batch_number?: string;
+    remaining_quantity?: number;
+    manufacturing_date?: string | null;
+    expiry_date?: string;
+    cost_price?: number | null;
+    selling_price?: number | null;
+    supplier?: string | null;
+}
+
 export interface StockAdjustmentCreate {
     branch_id: string;
     drug_id: string;

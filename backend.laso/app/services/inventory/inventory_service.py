@@ -875,19 +875,18 @@ class InventoryService:
         batch_data: DrugBatchUpdate,
     ) -> DrugBatch:
         """
-        Update a drug batch fields (batch_number, remaining_quantity, cost_price, selling_price, supplier).
+        Update drug batch fields.
 
-        Updates the batch and synchronizes inventory changes if selling_price changes.
+        Handles corrections for batch_number, remaining_quantity, dates,
+        pricing, and supplier. Synchronises BranchInventory if selling_price changes.
 
         Raises:
             HTTPException(404): Batch not found.
+            HTTPException(400): Duplicate batch number if changed.
         """
-        from sqlalchemy.orm import selectinload
-
         result = await db.execute(
             select(DrugBatch)
             .where(DrugBatch.id == batch_id)
-            .options(selectinload(DrugBatch.branch_rel))
         )
         batch = result.scalar_one_or_none()
 
@@ -897,12 +896,29 @@ class InventoryService:
                 detail="Batch not found.",
             )
 
+        update_data = batch_data.model_dump(exclude_unset=True)
+
+        # ── Pre-flight: Check uniqueness if batch_number is being changed ────
+        new_batch_num = update_data.get("batch_number")
+        if new_batch_num and new_batch_num != batch.batch_number:
+            dupe_res = await db.execute(
+                select(DrugBatch.id).where(
+                    DrugBatch.branch_id == batch.branch_id,
+                    DrugBatch.drug_id == batch.drug_id,
+                    DrugBatch.batch_number == new_batch_num,
+                    DrugBatch.id != batch_id,
+                )
+            )
+            if dupe_res.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Batch '{new_batch_num}' already exists for this drug at this branch.",
+                )
+
         async with db.begin_nested():
             # Update batch fields
-            update_data = batch_data.model_dump(exclude_unset=True)
             for field, value in update_data.items():
-                if value is not None or field in update_data:
-                    setattr(batch, field, value)
+                setattr(batch, field, value)
 
             batch.updated_at = datetime.now(timezone.utc)
             batch.mark_as_pending_sync()
