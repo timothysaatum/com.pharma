@@ -878,15 +878,18 @@ class InventoryService:
         Update drug batch fields.
 
         Handles corrections for batch_number, remaining_quantity, dates,
-        pricing, and supplier. Synchronises BranchInventory if selling_price changes.
+        pricing, and supplier. Synchronises BranchInventory total quantity
+        by summing all batches to ensure accuracy and resolve drift.
 
         Raises:
             HTTPException(404): Batch not found.
             HTTPException(400): Duplicate batch number if changed.
         """
+        # Lock the batch for update to prevent concurrent modifications
         result = await db.execute(
             select(DrugBatch)
             .where(DrugBatch.id == batch_id)
+            .with_for_update()
         )
         batch = result.scalar_one_or_none()
 
@@ -932,19 +935,33 @@ class InventoryService:
             batch.updated_at = datetime.now(timezone.utc)
             batch.mark_as_pending_sync()
 
-            # If selling_price changed, sync with BranchInventory
-            if "selling_price" in update_data and update_data["selling_price"] is not None:
-                inv_res = await db.execute(
-                    select(BranchInventory).where(
-                        BranchInventory.branch_id == batch.branch_id,
-                        BranchInventory.drug_id == batch.drug_id,
+            # Flush changes so the subsequent sum query sees the updated remaining_quantity
+            await db.flush()
+
+            # ── Sync with BranchInventory ──
+            # We re-calculate the total quantity from the sum of all batches
+            # to resolve any discrepancies/drift between batch counts and the inventory total.
+            inv_res = await db.execute(
+                select(BranchInventory).where(
+                    BranchInventory.branch_id == batch.branch_id,
+                    BranchInventory.drug_id == batch.drug_id,
+                ).with_for_update()
+            )
+            inventory = inv_res.scalar_one_or_none()
+            if inventory:
+                total_qty = await db.scalar(
+                    select(func.sum(DrugBatch.remaining_quantity)).where(
+                        DrugBatch.branch_id == batch.branch_id,
+                        DrugBatch.drug_id == batch.drug_id,
                     )
                 )
-                inventory = inv_res.scalar_one_or_none()
-                if inventory:
+                inventory.quantity = int(total_qty or 0)
+
+                if "selling_price" in update_data and update_data["selling_price"] is not None:
                     inventory.selling_price = update_data["selling_price"]
-                    inventory.updated_at = datetime.now(timezone.utc)
-                    inventory.mark_as_pending_sync()
+
+                inventory.updated_at = datetime.now(timezone.utc)
+                inventory.mark_as_pending_sync()
 
         await db.commit()
         await db.refresh(batch)

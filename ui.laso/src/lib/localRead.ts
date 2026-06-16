@@ -578,6 +578,9 @@ export const localRead = {
     const qualifiers: string[] = [];
     const values: unknown[] = [];
 
+    const effectivePage = params.page ?? page;
+    const effectivePageSize = params.page_size ?? page_size;
+
     if (params.branch_id) {
       values.push(params.branch_id);
       qualifiers.push(`branch_id = $${values.length}`);
@@ -609,13 +612,13 @@ export const localRead = {
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
     const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM sales ${where}`, values);
     const total = totalRows[0]?.total ?? 0;
-    const offset = (page - 1) * page_size;
+    const offset = (effectivePage - 1) * effectivePageSize;
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT * FROM sales ${where} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      [...values, page_size, offset]
+      [...values, effectivePageSize, offset]
     );
 
-    return buildPagination(rows.map(toSale), page, page_size, total);
+    return buildPagination(rows.map(toSale), effectivePage, effectivePageSize, total);
   },
 
   async getSaleById(id: string): Promise<SaleWithDetails | null> {
