@@ -493,7 +493,7 @@ function SaleDetailPanel({
                 )}
 
                 {sale && view === "detail" && (
-                    <div className="p-5 space-y-5">
+                    <div className="p-5 space-y-5 pb-40">
                         {/* Status + meta */}
                         <div className="flex items-start justify-between">
                             <div className="space-y-1">
@@ -576,42 +576,6 @@ function SaleDetailPanel({
                                     </div>
                                 ))}
                             </div>
-                        </div>
-
-                        {/* Totals breakdown */}
-                        <div className="rounded-xl bg-slate-50 p-4 space-y-2">
-                            <div className="flex justify-between text-xs text-slate-500">
-                                <span>Subtotal</span>
-                                <span>{fmtGHS(sale.subtotal)}</span>
-                            </div>
-                            {Number(sale.total_discount_amount) > 0 && (
-                                <div className="flex justify-between text-xs text-green-600">
-                                    <span>Total discount</span>
-                                    <span>−{fmtGHS(sale.total_discount_amount)}</span>
-                                </div>
-                            )}
-                            {Number(sale.tax_amount) > 0 && (
-                                <div className="flex justify-between text-xs text-slate-500">
-                                    <span>Tax</span>
-                                    <span>{fmtGHS(sale.tax_amount)}</span>
-                                </div>
-                            )}
-                            <div className="flex justify-between text-sm font-bold text-ink border-t border-slate-200 pt-2">
-                                <span>Total</span>
-                                <span>{fmtGHS(sale.total_amount)}</span>
-                            </div>
-                            {Number(sale.amount_paid) > 0 && (
-                                <div className="flex justify-between text-xs text-slate-500">
-                                    <span>Amount paid</span>
-                                    <span>{fmtGHS(sale.amount_paid)}</span>
-                                </div>
-                            )}
-                            {Number(sale.change_amount) > 0 && (
-                                <div className="flex justify-between text-xs font-semibold text-emerald-700">
-                                    <span>Change</span>
-                                    <span>{fmtGHS(sale.change_amount)}</span>
-                                </div>
-                            )}
                         </div>
 
                         {/* Notes */}
@@ -707,9 +671,37 @@ function SaleDetailPanel({
                                 </div>
                             </div>
                         )}
+                    </div>
+                )}
+
+                {sale && view === "detail" && (
+                    <div className="fixed bottom-0 w-[420px] bg-white border-t border-slate-200 p-5 space-y-4 shadow-[0_-8px_30px_rgb(0,0,0,0.04)] z-20">
+                        {/* Totals breakdown */}
+                        <div className="rounded-xl bg-slate-50 p-4 space-y-2">
+                            <div className="flex justify-between text-xs text-slate-500">
+                                <span>Subtotal</span>
+                                <span>{fmtGHS(sale.subtotal)}</span>
+                            </div>
+                            {Number(sale.total_discount_amount) > 0 && (
+                                <div className="flex justify-between text-xs text-green-600">
+                                    <span>Total discount</span>
+                                    <span>−{fmtGHS(sale.total_discount_amount)}</span>
+                                </div>
+                            )}
+                            {Number(sale.tax_amount) > 0 && (
+                                <div className="flex justify-between text-xs text-slate-500">
+                                    <span>Tax</span>
+                                    <span>{fmtGHS(sale.tax_amount)}</span>
+                                </div>
+                            )}
+                            <div className="flex justify-between text-sm font-bold text-ink border-t border-slate-200 pt-2">
+                                <span>Total</span>
+                                <span>{fmtGHS(sale.total_amount)}</span>
+                            </div>
+                        </div>
 
                         {/* Actions */}
-                        <div className="flex gap-2 pt-1">
+                        <div className="flex gap-2">
                             <button
                                 onClick={loadReceipt}
                                 type="button"
@@ -991,7 +983,7 @@ export default function SalesHistoryPage() {
         } finally {
             if (!controller.signal.aborted) setLoading(false);
         }
-    }, [activeBranchId, statusFilter, paymentFilter, startDate, endDate, grandTotal]);
+    }, [activeBranchId, statusFilter, paymentFilter, startDate, endDate]);
 
     useEffect(() => {
         fetchSales(1);
@@ -1031,14 +1023,23 @@ export default function SalesHistoryPage() {
                         )}
                     </p>
                 </div>
-                <button
-                    onClick={() => fetchSales(page)}
-                    disabled={loading}
-                    className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50 disabled:opacity-50 transition-colors"
-                >
-                    <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
-                    Refresh
-                </button>
+
+                <div className="flex items-center gap-4">
+                    {grandTotal !== null && startDate === new Date().toISOString().slice(0, 10) && endDate === new Date().toISOString().slice(0, 10) && (
+                        <div className="bg-brand-50 border border-brand-100 px-4 py-2 rounded-2xl text-right">
+                            <p className="text-[10px] font-bold text-brand-600 uppercase tracking-widest">Today's Sales</p>
+                            <p className="text-2xl font-black text-brand-700">{fmtGHS(grandTotal)}</p>
+                        </div>
+                    )}
+                    <button
+                        onClick={() => fetchSales(page)}
+                        disabled={loading}
+                        className="flex items-center gap-2 px-3 py-2 text-sm text-slate-500 border border-slate-200 rounded-xl hover:bg-slate-50 disabled:opacity-50 transition-colors"
+                    >
+                        <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
+                        Refresh
+                    </button>
+                </div>
             </div>
 
             {/* ── Toolbar ──────────────────────────────────────── */}
@@ -1140,6 +1141,36 @@ export default function SalesHistoryPage() {
                         </div>
                     )}
 
+                    {/* Summary Bar - Non-scrollable (Top position) */}
+                    {(filtered.length > 0 || grandTotal !== null) && (
+                        <div className="px-5 py-3 border-b border-slate-200 bg-slate-50 flex items-center justify-between flex-shrink-0">
+                            <div className="flex items-center gap-6">
+                                <div className="flex items-center gap-2">
+                                    <TrendingUp className="w-4 h-4 text-brand-600" />
+                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                        Page Total
+                                    </span>
+                                    <span className="text-sm font-bold text-ink">
+                                        {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
+                                    </span>
+                                </div>
+                                {grandTotal !== null && (
+                                    <div className="flex items-center gap-2 border-l border-slate-200 pl-6">
+                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                                            Grand Total
+                                        </span>
+                                        <span className="text-lg font-bold text-brand-700">
+                                            {fmtGHS(grandTotal)}
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
+                            <div className="text-[10px] font-medium text-slate-400 italic">
+                                {startDate && endDate ? `${fmtDate(startDate)} – ${fmtDate(endDate)}` : "All time"}
+                            </div>
+                        </div>
+                    )}
+
                     {/* Table */}
                     <div className="flex-1 overflow-y-auto min-h-0">
                         {loading && sales.length === 0 ? (
@@ -1216,36 +1247,6 @@ export default function SalesHistoryPage() {
                             </table>
                         )}
                     </div>
-
-                    {/* Summary Bar - Non-scrollable */}
-                    {(filtered.length > 0 || grandTotal !== null) && (
-                        <div className="px-5 py-3 border-t border-slate-200 bg-slate-50 flex items-center justify-between flex-shrink-0">
-                            <div className="flex items-center gap-6">
-                                <div className="flex items-center gap-2">
-                                    <TrendingUp className="w-4 h-4 text-brand-600" />
-                                    <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                        Page Total
-                                    </span>
-                                    <span className="text-sm font-bold text-ink">
-                                        {fmtGHS(filtered.reduce((sum, s) => sum + Number(s.total_amount || 0), 0))}
-                                    </span>
-                                </div>
-                                {grandTotal !== null && (
-                                    <div className="flex items-center gap-2 border-l border-slate-200 pl-6">
-                                        <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">
-                                            Grand Total
-                                        </span>
-                                        <span className="text-lg font-bold text-brand-700">
-                                            {fmtGHS(grandTotal)}
-                                        </span>
-                                    </div>
-                                )}
-                            </div>
-                            <div className="text-[10px] font-medium text-slate-400 italic">
-                                {startDate && endDate ? `${fmtDate(startDate)} – ${fmtDate(endDate)}` : "All time"}
-                            </div>
-                        </div>
-                    )}
 
                     {/* Pagination */}
                     {totalPages > 1 && (

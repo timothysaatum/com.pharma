@@ -844,18 +844,12 @@ class InventoryService:
             )
             inventory = inv_res.scalar_one_or_none()
 
-            if inventory:
-                inventory.quantity  += batch_data.quantity
-                if inventory.selling_price is None and batch_data.selling_price is not None:
-                    inventory.selling_price = batch_data.selling_price
-                inventory.updated_at = datetime.now(timezone.utc)
-                inventory.mark_as_pending_sync()
-            else:
+            if not inventory:
                 inventory = BranchInventory(
                     id=uuid.uuid4(),
                     branch_id=batch_data.branch_id,
                     drug_id=batch_data.drug_id,
-                    quantity=batch_data.quantity,
+                    quantity=0,
                     reserved_quantity=0,
                     selling_price=batch_data.selling_price,
                     created_at=datetime.now(timezone.utc),
@@ -863,6 +857,16 @@ class InventoryService:
                 )
                 inventory.mark_as_pending_sync()
                 db.add(inventory)
+
+            # Recalculate total from all batches to resolve drift
+            await InventoryService._recalculate_inventory_quantity(
+                db=db,
+                branch_id=batch_data.branch_id,
+                drug_id=batch_data.drug_id,
+            )
+
+            if inventory.selling_price is None and batch_data.selling_price is not None:
+                inventory.selling_price = batch_data.selling_price
 
         await db.commit()
         await db.refresh(batch)
@@ -941,25 +945,23 @@ class InventoryService:
             # ── Sync with BranchInventory ──
             # We re-calculate the total quantity from the sum of all batches
             # to resolve any discrepancies/drift between batch counts and the inventory total.
+            await InventoryService._recalculate_inventory_quantity(
+                db=db,
+                branch_id=batch.branch_id,
+                drug_id=batch.drug_id,
+            )
+
+            # Resolve reference to update other fields if needed
             inv_res = await db.execute(
                 select(BranchInventory).where(
                     BranchInventory.branch_id == batch.branch_id,
                     BranchInventory.drug_id == batch.drug_id,
                 ).with_for_update()
             )
-            inventory = inv_res.scalar_one_or_none()
-            if inventory:
-                total_qty = await db.scalar(
-                    select(func.sum(DrugBatch.remaining_quantity)).where(
-                        DrugBatch.branch_id == batch.branch_id,
-                        DrugBatch.drug_id == batch.drug_id,
-                    )
-                )
-                inventory.quantity = int(total_qty or 0)
+            inventory = inv_res.scalar_one()
 
-                if "selling_price" in update_data and update_data["selling_price"] is not None:
-                    inventory.selling_price = update_data["selling_price"]
-
+            if "selling_price" in update_data and update_data["selling_price"] is not None:
+                inventory.selling_price = update_data["selling_price"]
                 inventory.updated_at = datetime.now(timezone.utc)
                 inventory.mark_as_pending_sync()
 
@@ -1029,9 +1031,12 @@ class InventoryService:
                     ),
                 )
 
-            inventory.quantity  -= quantity
-            inventory.updated_at = datetime.now(timezone.utc)
-            inventory.mark_as_pending_sync()
+            # Keep BranchInventory in sync via recalculation to prevent drift
+            await InventoryService._recalculate_inventory_quantity(
+                db=db,
+                branch_id=batch.branch_id,
+                drug_id=batch.drug_id,
+            )
 
         await db.commit()
         await db.refresh(batch)
@@ -1413,6 +1418,40 @@ class InventoryService:
     # =========================================================================
 
     @staticmethod
+    async def _recalculate_inventory_quantity(
+        db: AsyncSession,
+        branch_id: uuid.UUID,
+        drug_id: uuid.UUID,
+    ) -> int:
+        """
+        Recalculate the aggregate BranchInventory.quantity from the sum of all
+        batches for this drug at this branch. Resolves drift between batch
+        records and the inventory summary.
+        """
+        total_qty = await db.scalar(
+            select(func.sum(DrugBatch.remaining_quantity)).where(
+                DrugBatch.branch_id == branch_id,
+                DrugBatch.drug_id == drug_id,
+            )
+        )
+        new_qty = int(total_qty or 0)
+
+        # Update the inventory record
+        inv_res = await db.execute(
+            select(BranchInventory).where(
+                BranchInventory.branch_id == branch_id,
+                BranchInventory.drug_id == drug_id,
+            ).with_for_update()
+        )
+        inventory = inv_res.scalar_one_or_none()
+        if inventory:
+            inventory.quantity = new_qty
+            inventory.updated_at = datetime.now(timezone.utc)
+            inventory.mark_as_pending_sync()
+
+        return new_qty
+
+    @staticmethod
     async def _apply_adjustment(
         db: AsyncSession,
         branch_id: uuid.UUID,
@@ -1479,6 +1518,52 @@ class InventoryService:
         inventory.quantity   = new_quantity
         inventory.updated_at = datetime.now(timezone.utc)
         inventory.mark_as_pending_sync()
+
+        # ── Update batches to maintain parity ──
+        if quantity_change > 0:
+            # For additions (return/correction), add to the earliest valid batch
+            # if one exists, or create a dummy "Correction" batch if not.
+            batch_res = await db.execute(
+                select(DrugBatch)
+                .where(
+                    DrugBatch.branch_id == branch_id,
+                    DrugBatch.drug_id == drug_id,
+                    DrugBatch.expiry_date > date.today()
+                )
+                .order_by(DrugBatch.expiry_date.asc())
+                .limit(1)
+                .with_for_update()
+            )
+            target_batch = batch_res.scalar_one_or_none()
+            if target_batch:
+                target_batch.remaining_quantity += quantity_change
+                target_batch.updated_at = datetime.now(timezone.utc)
+                target_batch.mark_as_pending_sync()
+        elif quantity_change < 0:
+            # For deductions (damage/theft/correction), deduct FEFO
+            qty_to_deduct = abs(quantity_change)
+            batch_res = await db.execute(
+                select(DrugBatch)
+                .where(
+                    DrugBatch.branch_id == branch_id,
+                    DrugBatch.drug_id == drug_id,
+                    DrugBatch.remaining_quantity > 0
+                )
+                .order_by(DrugBatch.expiry_date.asc())
+                .with_for_update()
+            )
+            for batch in batch_res.scalars().all():
+                if qty_to_deduct <= 0:
+                    break
+                take = min(batch.remaining_quantity, qty_to_deduct)
+                batch.remaining_quantity -= take
+                batch.updated_at = datetime.now(timezone.utc)
+                batch.mark_as_pending_sync()
+                qty_to_deduct -= take
+
+        # ── Final parity check ──
+        # Ensure aggregate inventory matches the new batch totals exactly
+        await InventoryService._recalculate_inventory_quantity(db, branch_id, drug_id)
 
         await db.flush()
         return adjustment, inventory

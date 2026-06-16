@@ -443,6 +443,7 @@ class BranchService:
         from app.models.inventory.branch_inventory import BranchInventory
         from app.models.inventory.inventory_model import Drug
         from app.models.sales.sales_model import Sale
+        from app.models.user.user_model import User
 
         # 1. Inventory stats
         # Total items and value
@@ -509,7 +510,7 @@ class BranchService:
             select(func.count(User.id))
             .where(
                 and_(
-                    User.organization_id == organization_id,
+                    User.organization_id == branch.organization_id,
                     User.is_active == True,
                     User.is_deleted == False,
                     User.assigned_branches.like(f'%{str(branch_id)}%')
