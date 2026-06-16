@@ -898,6 +898,15 @@ class InventoryService:
 
         update_data = batch_data.model_dump(exclude_unset=True)
 
+        # ── Pre-flight: Check remaining_quantity <= quantity ─────────────────
+        final_rem = update_data.get("remaining_quantity", batch.remaining_quantity)
+        final_total = update_data.get("quantity", batch.quantity)
+        if final_rem > final_total:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Remaining quantity ({final_rem}) cannot exceed initial total quantity ({final_total}).",
+            )
+
         # ── Pre-flight: Check uniqueness if batch_number is being changed ────
         new_batch_num = update_data.get("batch_number")
         if new_batch_num and new_batch_num != batch.batch_number:

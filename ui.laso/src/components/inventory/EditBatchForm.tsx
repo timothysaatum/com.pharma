@@ -13,6 +13,7 @@ const today = new Date().toISOString().split("T")[0];
 
 const editBatchSchema = z.object({
     batch_number: z.string().min(1, "Batch number is required").max(100),
+    quantity: z.coerce.number().int().min(0, "Total quantity cannot be negative"),
     remaining_quantity: z.coerce.number().int().min(0, "Quantity cannot be negative"),
     manufacturing_date: z.string().optional().or(z.literal("")),
     expiry_date: z
@@ -41,6 +42,7 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
         resolver: zodResolver(editBatchSchema) as Resolver<EditBatchFormValues>,
         defaultValues: {
             batch_number: batch.batch_number,
+            quantity: batch.quantity,
             remaining_quantity: batch.remaining_quantity,
             manufacturing_date: batch.manufacturing_date || "",
             expiry_date: batch.expiry_date,
@@ -72,6 +74,7 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
         try {
             const result = await inventoryApi.updateBatch(batch.id, {
                 batch_number: values.batch_number,
+                quantity: values.quantity,
                 remaining_quantity: values.remaining_quantity,
                 manufacturing_date: values.manufacturing_date || undefined,
                 expiry_date: values.expiry_date,
@@ -139,6 +142,15 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
                                     className={inputCls(!!errors.batch_number)} />
                                 {errors.batch_number && (
                                     <p className="text-xs text-red-500 mt-1">{errors.batch_number.message}</p>
+                                )}
+                            </div>
+
+                            <div>
+                                <label className={labelCls}>Total Quantity <span className="text-red-500">*</span></label>
+                                <input type="number" min="0" {...register("quantity")}
+                                    className={inputCls(!!errors.quantity)} />
+                                {errors.quantity && (
+                                    <p className="text-xs text-red-500 mt-1">{errors.quantity.message}</p>
                                 )}
                             </div>
 

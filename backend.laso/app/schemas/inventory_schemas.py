@@ -123,6 +123,7 @@ class DrugBatchCreate(DrugBatchBase):
 class DrugBatchUpdate(BaseSchema):
     """Schema for updating a drug batch"""
     batch_number: Optional[str] = Field(None, min_length=1, max_length=100)
+    quantity: Optional[int] = Field(None, ge=0, description="Initial quantity received")
     remaining_quantity: Optional[int] = Field(None, ge=0)
     manufacturing_date: Optional[date] = None
     expiry_date: Optional[date] = None
