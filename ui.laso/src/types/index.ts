@@ -580,6 +580,7 @@ export interface DrugBatchCreate {
 
 export interface DrugBatchUpdate {
     batch_number?: string;
+    quantity?: number;
     remaining_quantity?: number;
     manufacturing_date?: string | null;
     expiry_date?: string;
