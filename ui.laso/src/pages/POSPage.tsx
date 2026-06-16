@@ -373,9 +373,9 @@ export default function POSPage() {
                 </div>
 
                 <div className="flex items-center gap-4">
-                    <div className="text-right border-l border-slate-100 pl-4">
-                        <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Today's Sales</p>
-                        <p className="text-xl font-bold text-brand-600">{fmtGHS(todaySales)}</p>
+                    <div className="bg-brand-50 border border-brand-100 px-4 py-2 rounded-2xl text-right">
+                        <p className="text-[10px] font-bold text-brand-600 uppercase tracking-widest">Today's Sales</p>
+                        <p className="text-2xl font-black text-brand-700">{fmtGHS(todaySales)}</p>
                     </div>
                 </div>
             </div>
