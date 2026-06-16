@@ -16,6 +16,7 @@ import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { AddBatchForm } from "@/components/inventory/AddBatchForm";
+import { EditBatchForm } from "@/components/inventory/EditBatchForm";
 import { parseApiError } from "@/api/client";
 import { appEvents, useAppEvent } from "@/lib/events";
 import { withTimeout } from "@/lib/withTimeout";
@@ -64,6 +65,40 @@ function BatchViewerPanel({
     const [batches, setBatches] = useState<DrugBatch[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [editingBatch, setEditingBatch] = useState<DrugBatch | null>(null);
+
+    const load = useCallback(async () => {
+        let cancelled = false;
+        setLoading(true);
+        setError(null);
+        try {
+            const r = !navigator.onLine || !isBackendReachable()
+                ? await localRead.getBatchesForDrug(item.drug_id, {
+                    branch_id: branchId,
+                    include_expired: true,
+                    include_empty: true,
+                })
+                : await inventoryApi.getBatches(item.drug_id, {
+                    branch_id: branchId,
+                    include_expired: true,
+                    include_empty: true,
+                });
+            if (!cancelled) setBatches(r.items);
+        } catch (err) {
+            if (!cancelled && isOfflineError(err)) {
+                const r = await localRead.getBatchesForDrug(item.drug_id, {
+                    branch_id: branchId,
+                    include_expired: true,
+                    include_empty: true,
+                });
+                if (!cancelled) setBatches(r.items);
+                return;
+            }
+            if (!cancelled) setError(parseApiError(err));
+        } finally {
+            if (!cancelled) setLoading(false);
+        }
+    }, [item.drug_id, branchId]);
 
     useEffect(() => {
         let cancelled = false;
@@ -99,10 +134,15 @@ function BatchViewerPanel({
             }
         };
         load();
-        return () => { cancelled = true; };
-    }, [item.drug_id, branchId]);
+    }, [load]);
 
     const available = item.available_quantity ?? (item.quantity - item.reserved_quantity);
+
+    const handleEditSuccess = () => {
+        setEditingBatch(null);
+        load();
+        appEvents.emit("inventory:changed");
+    };
 
     return (
         <div className="flex flex-col h-full bg-white">
@@ -151,11 +191,20 @@ function BatchViewerPanel({
                                 ?? Math.floor((new Date(batch.expiry_date).getTime() - Date.now()) / 86_400_000);
                             const urgency = daysLeft <= 30 ? "red" : daysLeft <= 60 ? "amber" : "green";
                             return (
-                                <div key={batch.id} className={`px-5 py-3.5 ${urgency === "red" ? "bg-red-50/40" : ""}`}>
+                                <div key={batch.id} className={`px-5 py-3.5 group relative ${urgency === "red" ? "bg-red-50/40" : ""}`}>
                                     <div className="flex items-center justify-between gap-2 mb-2">
-                                        <span className="font-mono text-xs bg-slate-100 px-2 py-0.5 rounded font-medium text-ink">
-                                            {batch.batch_number}
-                                        </span>
+                                        <div className="flex items-center gap-2">
+                                            <span className="font-mono text-xs bg-slate-100 px-2 py-0.5 rounded font-medium text-ink">
+                                                {batch.batch_number}
+                                            </span>
+                                            <button
+                                                onClick={() => setEditingBatch(batch)}
+                                                className="p-1 rounded bg-slate-100 text-slate-400 hover:text-brand-600 hover:bg-brand-50 opacity-0 group-hover:opacity-100 transition-opacity"
+                                                title="Edit batch"
+                                            >
+                                                <ClipboardEdit className="w-3 h-3" />
+                                            </button>
+                                        </div>
                                         <span className={`text-xs font-bold px-2 py-0.5 rounded-full ${urgency === "red" ? "bg-red-100 text-red-700"
                                             : urgency === "amber" ? "bg-amber-100 text-amber-700"
                                                 : "bg-green-100 text-green-700"}`}>
@@ -201,6 +250,17 @@ function BatchViewerPanel({
                     </div>
                 )}
             </div>
+
+            <AnimatePresence>
+                {editingBatch && (
+                    <EditBatchForm
+                        batch={editingBatch}
+                        drugName={item.drug_name}
+                        onSuccess={handleEditSuccess}
+                        onCancel={() => setEditingBatch(null)}
+                    />
+                )}
+            </AnimatePresence>
         </div>
     );
 }

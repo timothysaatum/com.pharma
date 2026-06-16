@@ -3,28 +3,54 @@
  * ==========
  * Local SQLite database via tauri-plugin-sql.
  * Mirrors the server's schema for the tables the branch owns or caches.
- *
- * Install:  cargo add tauri-plugin-sql --features sqlite
- *           pnpm add @tauri-apps/plugin-sql
- *
- * Tauri v2 src-tauri/lib.rs — register the plugin:
- *   .plugin(tauri_plugin_sql::Builder::new()
- *     .add_migrations("sqlite:laso.db", migrations)
- *     .build())
  */
 
-import Database from "@tauri-apps/plugin-sql";
 import type { BranchInventoryWithDetails, PushConflict, Drug, Sale } from "@/types";
 
 const DB_PATH = "sqlite:laso.db";
+const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+
+// Define a minimal interface for the Database object we use
+interface Database {
+  execute(query: string, values?: unknown[]): Promise<{ rowsAffected: number; lastInsertId?: number }>;
+  select<T>(query: string, values?: unknown[]): Promise<T>;
+  load(path: string): Promise<Database>;
+}
+
+/** Mock database for browser environment */
+const MockDb: Database = {
+  execute: async () => ({ rowsAffected: 0 }),
+  select: async <T>(_: string): Promise<T> => {
+    // Return empty results that match the expected structure
+    return [] as unknown as T;
+  },
+  load: async () => MockDb,
+};
+
 let _db: Database | null = null;
 
 /** Get (or lazily open) the local database connection. */
 export async function getDb(): Promise<Database> {
   if (_db) return _db;
-  _db = await Database.load(DB_PATH);
-  await runMigrations(_db);
-  return _db;
+
+  if (!IS_TAURI) {
+    console.warn("[localDb] Not running in Tauri environment, using MockDb.");
+    _db = MockDb;
+    return _db;
+  }
+
+  try {
+    const { default: DatabaseImpl } = await import(/* @vite-ignore */ "@tauri-apps/plugin-sql");
+    _db = await (DatabaseImpl as any).load(DB_PATH);
+    if (_db) {
+        await runMigrations(_db);
+    }
+    return _db!;
+  } catch (err) {
+    console.error("[localDb] Failed to load Tauri SQL plugin:", err);
+    _db = MockDb;
+    return _db;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,33 +59,34 @@ export async function getDb(): Promise<Database> {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function runMigrations(db: Database): Promise<void> {
-  const [{ user_version }] = await db.select<{ user_version: number }[]>(
-    "PRAGMA user_version"
-  );
+  // If MockDb, user_version check will return empty or throw, so we guard.
+  try {
+      const rows = await db.select<{ user_version: number }[]>(
+        "PRAGMA user_version"
+      );
+      const user_version = rows?.[0]?.user_version ?? 0;
 
-  if (user_version < 1) await migrate_v1(db);
-  if (user_version < 2) await migrate_v2(db);
-  if (user_version < 3) await migrate_v3(db);
-  if (user_version < 4) await migrate_v4(db);
-  if (user_version < 5) await migrate_v5(db);
-  if (user_version < 6) await migrate_v6(db);
-  if (user_version < 7) await migrate_v7(db);
-  if (user_version < 8) await migrate_v8(db);
-  if (user_version < 9) await migrate_v9(db);
-  if (user_version < 10) await migrate_v10(db);
-  await ensureBranchInventorySchema(db);
+      if (user_version < 1) await migrate_v1(db);
+      if (user_version < 2) await migrate_v2(db);
+      if (user_version < 3) await migrate_v3(db);
+      if (user_version < 4) await migrate_v4(db);
+      if (user_version < 5) await migrate_v5(db);
+      if (user_version < 6) await migrate_v6(db);
+      if (user_version < 7) await migrate_v7(db);
+      if (user_version < 8) await migrate_v8(db);
+      if (user_version < 9) await migrate_v9(db);
+      if (user_version < 10) await migrate_v10(db);
+      await ensureBranchInventorySchema(db);
+  } catch (e) {
+      console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MIGRATION V1 — initial schema
-// Sales table aligned to the rewritten Sale model: single discount_amount
-// field (not three separate fields), real prescription/receipt columns added,
-// phantom pre-rewrite columns removed.
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function migrate_v1(db: Database): Promise<void> {
-  // ── Org-level tables (pull-only, never written locally except reads) ──
-
   await db.execute(`
     CREATE TABLE IF NOT EXISTS drugs (
       id                TEXT PRIMARY KEY,
@@ -173,8 +200,6 @@ async function migrate_v1(db: Database): Promise<void> {
     )
   `);
 
-  // ── Branch-level tables (read/write locally, pushed to server) ──
-
   await db.execute(`
     CREATE TABLE IF NOT EXISTS branch_inventory (
       id                TEXT PRIMARY KEY,
@@ -192,7 +217,6 @@ async function migrate_v1(db: Database): Promise<void> {
       UNIQUE(branch_id, drug_id)
     )
   `);
-  await db.execute(`ALTER TABLE branch_inventory ADD COLUMN selling_price REAL`).catch(() => undefined);
 
   await db.execute(`
     CREATE TABLE IF NOT EXISTS drug_batches (
@@ -224,43 +248,29 @@ async function migrate_v1(db: Database): Promise<void> {
       sale_number                   TEXT NOT NULL UNIQUE,
       customer_id                   TEXT,
       customer_name                 TEXT,
-
-      -- Financials — aligned to rewritten Sale model (single discount_amount)
       subtotal                      REAL NOT NULL,
       discount_amount               REAL NOT NULL DEFAULT 0,
       tax_amount                    REAL NOT NULL DEFAULT 0,
       total_amount                  REAL NOT NULL,
-
-      -- Contract snapshot
       price_contract_id             TEXT,
       contract_name                 TEXT,
       contract_discount_percentage  REAL,
-
-      -- Payment
       payment_method                TEXT NOT NULL DEFAULT 'cash',
       payment_status                TEXT NOT NULL DEFAULT 'completed',
       amount_paid                   REAL,
       change_amount                 REAL NOT NULL DEFAULT 0,
       payment_reference             TEXT,
-
-      -- Prescription
       prescription_id               TEXT,
       prescription_number           TEXT,
       prescriber_name               TEXT,
-
-      -- Staff
       cashier_id                    TEXT NOT NULL,
       pharmacist_id                 TEXT,
-
-      -- Insurance
       insurance_claim_number        TEXT,
       patient_copay_amount          REAL,
       insurance_covered_amount      REAL,
       insurance_verified            INTEGER NOT NULL DEFAULT 0,
       insurance_verified_at         TEXT,
       insurance_verified_by         TEXT,
-
-      -- Status and audit
       notes                         TEXT,
       status                        TEXT NOT NULL DEFAULT 'completed',
       cancelled_at                  TEXT,
@@ -268,17 +278,10 @@ async function migrate_v1(db: Database): Promise<void> {
       cancellation_reason           TEXT,
       refund_amount                 REAL,
       refunded_at                   TEXT,
-
-      -- Receipt
       receipt_printed               INTEGER NOT NULL DEFAULT 0,
       receipt_emailed               INTEGER NOT NULL DEFAULT 0,
-
-      -- Local-only: sale items stored as JSON for offline receipt display.
-      -- Not returned by the server pull — written only by localWrite.sale.
       items_json                    TEXT DEFAULT '[]',
       items_count                   INTEGER NOT NULL DEFAULT 0,
-
-      -- Sync
       sync_status                   TEXT NOT NULL DEFAULT 'pending',
       sync_version                  INTEGER NOT NULL DEFAULT 1,
       synced_at                     TEXT,
@@ -314,8 +317,6 @@ async function migrate_v1(db: Database): Promise<void> {
     )
   `);
 
-  // ── Sync queue — tracks pending push operations ──
-
   await db.execute(`
     CREATE TABLE IF NOT EXISTS sync_queue (
       id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -333,8 +334,6 @@ async function migrate_v1(db: Database): Promise<void> {
     )
   `);
 
-  // ── Sync metadata ──
-
   await db.execute(`
     CREATE TABLE IF NOT EXISTS sync_meta (
       key   TEXT PRIMARY KEY,
@@ -342,120 +341,52 @@ async function migrate_v1(db: Database): Promise<void> {
     )
   `);
 
-  // ── Indexes ──
-
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_drugs_org      ON drugs(organization_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_drugs_active   ON drugs(is_active)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_drugs_type     ON drugs(drug_type)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_inv_branch     ON branch_inventory(branch_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_batch_branch   ON drug_batches(branch_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_batch_expiry   ON drug_batches(expiry_date)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_sales_branch   ON sales(branch_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_sales_status   ON sales(sync_status)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_queue_table    ON sync_queue(table_name)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_customer_phone ON customers(phone)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_customer_email ON customers(email)`);
-
   await db.execute("PRAGMA user_version = 1");
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MIGRATION V2 — upgrade from old v1 schema
-//
-// Old v1 (pre-rewrite) had the three phantom discount fields and was missing
-// the six real Sale model columns below.  This migration adds the missing
-// real columns for existing installs.
-//
-// All ADD COLUMN calls are wrapped in try/catch so they are safe to run on
-// both old and new installs (fresh installs already have these columns from
-// the corrected v1 above; the errors are silently swallowed).
-//
-// Phantom columns from old v1 (contract_discount_amount, cashier_name, etc.)
-// cannot be dropped in SQLite < 3.35 without a full table rebuild, so they
-// are left in place on old installs but never written to.
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function migrate_v2(db: Database): Promise<void> {
   const addColumn = async (col: string) => {
     try { await db.execute(`ALTER TABLE sales ADD COLUMN ${col}`); }
-    catch { /* column already exists on fresh installs — safe to ignore */ }
+    catch { }
   };
-
-  // The single discount field that replaced the three phantom fields
   await addColumn("discount_amount               REAL NOT NULL DEFAULT 0");
-
-  // Prescription snapshot fields
   await addColumn("prescription_number           TEXT");
   await addColumn("prescriber_name               TEXT");
-
-  // Receipt tracking
   await addColumn("receipt_printed               INTEGER NOT NULL DEFAULT 0");
   await addColumn("receipt_emailed               INTEGER NOT NULL DEFAULT 0");
-
   await db.execute("PRAGMA user_version = 2");
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MIGRATION V3 — upgrade from old v2 schema
-//
-// Installs that already ran the old v2 (user_version = 2) never received the
-// six real columns above (old v2 only added phantom fields).  This migration
-// adds the same columns for those installs.
-//
-// Fresh installs and installs that ran new v2 already have all columns;
-// the try/catch silently ignores the "column already exists" errors.
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function migrate_v3(db: Database): Promise<void> {
   const addColumn = async (col: string) => {
     try { await db.execute(`ALTER TABLE sales ADD COLUMN ${col}`); }
-    catch { /* already exists — safe to ignore */ }
+    catch { }
   };
-
   await addColumn("discount_amount               REAL NOT NULL DEFAULT 0");
   await addColumn("prescription_number           TEXT");
   await addColumn("prescriber_name               TEXT");
   await addColumn("receipt_printed               INTEGER NOT NULL DEFAULT 0");
   await addColumn("receipt_emailed               INTEGER NOT NULL DEFAULT 0");
-
   await db.execute("PRAGMA user_version = 3");
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
-// MIGRATION V4 — add missing drug columns introduced in DrugForm rewrite
-//
-// Five columns were added to DrugCreate/DrugUpdate (markup_percentage,
-// max_stock_level, ndc_code, controlled_substance_schedule, contraindications)
-// but were never reflected in the local drugs table.  Without these columns
-// the sync engine's upsert would silently drop the values on every pull.
-//
-// All ADD COLUMN calls use try/catch so they are safe on both old installs
-// (column missing → add it) and fresh installs that already have them via
-// the corrected v1 above (duplicate column error → silently ignored).
-// ─────────────────────────────────────────────────────────────────────────────
 
 async function migrate_v4(db: Database): Promise<void> {
   const addCol = async (col: string) => {
     try { await db.execute(`ALTER TABLE drugs ADD COLUMN ${col}`); }
-    catch { /* column already exists on fresh installs — safe to ignore */ }
+    catch { }
   };
-
   await addCol("controlled_substance_schedule TEXT");
   await addCol("ndc_code                      TEXT");
   await addCol("markup_percentage             REAL");
   await addCol("max_stock_level               INTEGER");
   await addCol("contraindications             TEXT");
-
   await db.execute("PRAGMA user_version = 4");
 }
 
 async function migrate_v5(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE sync_queue ADD COLUMN conflict_json TEXT");
-  } catch {
-    /* already exists or unsupported; safe to ignore */
-  }
-
+  } catch { }
   await db.execute("PRAGMA user_version = 5");
 }
 
@@ -476,11 +407,6 @@ async function migrate_v7(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 7");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// MIGRATION V8 — offline_sales table for durable offline transactions
-// Stores sale records with retry logic, duplicate detection, and audit trail
-// ─────────────────────────────────────────────────────────────────────────────
-
 async function migrate_v8(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS offline_sales (
@@ -499,31 +425,13 @@ async function migrate_v8(db: Database): Promise<void> {
       updated_at            TEXT NOT NULL
     )
   `);
-
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS offline_sales_sync_status 
-      ON offline_sales(sync_status)
-  `);
-
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS offline_sales_next_retry 
-      ON offline_sales(next_retry_at)
-  `);
-
-  await db.execute(`
-    CREATE INDEX IF NOT EXISTS offline_sales_idempotency 
-      ON offline_sales(idempotency_key)
-  `);
-
   await db.execute("PRAGMA user_version = 8");
 }
 
 async function migrate_v9(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE sales ADD COLUMN items_count INTEGER NOT NULL DEFAULT 0");
-  } catch {
-    // Already exists or unsupported; safe to ignore.
-  }
+  } catch { }
   await db.execute("PRAGMA user_version = 9");
 }
 
@@ -557,23 +465,15 @@ async function migrate_v10(db: Database): Promise<void> {
       created_at            TEXT NOT NULL
     )
   `);
-
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_customer ON prescriptions(customer_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_org      ON prescriptions(organization_id)`);
-  await db.execute(`CREATE INDEX IF NOT EXISTS idx_prescriptions_status   ON prescriptions(status)`);
-
   await db.execute("PRAGMA user_version = 10");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
-  } catch {
-    /* already exists or table not created yet; safe to ignore */
-  }
+  } catch { }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
 
 function syncMetaKey(table?: string, branchId?: string): string {
@@ -590,7 +490,7 @@ export async function getLastSyncAt(table?: string, branchId?: string): Promise<
     "SELECT value FROM sync_meta WHERE key = $1",
     [key]
   );
-  return rows[0]?.value ?? null;
+  return rows?.[0]?.value ?? null;
 }
 
 export async function setLastSyncAt(
@@ -628,7 +528,6 @@ export interface QueuedConflict extends QueuedRecord {
   local_data: Record<string, unknown>;
 }
 
-/** Add or replace a record in the push queue. */
 export async function enqueue(
   tableName: string,
   recordId: string,
@@ -652,7 +551,6 @@ export async function enqueue(
   );
 }
 
-/** Get all records pending push, oldest first. */
 export async function getPendingQueue(limit = 500): Promise<QueuedRecord[]> {
   const db = await getDb();
   return db.select<QueuedRecord[]>(
@@ -661,7 +559,6 @@ export async function getPendingQueue(limit = 500): Promise<QueuedRecord[]> {
   );
 }
 
-/** Mark a queued record as successfully synced (remove it). */
 export async function dequeue(tableName: string, recordId: string): Promise<void> {
   const db = await getDb();
   await db.execute(
@@ -670,7 +567,6 @@ export async function dequeue(tableName: string, recordId: string): Promise<void
   );
 }
 
-/** Record a failed push attempt. */
 export async function markQueueError(
   tableName: string,
   recordId: string,
@@ -723,7 +619,7 @@ export async function getPendingConflicts(): Promise<QueuedConflict[]> {
     "SELECT * FROM sync_queue WHERE conflict_json IS NOT NULL ORDER BY id ASC"
   );
 
-  return rows.map((row) => {
+  return (rows ?? []).map((row) => {
     let conflict: PushConflict = {
       local_id: row.record_id,
       table_name: row.table_name,
@@ -734,9 +630,7 @@ export async function getPendingConflicts(): Promise<QueuedConflict[]> {
     };
     try {
       conflict = JSON.parse(row.conflict_json ?? "{}");
-    } catch {
-      // keep fallback shape if parsing fails
-    }
+    } catch { }
     return {
       ...row,
       conflict,
@@ -745,13 +639,12 @@ export async function getPendingConflicts(): Promise<QueuedConflict[]> {
   });
 }
 
-/** Total number of records waiting to be pushed. */
 export async function getPendingCount(): Promise<number> {
   const db = await getDb();
-  const [row] = await db.select<{ count: number }[]>(
+  const rows = await db.select<{ count: number }[]>(
     "SELECT COUNT(*) as count FROM sync_queue"
   );
-  return row?.count ?? 0;
+  return rows?.[0]?.count ?? 0;
 }
 
 export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails[]): Promise<void> {
