@@ -146,18 +146,18 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
                             </div>
 
                             <div>
-                                <label className={labelCls}>Total Quantity <span className="text-red-500">*</span></label>
-                                <input type="number" min="0" {...register("quantity")}
-                                    className={inputCls(!!errors.quantity)} />
+                                <label className={labelCls}>Total Quantity</label>
+                                <input type="number" readOnly {...register("quantity")}
+                                    className={`${inputCls(!!errors.quantity)} bg-slate-100 cursor-not-allowed text-slate-500`} />
                                 {errors.quantity && (
                                     <p className="text-xs text-red-500 mt-1">{errors.quantity.message}</p>
                                 )}
                             </div>
 
                             <div>
-                                <label className={labelCls}>Remaining Qty <span className="text-red-500">*</span></label>
-                                <input type="number" min="0" {...register("remaining_quantity")}
-                                    className={inputCls(!!errors.remaining_quantity)} />
+                                <label className={labelCls}>Remaining Qty</label>
+                                <input type="number" readOnly {...register("remaining_quantity")}
+                                    className={`${inputCls(!!errors.remaining_quantity)} bg-slate-100 cursor-not-allowed text-slate-500`} />
                                 {errors.remaining_quantity && (
                                     <p className="text-xs text-red-500 mt-1">{errors.remaining_quantity.message}</p>
                                 )}

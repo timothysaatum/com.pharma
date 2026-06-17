@@ -323,6 +323,39 @@ async def create_prescription(
     )
 
 
+@router.delete(
+    "/{prescription_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_permission("manage_prescriptions"))]
+)
+async def delete_prescription(
+    prescription_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Delete a prescription.
+
+    **Permissions:** manage_prescriptions
+    """
+    res = await db.execute(
+        select(Prescription).where(
+            Prescription.id == prescription_id,
+            Prescription.organization_id == current_user.organization_id,
+        )
+    )
+    prescription = res.scalar_one_or_none()
+    if not prescription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found"
+        )
+
+    await db.delete(prescription)
+    await db.commit()
+    return None
+
+
 @router.get(
     "/",
     response_model=PaginatedResponse[PrescriptionResponse],

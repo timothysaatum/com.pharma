@@ -26,6 +26,7 @@ from .endpoints.users import router as user_router
 from .endpoints.reports_endpoints import router as reports_router
 from .endpoints.export_endpoints import router as export_router
 from .endpoints.insurance_provider_endpoints import router as insurance_provider_router
+from .endpoints.audit_endpoints import router as audit_router
 
 
 router.include_router(auth_router, tags=["Authentication"])
@@ -46,5 +47,6 @@ router.include_router(user_router, tags=["User Management"])
 router.include_router(reports_router, tags=["Reports"])
 router.include_router(export_router, tags=["Export"])
 router.include_router(insurance_provider_router, tags=["Insurance Providers"])
+router.include_router(audit_router, tags=["Audit Logs"])
 
 __all__ = ["router"]
