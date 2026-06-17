@@ -223,6 +223,22 @@ class ExpiringBatch(BaseSchema):
     branch_id: uuid.UUID
 
 
+class AuditLogResponse(BaseSchema):
+    """Audit log entry response"""
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    user_id: Optional[uuid.UUID] = None
+    user_full_name: Optional[str] = None
+    action: str
+    entity_type: Optional[str] = None
+    entity_id: Optional[uuid.UUID] = None
+    changes: Optional[Dict[str, Any]] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+    context_metadata: Optional[Dict[str, Any]] = None
+    created_at: datetime
+
+
 # ============================================
 # Error Response Schemas
 # ============================================

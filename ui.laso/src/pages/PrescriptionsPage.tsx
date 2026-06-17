@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  AlertTriangle, CheckCircle2, Clock, FileText, Loader2,
+  AlertTriangle, CheckCircle2, Clock, Edit2, FileText, Loader2,
   Plus, RefreshCw, Search, Trash2, X, XCircle,
 } from "lucide-react";
 import { customersApi, type CustomerQuickLookup } from "@/api/customers";
@@ -75,6 +75,7 @@ export default function PrescriptionsPage() {
   const [error, setError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingId, setEditingId] = useState<string | null>(null);
   const [customerSearch, setCustomerSearch] = useState("");
   const [customerMatches, setCustomerMatches] = useState<CustomerQuickLookup[]>([]);
   const [customerSearching, setCustomerSearching] = useState(false);
@@ -156,12 +157,59 @@ export default function PrescriptionsPage() {
     setError(null);
     try {
       const updated = await prescriptionsApi.update(rx.id, { status: nextStatus });
-      setItems((current) => current.map((item) => item.id === rx.id ? { ...item, ...updated } : item));
+      setItems((current) =>
+        current.map((item) => (item.id === rx.id ? { ...item, ...updated } : item))
+      );
     } catch (err) {
       setError(parseApiError(err));
     } finally {
       setUpdatingId(null);
     }
+  };
+
+  const deletePrescription = async (id: string) => {
+    if (!confirm("Are you sure you want to delete this prescription?")) return;
+    setUpdatingId(id);
+    try {
+      await prescriptionsApi.delete(id);
+      setItems((current) => current.filter((item) => item.id !== id));
+    } catch (err) {
+      setError(parseApiError(err));
+    } finally {
+      setUpdatingId(null);
+    }
+  };
+
+  const startEdit = (rx: PrescriptionRow) => {
+    setEditingId(rx.id);
+    setSelectedCustomer({
+      id: rx.customer_id,
+      full_name: rx.customer_name ?? "Customer",
+      phone: null,
+      email: null,
+      customer_type: "standard",
+      loyalty_points: 0,
+      loyalty_tier: "bronze",
+      has_insurance: false,
+      insurance_provider_name: null,
+      preferred_contract_name: null,
+      eligible_for_senior_discount: false,
+    });
+    setPrescriptionNumber(rx.prescription_number);
+    setPrescriberName(rx.prescriber_name);
+    setPrescriberLicense(rx.prescriber_license);
+    setPrescriberPhone(rx.prescriber_phone ?? "");
+    setIssueDate(rx.issue_date);
+    setExpiryDate(rx.expiry_date);
+    setRefillsAllowed(rx.refills_allowed);
+    setNotes(rx.notes ?? "");
+    setMedications(
+      (rx.medications as any[]).map((m, i) => ({
+        ...m,
+        _key: `med-${Date.now()}-${i}`,
+      }))
+    );
+    setCreateOpen(true);
   };
 
   useEffect(() => {
@@ -285,6 +333,7 @@ export default function PrescriptionsPage() {
   }, [createOpen, drugSearchesKey]);
 
   const resetCreateForm = () => {
+    setEditingId(null);
     setSelectedCustomer(null);
     setCustomerSearch("");
     setCustomerMatches([]);
@@ -296,7 +345,17 @@ export default function PrescriptionsPage() {
     setExpiryDate(addDays(30));
     setRefillsAllowed(0);
     setNotes("");
-    setMedications([{ drug_id: "", drug_name: "", dosage: "", frequency: "", duration: "", quantity: 1, _key: `med-${Date.now()}-0` }]);
+    setMedications([
+      {
+        drug_id: "",
+        drug_name: "",
+        dosage: "",
+        frequency: "",
+        duration: "",
+        quantity: 1,
+        _key: `med-${Date.now()}-0`,
+      },
+    ]);
     setDrugSearches({});
     setDrugMatches({});
     setDrugSearching({});
@@ -331,7 +390,7 @@ export default function PrescriptionsPage() {
     });
   };
 
-  const createPrescription = async () => {
+  const savePrescription = async () => {
     setCreateError(null);
     if (!selectedCustomer) {
       setCreateError("Select a registered customer.");
@@ -341,8 +400,18 @@ export default function PrescriptionsPage() {
       setCreateError("Prescription number, prescriber name, and license are required.");
       return;
     }
+
+    const cleanedMedications = medications.map((m) => ({
+      drug_id: m.drug_id,
+      drug_name: m.drug_name,
+      dosage: m.dosage,
+      frequency: m.frequency,
+      duration: m.duration,
+      quantity: m.quantity,
+    }));
+
     if (
-      medications.some(
+      cleanedMedications.some(
         (med) =>
           !med.drug_id.trim() ||
           !med.drug_name.trim() ||
@@ -359,7 +428,6 @@ export default function PrescriptionsPage() {
     setCreating(true);
     try {
       const data = {
-        id: crypto.randomUUID(), // Ensure UUID for offline create
         prescription_number: prescriptionNumber.trim(),
         customer_id: selectedCustomer.id,
         prescriber_name: prescriberName.trim(),
@@ -367,37 +435,47 @@ export default function PrescriptionsPage() {
         prescriber_phone: prescriberPhone.trim() || null,
         issue_date: issueDate,
         expiry_date: expiryDate,
-        medications: medications.map(({ _key, ...med }) => med),
+        medications: cleanedMedications,
         refills_allowed: refillsAllowed,
         notes: notes.trim() || null,
       };
 
-      const now = new Date().toISOString();
-      const localPrescriptionData: Omit<Prescription, "sync_status" | "sync_version"> & { id: string } = {
-        ...data,
-        organization_id: "",
-        prescriber_address: null,
-        diagnosis: null,
-        special_instructions: null,
-        refills_remaining: refillsAllowed,
-        last_refill_date: null,
-        status: "active",
-        verified_by: null,
-        verified_at: null,
-        synced_at: null,
-        created_at: now,
-        updated_at: now,
-      };
-
-      if (!navigator.onLine || !isBackendReachable()) {
-        await writeLocal.prescription(localPrescriptionData);
+      if (editingId) {
+        const updated = await prescriptionsApi.update(editingId, data);
+        setItems((current) =>
+          current.map((item) => (item.id === editingId ? { ...item, ...updated } : item))
+        );
       } else {
-        try {
-          const saved = await prescriptionsApi.create(data);
-          await writeLocal.cachePrescriptions([saved]);
-        } catch (err) {
-          if (!isOfflineError(err)) throw err;
+        const id = crypto.randomUUID();
+        const now = new Date().toISOString();
+        const localPrescriptionData: Omit<Prescription, "sync_status" | "sync_version"> &
+          { id: string } = {
+          ...data,
+          id,
+          organization_id: "",
+          prescriber_address: null,
+          diagnosis: null,
+          special_instructions: null,
+          refills_remaining: refillsAllowed,
+          last_refill_date: null,
+          status: "active",
+          verified_by: null,
+          verified_at: null,
+          synced_at: null,
+          created_at: now,
+          updated_at: now,
+        };
+
+        if (!navigator.onLine || !isBackendReachable()) {
           await writeLocal.prescription(localPrescriptionData);
+        } else {
+          try {
+            const saved = await prescriptionsApi.create(data as any);
+            await writeLocal.cachePrescriptions([saved]);
+          } catch (err) {
+            if (!isOfflineError(err)) throw err;
+            await writeLocal.prescription(localPrescriptionData);
+          }
         }
       }
       resetCreateForm();
@@ -419,7 +497,10 @@ export default function PrescriptionsPage() {
         </div>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setCreateOpen(true)}
+            onClick={() => {
+              resetCreateForm();
+              setCreateOpen(true);
+            }}
             className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 text-sm font-semibold text-white hover:bg-brand-700"
           >
             <Plus className="w-4 h-4" />
@@ -523,16 +604,32 @@ export default function PrescriptionsPage() {
                 </td>
                 <td className="px-6 py-4"><StatusBadge status={rx.status} /></td>
                 <td className="px-6 py-4 text-right">
-                  <select
-                    value={rx.status}
-                    disabled={updatingId === rx.id}
-                    onChange={(event) => void updateStatus(rx, event.target.value as PrescriptionStatus)}
-                    className="h-8 px-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold"
-                  >
-                    {STATUS_OPTIONS.filter((option) => option.value).map((option) => (
-                      <option key={option.value} value={option.value}>{option.label}</option>
-                    ))}
-                  </select>
+                  <div className="flex items-center justify-end gap-2">
+                    <button
+                      onClick={() => startEdit(rx)}
+                      className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-brand-600 hover:bg-brand-50"
+                      title="Edit prescription"
+                    >
+                      <Edit2 className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      onClick={() => void deletePrescription(rx.id)}
+                      className="p-1.5 rounded-lg border border-slate-200 text-slate-400 hover:text-red-600 hover:bg-red-50"
+                      title="Delete prescription"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                    <select
+                      value={rx.status}
+                      disabled={updatingId === rx.id}
+                      onChange={(event) => void updateStatus(rx, event.target.value as PrescriptionStatus)}
+                      className="h-8 px-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold"
+                    >
+                      {STATUS_OPTIONS.filter((option) => option.value).map((option) => (
+                        <option key={option.value} value={option.value}>{option.label}</option>
+                      ))}
+                    </select>
+                  </div>
                 </td>
               </tr>
             ))}
@@ -546,7 +643,7 @@ export default function PrescriptionsPage() {
             <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between">
               <div>
                 <p className="text-xs font-bold text-slate-400 uppercase tracking-widest">Prescription</p>
-                <h2 className="text-lg font-bold text-ink">New Prescription</h2>
+                <h2 className="text-lg font-bold text-ink">{editingId ? "Edit Prescription" : "New Prescription"}</h2>
               </div>
               <button
                 onClick={() => {
@@ -730,12 +827,12 @@ export default function PrescriptionsPage() {
                 Cancel
               </button>
               <button
-                onClick={() => void createPrescription()}
+                onClick={() => void savePrescription()}
                 disabled={creating}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-brand-600 text-sm font-semibold text-white hover:bg-brand-700 disabled:opacity-60"
               >
                 {creating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                Save Prescription
+                {editingId ? "Update Prescription" : "Save Prescription"}
               </button>
             </div>
           </div>

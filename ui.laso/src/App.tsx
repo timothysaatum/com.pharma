@@ -16,6 +16,7 @@ import SettingsPage from "@/pages/SettingsPage";
 import UsersPage from "@/pages/UsersPage";
 import ReportsPage from "@/pages/ReportsPage";
 import AdminPage from "@/pages/AdminPage";
+import AuditLogPage from "@/pages/AuditLogPage";
 import { getHomePathForRole } from "@/lib/routes";
 
 const queryClient = new QueryClient({
@@ -280,6 +281,16 @@ function AppRoutes() {
             <RequireAuth>
               <RequireManager>
                 <AppShell><UsersPage /></AppShell>
+              </RequireManager>
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/audit-logs"
+          element={
+            <RequireAuth>
+              <RequireManager>
+                <AppShell><AuditLogPage /></AppShell>
               </RequireManager>
             </RequireAuth>
           }

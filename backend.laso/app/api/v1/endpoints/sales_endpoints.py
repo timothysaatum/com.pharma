@@ -238,7 +238,7 @@ async def get_sale(
 @router.post(
     "/{sale_id}/refund",
     response_model=RefundSaleResponse,
-    dependencies=[Depends(require_permission("process_refunds"))]
+    dependencies=[Depends(require_permission("process_sales"))]
 )
 async def refund_sale(
     sale_id: uuid.UUID,

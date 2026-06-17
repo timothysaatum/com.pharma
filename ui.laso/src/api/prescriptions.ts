@@ -1,4 +1,4 @@
-import { get, patch, post } from "./client";
+import { del, get, patch, post } from "./client";
 import type { PaginatedResponse, Prescription, PrescriptionMedication } from "@/types";
 
 export interface PrescriptionSearchItem {
@@ -93,6 +93,10 @@ export const prescriptionsApi = {
         data: PrescriptionUpdate
     ): Promise<Prescription> {
         return patch<Prescription>(`/prescriptions/${id}`, data);
+    },
+
+    delete(id: string): Promise<void> {
+        return del<void>(`/prescriptions/${id}`);
     },
 
     /**

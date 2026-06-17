@@ -827,16 +827,8 @@ function SaleDetailPanel({
 
 export default function SalesHistoryPage() {
     const { user, activeBranchId } = useAuthStore();
-    // Roles that have process_refunds by default
-    const REFUND_ROLES = ["manager", "admin", "super_admin"];
-    // user.permissions can be null/undefined when the API omits the field
-    // (e.g. during an active session whose token predates the permissions column).
-    // Optional chaining + fallback arrays prevent a crash before the first render.
-    const canRefund = user
-        ? REFUND_ROLES.includes(user.role) ||
-        ((user.permissions?.additional ?? []).includes("process_refunds") &&
-            !(user.permissions?.denied ?? []).includes("process_refunds"))
-        : false;
+    // All users who can see this page (must have process_sales) can now process refunds
+    const canRefund = !!user;
 
     // ── List state ────────────────────────────────────────────
     const [sales, setSales] = useState<Sale[]>([]);

@@ -36,7 +36,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -390,6 +390,9 @@ class InventoryService:
             )
             inventory.mark_as_pending_sync()
             db.add(inventory)
+
+        # Resolve any existing low stock alerts if quantity is now healthy
+        await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, quantity)
 
         await db.commit()
         await db.refresh(inventory)
@@ -1418,6 +1421,42 @@ class InventoryService:
     # =========================================================================
 
     @staticmethod
+    async def _resolve_inventory_alerts(
+        db: AsyncSession,
+        branch_id: uuid.UUID,
+        drug_id: uuid.UUID,
+        current_quantity: int,
+    ) -> None:
+        """
+        Resolve any unresolved low_stock or out_of_stock alerts if the
+        current quantity has risen above the drug's reorder level.
+        """
+        from app.models.system_md.sys_models import SystemAlert
+
+        # Fetch drug reorder level
+        reorder_level = await db.scalar(
+            select(Drug.reorder_level).where(Drug.id == drug_id)
+        )
+        if reorder_level is None:
+            return
+
+        if current_quantity > reorder_level:
+            await db.execute(
+                update(SystemAlert)
+                .where(
+                    SystemAlert.branch_id == branch_id,
+                    SystemAlert.drug_id == drug_id,
+                    SystemAlert.alert_type.in_(["low_stock", "out_of_stock"]),
+                    SystemAlert.is_resolved == False,
+                )
+                .values(
+                    is_resolved=True,
+                    resolved_at=datetime.now(timezone.utc),
+                    resolution_notes=f"Stock replenished to {current_quantity} (Reorder level: {reorder_level})"
+                )
+            )
+
+    @staticmethod
     async def _recalculate_inventory_quantity(
         db: AsyncSession,
         branch_id: uuid.UUID,
@@ -1448,6 +1487,9 @@ class InventoryService:
             inventory.quantity = new_qty
             inventory.updated_at = datetime.now(timezone.utc)
             inventory.mark_as_pending_sync()
+
+            # Resolve any existing alerts if the new quantity is healthy
+            await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, new_qty)
 
         return new_qty
 

@@ -43,6 +43,7 @@ from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import Sale, SaleItem
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import User
+from app.services.inventory.inventory_service import InventoryService
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
     RefundSaleRequest,
@@ -878,11 +879,6 @@ class SalesService:
          9  Append AuditLog (flush only).
         10  Return RefundSaleResponse.
         """
-        if not user.has_permission("process_refunds"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="You do not have permission to process refunds.",
-            )
 
         async with db.begin_nested():
             sale_res = await db.execute(
@@ -1008,6 +1004,13 @@ class SalesService:
                         created_at=datetime.now(timezone.utc),
                         updated_at=datetime.now(timezone.utc),
                     )
+                )
+
+                # Recalculate and resolve alerts
+                await InventoryService._recalculate_inventory_quantity(
+                    db=db,
+                    branch_id=sale.branch_id,
+                    drug_id=sale_item.drug_id,
                 )
 
             # Reverse loyalty points + recalculate tier

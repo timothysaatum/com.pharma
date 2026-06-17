@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import {
     ShoppingCart, Users, BarChart2, FileText,
-    LogOut, Building2, Menu, X,
+    LogOut, Building2, Menu, X, Activity,
     Receipt, Settings, UserCog, Cog, ChevronDown, Check,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
@@ -49,6 +49,12 @@ export const NAV_ITEMS: NavItem[] = [
         icon: Settings,
         label: "Settings",
         roles: ["admin", "super_admin"],
+    },
+    {
+        to: "/audit-logs",
+        icon: Activity,
+        label: "Audit Logs",
+        roles: ["admin", "manager", "super_admin"],
     },
 ];
 
