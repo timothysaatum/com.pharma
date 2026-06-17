@@ -22,7 +22,7 @@ router = APIRouter(prefix="/audit", tags=["Audit Logs"])
 @router.get(
     "/",
     response_model=PaginatedResponse[AuditLogResponse],
-    dependencies=[Depends(require_role(["admin", "manager", "super_admin"]))]
+    dependencies=[Depends(require_role("admin", "manager", "super_admin"))]
 )
 async def list_audit_logs(
     pagination: PaginationParams = Depends(),
