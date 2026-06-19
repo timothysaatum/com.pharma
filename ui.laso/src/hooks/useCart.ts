@@ -322,26 +322,42 @@ function validateCart(
         errors.push({ field: "contract", message: "Select a price contract" });
     }
 
-    // Check if customer is required: only for insurance/corporate or prescription items
-    const isInsurancePayment = state.paymentMethod === "insurance" || state.contract?.type === "insurance" || state.contract?.type === "corporate";
+    // Check if customer is required: only for insurance/corporate/wholesale or prescription items
+    const contractRequiresCustomer = state.contract?.type === "insurance" || state.contract?.type === "corporate" || state.contract?.type === "wholesale";
     const hasRxItems = state.items.some((i) => i.requiresPrescription);
     
-    if ((isInsurancePayment || hasRxItems) && !state.customerId && !state.customerName.trim()) {
+    if ((contractRequiresCustomer || hasRxItems || state.paymentMethod === "insurance") && !state.customerId && !state.customerName.trim()) {
         errors.push({
             field: "customer",
             message: "Enter customer name or select a registered customer",
         });
     }
 
-    // Insurance/Corporate validations
-    if (isInsurancePayment) {
+    // Registered customer requirement for specific contracts
+    if (contractRequiresCustomer && !state.customerId) {
+        let msg = "Registered customer required";
+        if (state.contract?.type === "corporate") msg = "Registered customer required for corporate contract";
+        else if (state.contract?.type === "wholesale") msg = "Registered customer required for wholesale contract";
+        else msg = "Registered customer required for insurance payment";
+
+        errors.push({
+            field: "customer",
+            message: msg,
+        });
+    }
+
+    // Insurance/Corporate specific validations (verification and claim number)
+    const isInsuranceOrCorp = state.contract?.type === "insurance" || state.contract?.type === "corporate";
+    if (isInsuranceOrCorp || state.paymentMethod === "insurance") {
         const isCorp = state.contract?.type === "corporate";
-        if (!state.customerId) {
-            errors.push({
+
+        if (!state.customerId && state.paymentMethod === "insurance") {
+             errors.push({
                 field: "customer",
-                message: isCorp ? "Registered customer required for corporate contract" : "Registered customer required for insurance payment",
+                message: "Registered customer required for insurance payment",
             });
         }
+
         if (!state.insuranceVerified) {
             errors.push({
                 field: "insurance",

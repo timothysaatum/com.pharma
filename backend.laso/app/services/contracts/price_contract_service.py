@@ -239,10 +239,12 @@ class PriceContractService:
                     PriceContract.insurance_provider_id == filters.insurance_provider_id
                 )
             if filters.branch_id:
+                # Type-safe check that handles both list objects and JSON strings
                 query = query.where(
                     or_(
                         PriceContract.applies_to_all_branches == True,
                         PriceContract.applicable_branch_ids.contains([filters.branch_id]),
+                        PriceContract.applicable_branch_ids.like(f'%"{str(filters.branch_id)}"%')
                     )
                 )
             if filters.search:
@@ -795,11 +797,14 @@ class PriceContractService:
                 or_(
                     PriceContract.applies_to_all_branches == True,
                     PriceContract.applicable_branch_ids.contains([branch_id]),
+                    PriceContract.applicable_branch_ids.like(f'%"{str(branch_id)}"%')
                 ),
                 # Role filter in SQL: empty allowed_user_roles means any role
                 or_(
                     PriceContract.allowed_user_roles == [],
+                    PriceContract.allowed_user_roles == "[]",
                     PriceContract.allowed_user_roles.contains([user.role]),
+                    PriceContract.allowed_user_roles.like(f'%"{user.role}"%')
                 ),
             )
             .order_by(

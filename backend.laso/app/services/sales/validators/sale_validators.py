@@ -200,7 +200,8 @@ async def load_and_validate_contract(
 
     # Branch applicability
     if not contract.applies_to_all_branches:
-        if branch_id not in (contract.applicable_branch_ids or []):
+        branch_id_str = str(branch_id)
+        if branch_id_str not in [str(bid) for bid in (contract.applicable_branch_ids or [])]:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
