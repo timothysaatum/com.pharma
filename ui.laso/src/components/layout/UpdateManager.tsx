@@ -1,0 +1,54 @@
+import { useEffect, useRef } from "react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { toast } from "sonner";
+
+export function UpdateManager() {
+    const checkAttempted = useRef(false);
+
+    useEffect(() => {
+        // Only run once on mount
+        if (checkAttempted.current) return;
+        checkAttempted.current = true;
+
+        const checkForUpdates = async () => {
+            try {
+                // check() returns an Update object if an update is available, null otherwise.
+                const update = await check();
+
+                if (update) {
+                    console.log(`Update available: ${update.version}`);
+
+                    toast.info(`New version ${update.version} is available`, {
+                        description: "An update is ready to be installed.",
+                        duration: Infinity,
+                        action: {
+                            label: "Update and Restart",
+                            onClick: async () => {
+                                const id = toast.loading("Downloading and installing update...");
+                                try {
+                                    await update.downloadAndInstall();
+                                    toast.success("Update installed successfully. Restarting...", { id });
+                                    // Wait a bit so the user can see the success message
+                                    setTimeout(async () => {
+                                        await relaunch();
+                                    }, 1500);
+                                } catch (error) {
+                                    console.error("Update failed:", error);
+                                    toast.error("Failed to install update. Please try again later.", { id });
+                                }
+                            },
+                        },
+                    });
+                }
+            } catch (error) {
+                // Silent error if check fails (e.g. offline or no updater configured)
+                console.error("Failed to check for updates:", error);
+            }
+        };
+
+        void checkForUpdates();
+    }, []);
+
+    return null;
+}
