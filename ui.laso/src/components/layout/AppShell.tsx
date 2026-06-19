@@ -11,6 +11,7 @@ import type { BranchListItem } from "@/types";
 import { organizationApi } from "@/api/organization";
 import { offlineCache } from "@/lib/storage";
 import { APP_NAME } from "@/lib/appConfig";
+import { getVersion } from "@tauri-apps/api/app";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 
@@ -74,6 +75,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const [loggingOut, setLoggingOut] = useState(false);
     const [branchName, setBranchName] = useState<string | null | undefined>(undefined);
     const [organizationName, setOrganizationName] = useState<string | null | undefined>(undefined);
+    const [version, setVersion] = useState<string>("");
+
+    useEffect(() => {
+        getVersion().then(setVersion).catch(() => setVersion("1.0.0"));
+    }, []);
 
     // ── Branch switcher state ──────────────────────────────────────────────────
     const [branches, setBranches] = useState<BranchListItem[]>([]);
@@ -282,6 +288,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
                 {/* Sync status */}
                 <SyncIndicator collapsed={collapsed} />
+
+                {/* App Version */}
+                <div className={`px-4 py-2 border-t border-white/5 ${collapsed ? "flex justify-center" : ""}`}>
+                    <p className={`text-[10px] font-mono text-white/20 uppercase tracking-widest ${collapsed ? "rotate-90 origin-center whitespace-nowrap my-4" : ""}`}>
+                        v{version}
+                    </p>
+                </div>
 
                 {/* User footer */}
                 <div className="border-t border-white/10 p-2">

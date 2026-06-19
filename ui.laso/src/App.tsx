@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
 import { syncEngine } from "@/lib/syncEngine";
 import { AppShell } from "@/components/layout/AppShell";
+import { UpdateManager } from "@/components/layout/UpdateManager";
 import OnboardingPage from "@/pages/OnboardingPage";
 import LoginPage from "@/pages/LoginPage";
 import SetupRequiredPage from "@/pages/SetupRequiredPage";
@@ -367,6 +368,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <AppRoutes />
+        <UpdateManager />
         <Toaster position="top-right" richColors closeButton />
       </BrowserRouter>
     </QueryClientProvider>

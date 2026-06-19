@@ -7,15 +7,21 @@ import { vi, describe, it, expect } from 'vitest';
 // Mock reportsApi
 vi.mock('@/api/reports', () => ({
   reportsApi: {
-    getDailySalesSummary: () => Promise.resolve([
-      {
-        sale_date: '2026-05-24',
-        branch_name: 'Main Branch',
-        net_revenue: 171.0,
-        total_items: 6,
-        transaction_count: 4
-      }
-    ]),
+    getDailySalesSummary: () => Promise.resolve({
+      items: [
+        {
+          sale_date: '2026-05-24',
+          branch_name: 'Main Branch',
+          net_revenue: 171.0,
+          total_items: 6,
+          transaction_count: 4
+        }
+      ],
+      total_items: 1,
+      page: 1,
+      page_size: 50,
+      total_pages: 1
+    }),
     getContractPerformance: () => Promise.resolve([
       {
         contract_id: '1',
