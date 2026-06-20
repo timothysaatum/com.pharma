@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # Core App Settings
     # -------------------------
     PROJECT_NAME: str = "Pharmacy System"
-    VERSION: str = "1.0.0"
+    VERSION: str = "1.0.1"
     ENVIRONMENT: str = "development"
     SYSTEM_STATUS: str = "up"
     API_PREFIX: str = "/api/v1"
