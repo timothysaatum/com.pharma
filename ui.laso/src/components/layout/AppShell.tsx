@@ -11,9 +11,10 @@ import type { BranchListItem } from "@/types";
 import { organizationApi } from "@/api/organization";
 import { offlineCache } from "@/lib/storage";
 import { APP_NAME } from "@/lib/appConfig";
-import { getVersion } from "@tauri-apps/api/app";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
+
+const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 interface NavItem {
     to: string;
@@ -78,7 +79,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const [version, setVersion] = useState<string>("");
 
     useEffect(() => {
-        getVersion().then(setVersion).catch(() => setVersion("1.0.0"));
+        const fetchVersion = async () => {
+            if (!IS_TAURI) {
+                setVersion("1.0.0");
+                return;
+            }
+            try {
+                const { getVersion } = await import(/* @vite-ignore */ "@tauri-apps/api/app");
+                const v = await getVersion();
+                setVersion(v);
+            } catch (err) {
+                console.error("Failed to fetch app version:", err);
+                setVersion("1.0.0");
+            }
+        };
+        fetchVersion();
     }, []);
 
     // ── Branch switcher state ──────────────────────────────────────────────────

@@ -14,6 +14,9 @@ export default defineConfig(async () => ({
     environment: "node",
     globals: true,
   },
+  optimizeDeps: {
+    exclude: ["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process"],
+  },
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
