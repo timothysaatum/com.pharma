@@ -1,4 +1,6 @@
 import { useEffect, useRef } from "react";
+import { check } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { toast } from "sonner";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -16,11 +18,6 @@ export function UpdateManager() {
 
         const checkForUpdates = async () => {
             try {
-                // Use dynamic imports to prevent Vite resolution issues in non-Tauri environments
-                // or during strict import analysis if the plugins are not yet fully linked.
-                const { check } = await import(/* @vite-ignore */ "@tauri-apps/plugin-updater");
-                const { relaunch } = await import(/* @vite-ignore */ "@tauri-apps/plugin-process");
-
                 // check() returns an Update object if an update is available, null otherwise.
                 const update = await check();
 
