@@ -186,7 +186,7 @@ class StockAdjustmentBase(BaseSchema):
     """Base stock adjustment fields"""
     adjustment_type: str = Field(
         ...,
-        pattern="^(damage|expired|theft|return|correction|transfer)$",
+        pattern="^(damage|expired|theft|return|correction|transfer|purchase_receipt)$",
         description="Type of adjustment"
     )
     quantity_change: int = Field(..., description="Positive for additions, negative for reductions")

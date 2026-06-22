@@ -67,7 +67,15 @@ logger = logging.getLogger(__name__)
 # Must stay in sync with the CheckConstraint in branch_inventory.py
 # ---------------------------------------------------------------------------
 _VALID_ADJUSTMENT_TYPES: frozenset[str] = frozenset(
-    {"damage", "expired", "theft", "return", "correction", "transfer"}
+    {
+        "damage",
+        "expired",
+        "theft",
+        "return",
+        "correction",
+        "transfer",
+        "purchase_receipt",
+    }
 )
 
 
@@ -841,11 +849,13 @@ class InventoryService:
                 select(BranchInventory)
                 .where(
                     BranchInventory.branch_id == batch_data.branch_id,
-                    BranchInventory.drug_id   == batch_data.drug_id,
+                    BranchInventory.drug_id == batch_data.drug_id,
                 )
                 .with_for_update()
             )
             inventory = inv_res.scalar_one_or_none()
+
+            previous_quantity = inventory.quantity if inventory else 0
 
             if not inventory:
                 inventory = BranchInventory(
@@ -862,7 +872,7 @@ class InventoryService:
                 db.add(inventory)
 
             # Recalculate total from all batches to resolve drift
-            await InventoryService._recalculate_inventory_quantity(
+            new_quantity = await InventoryService._recalculate_inventory_quantity(
                 db=db,
                 branch_id=batch_data.branch_id,
                 drug_id=batch_data.drug_id,
@@ -870,6 +880,34 @@ class InventoryService:
 
             if inventory.selling_price is None and batch_data.selling_price is not None:
                 inventory.selling_price = batch_data.selling_price
+
+            # Record audit trail for the purchase receipt
+            # Use a dummy system user ID if no specific user is associated with PO receipt
+            # Or assume the caller will handle it if we want to be strict.
+            # For now, we try to get the 'ordered_by' from PO if available.
+            adjusted_by = uuid.UUID(int=0)  # Default system UUID
+            # Try to find who received it if PO exists
+            if batch_data.purchase_order_id:
+                from app.models.sales.sales_model import PurchaseOrder
+
+                po = await db.get(PurchaseOrder, batch_data.purchase_order_id)
+                if po and po.ordered_by:
+                    adjusted_by = po.ordered_by
+
+            adjustment = StockAdjustment(
+                id=uuid.uuid4(),
+                branch_id=batch_data.branch_id,
+                drug_id=batch_data.drug_id,
+                adjustment_type="purchase_receipt",
+                quantity_change=batch_data.quantity,
+                previous_quantity=previous_quantity,
+                new_quantity=new_quantity,
+                reason=f"Purchase receipt: Batch {batch_data.batch_number}",
+                adjusted_by=adjusted_by,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            db.add(adjustment)
 
         await db.commit()
         await db.refresh(batch)
@@ -1564,13 +1602,13 @@ class InventoryService:
         # ── Update batches to maintain parity ──
         if quantity_change > 0:
             # For additions (return/correction), add to the earliest valid batch
-            # if one exists, or create a dummy "Correction" batch if not.
+            # if one exists, or create a dummy "System Adjustment" batch if not.
             batch_res = await db.execute(
                 select(DrugBatch)
                 .where(
                     DrugBatch.branch_id == branch_id,
                     DrugBatch.drug_id == drug_id,
-                    DrugBatch.expiry_date > date.today()
+                    DrugBatch.expiry_date > date.today(),
                 )
                 .order_by(DrugBatch.expiry_date.asc())
                 .limit(1)
@@ -1579,8 +1617,29 @@ class InventoryService:
             target_batch = batch_res.scalar_one_or_none()
             if target_batch:
                 target_batch.remaining_quantity += quantity_change
+                # Prevent IntegrityError: ensure initial quantity tracks discovered stock
+                if target_batch.remaining_quantity > target_batch.quantity:
+                    target_batch.quantity = target_batch.remaining_quantity
+
                 target_batch.updated_at = datetime.now(timezone.utc)
                 target_batch.mark_as_pending_sync()
+            else:
+                # No active batch found - create a system adjustment batch to prevent data loss
+                # during recalculation.
+                target_batch = DrugBatch(
+                    id=uuid.uuid4(),
+                    branch_id=branch_id,
+                    drug_id=drug_id,
+                    batch_number=f"ADJ-{datetime.now().strftime('%Y%m%d')}",
+                    quantity=quantity_change,
+                    remaining_quantity=quantity_change,
+                    expiry_date=date.today() + timedelta(days=365 * 10),  # 10 years
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+                target_batch.mark_as_pending_sync()
+                db.add(target_batch)
+
         elif quantity_change < 0:
             # For deductions (damage/theft/correction), deduct FEFO
             qty_to_deduct = abs(quantity_change)
