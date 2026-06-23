@@ -1642,13 +1642,15 @@ class InventoryService:
 
         elif quantity_change < 0:
             # For deductions (damage/theft/correction), deduct FEFO
+            # Only deduct from non-expired batches to match sales service behaviour
             qty_to_deduct = abs(quantity_change)
             batch_res = await db.execute(
                 select(DrugBatch)
                 .where(
                     DrugBatch.branch_id == branch_id,
                     DrugBatch.drug_id == drug_id,
-                    DrugBatch.remaining_quantity > 0
+                    DrugBatch.remaining_quantity > 0,
+                    DrugBatch.expiry_date > date.today(),
                 )
                 .order_by(DrugBatch.expiry_date.asc())
                 .with_for_update()

@@ -379,7 +379,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                     </button>
                 </div>
 
-                <form onSubmit={handleSubmit(onSubmit)} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+                <form id="customer-form" onSubmit={handleSubmit(onSubmit)} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
                     {apiError && (
                         <div className="rounded-xl bg-red-50 border border-red-100 p-3 flex gap-2">
                             <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />
@@ -536,6 +536,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                     </button>
                     <button
                         type="submit"
+                        form="customer-form"
                         onClick={handleSubmit(onSubmit)}
                         disabled={isSubmitting}
                         className="px-5 py-2.5 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-xl transition-colors disabled:opacity-60 flex items-center gap-2"

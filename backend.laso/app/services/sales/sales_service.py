@@ -69,6 +69,7 @@ from app.services.sales.utils.sale_helpers import (
     generate_sale_number,
     build_sale_with_details,
     create_audit_log,
+    DEFAULT_LOYALTY_THRESHOLDS,
 )
 
 
@@ -415,6 +416,12 @@ class SalesService:
             total_tax      = _r2(sum((p["tax_amount"]      for p in item_pricing), Decimal("0")))
             total_amount   = _r2(subtotal - total_discount + total_tax)
 
+            # Track ProcessSaleResponse fields
+            alert_count_low_stock  = 0
+            alert_count_expiry     = 0
+            loyalty_tier_upgraded  = False
+            new_loyalty_tier_value = None
+
             # ------------------------------------------------------------------
             # 11. Contract purchase limits
             # ------------------------------------------------------------------
@@ -481,23 +488,26 @@ class SalesService:
                 sale_number=sale_number,
                 customer_id=sale_data.customer_id,
                 customer_name=sale_data.customer_name,
-                # Financials
-                subtotal=float(subtotal),
-                discount_amount=float(total_discount),
-                tax_amount=float(total_tax),
-                total_amount=float(total_amount),
+                # Financials — cast via str to avoid float→Decimal precision traps
+                subtotal=float(str(subtotal)),
+                discount_amount=float(str(total_discount)),
+                tax_amount=float(str(total_tax)),
+                total_amount=float(str(total_amount)),
                 # Contract snapshot
                 price_contract_id=contract.id,
                 contract_name=contract.contract_name,
                 contract_discount_percentage=float(contract.discount_percentage),
+                contract_type=contract.contract_type,
                 # Payment
                 payment_method=sale_data.payment_method,
                 payment_status="completed",
                 amount_paid=float(amount_paid),
                 change_amount=float(change_amount),
                 payment_reference=getattr(sale_data, "payment_reference", None),
+                split_payment_details=getattr(sale_data, "split_payment_details", None),
                 # Insurance
                 insurance_claim_number=getattr(sale_data, "insurance_claim_number", None),
+                insurance_preauth_number=getattr(sale_data, "insurance_preauth_number", None),
                 patient_copay_amount=(
                     float(patient_copay_amount) if patient_copay_amount is not None else None
                 ),
@@ -677,6 +687,7 @@ class SalesService:
 
                 # Low-stock / out-of-stock alert
                 if inventory.quantity <= item_drug.reorder_level:
+                    alert_count_low_stock += 1
                     is_oos = inventory.quantity == 0
                     db.add(
                         SystemAlert(
@@ -719,6 +730,7 @@ class SalesService:
                     )
                 )
                 for exp_batch in expiring_res.scalars().all():
+                    alert_count_expiry += 1
                     days_left = (exp_batch.expiry_date - date.today()).days
                     db.add(
                         SystemAlert(
@@ -775,12 +787,14 @@ class SalesService:
 
                 tier_thresholds = loyalty_cfg.get(
                     "tier_thresholds",
-                    {"silver": 100, "gold": 500, "platinum": 1000},
+                    DEFAULT_LOYALTY_THRESHOLDS,
                 )
                 new_tier = resolve_loyalty_tier(customer.loyalty_points, tier_thresholds)
 
                 if new_tier != customer.loyalty_tier:
-                    customer.loyalty_tier = new_tier
+                    customer.loyalty_tier  = new_tier
+                    loyalty_tier_upgraded   = True
+                    new_loyalty_tier_value  = new_tier
                     db.add(
                         SystemAlert(
                             id=uuid.uuid4(),
@@ -843,11 +857,15 @@ class SalesService:
         return ProcessSaleResponse(
             sale=sale_with_details,
             loyalty_points_awarded=points_earned,
+            loyalty_tier_upgraded=loyalty_tier_upgraded,
+            new_loyalty_tier=new_loyalty_tier_value,
             contract_applied=contract.contract_name,
             contract_discount_given=total_discount,
             estimated_savings=total_discount,
             inventory_updated=inventory_updated,
             batches_updated=batches_updated,
+            low_stock_alerts_created=alert_count_low_stock,
+            expiry_alerts_created=alert_count_expiry,
             success=True,
             message="Sale processed successfully.",
         )
@@ -915,6 +933,26 @@ class SalesService:
                         f"sale total ({sale.total_amount})."
                     ),
                 )
+
+            # Manager approval check
+            if refund_data.manager_approval_user_id != user.id:
+                approver_res = await db.execute(
+                    select(User).where(
+                        User.id == refund_data.manager_approval_user_id,
+                        User.organization_id == user.organization_id,
+                    ).options(selectinload(User.roles))
+                )
+                approver = approver_res.scalar_one_or_none()
+                if not approver:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Approving manager not found.",
+                    )
+                if not (approver.is_super_admin or approver.has_permission("process_sales")):
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Approving manager does not have required permissions.",
+                    )
 
             sale_item_map: Dict[uuid.UUID, SaleItem] = {
                 item.id: item for item in sale.items
@@ -1039,7 +1077,7 @@ class SalesService:
 
                     tier_thresholds = loyalty_cfg.get(
                         "tier_thresholds",
-                        {"silver": 100, "gold": 500, "platinum": 1000},
+                        DEFAULT_LOYALTY_THRESHOLDS,
                     )
                     customer.loyalty_tier = resolve_loyalty_tier(
                         customer.loyalty_points, tier_thresholds
@@ -1085,6 +1123,3 @@ class SalesService:
         )
 
 
-# Convenience re-export so callers that already import from this module
-# don't need to change their import paths for the helper functions.
-from sqlalchemy.orm import selectinload  # noqa: E402 (used above in refund_sale)

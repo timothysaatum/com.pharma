@@ -90,6 +90,8 @@ async def create_drug(
         created_by_user_id=current_user.id
     )
     
+    await db.commit()
+    await db.refresh(drug)
     return drug
 
 

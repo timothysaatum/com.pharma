@@ -323,10 +323,66 @@ async def create_prescription(
     )
 
 
+@router.patch(
+    "/{prescription_id}/cancel",
+    response_model=PrescriptionResponse,
+    dependencies=[Depends(require_permission("manage_prescriptions"))]
+)
+async def cancel_prescription(
+    prescription_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Cancel a prescription (soft-delete — sets status to 'cancelled').
+
+    Regulatory requirement: prescriptions must not be hard-deleted.
+    Use this endpoint instead of DELETE to maintain audit trail.
+
+    **Permissions:** manage_prescriptions
+    """
+    res = await db.execute(
+        select(Prescription).where(
+            Prescription.id == prescription_id,
+            Prescription.organization_id == current_user.organization_id,
+        )
+    )
+    prescription = res.scalar_one_or_none()
+    if not prescription:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Prescription not found"
+        )
+
+    prescription.status = "cancelled"
+    prescription.notes = (
+        f"Cancelled on {date.today()} by {current_user.full_name or current_user.email}."
+        f"\n\n{prescription.notes or ''}".strip()
+    )
+    prescription.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(prescription)
+
+    cust_res = await db.execute(
+        select(Customer).where(Customer.id == prescription.customer_id)
+    )
+    customer = cust_res.scalar_one_or_none()
+
+    return PrescriptionResponse(
+        **{
+            **prescription.__dict__,
+            "is_expired": prescription.expiry_date < date.today(),
+            "customer_name": _customer_display_name(customer),
+        }
+    )
+
+
 @router.delete(
     "/{prescription_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("manage_prescriptions"))]
+    dependencies=[Depends(require_permission("manage_prescriptions"))],
+    deprecated=True,
+    description="Deprecated — use PATCH /{id}/cancel instead. Hard-deletes the prescription row."
 )
 async def delete_prescription(
     prescription_id: uuid.UUID,
@@ -334,8 +390,9 @@ async def delete_prescription(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Delete a prescription.
+    Hard-delete a prescription.
 
+    **Deprecated:** Use PATCH /cancel for soft-delete (regulatory compliance).
     **Permissions:** manage_prescriptions
     """
     res = await db.execute(

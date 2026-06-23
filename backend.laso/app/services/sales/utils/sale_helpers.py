@@ -14,6 +14,7 @@ create_audit_log          — async AuditLog row writer (flush only, no commit)
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Dict, List, Optional
 import uuid
 
@@ -31,11 +32,17 @@ from app.schemas.sales_schemas import SaleItemWithDetails, SaleWithDetails
 
 
 # ---------------------------------------------------------------------------
-# Loyalty tier
+# Loyalty tier — single source of truth
 # ---------------------------------------------------------------------------
 
+DEFAULT_LOYALTY_THRESHOLDS: dict = {
+    "silver": 100,
+    "gold": 500,
+    "platinum": 1000,
+}
 
-def resolve_loyalty_tier(points: int, thresholds: Dict) -> str:
+
+def resolve_loyalty_tier(points: int, thresholds: Dict | None = None) -> str:
     """
     Return the correct loyalty tier for a given point balance.
 
@@ -45,17 +52,17 @@ def resolve_loyalty_tier(points: int, thresholds: Dict) -> str:
     Args:
         points:     Current total loyalty points.
         thresholds: Dict with keys 'silver', 'gold', 'platinum' and int values.
-                    Falls back to { silver: 100, gold: 500, platinum: 1000 }
-                    for any missing key.
+                    Defaults to ``DEFAULT_LOYALTY_THRESHOLDS``.
 
     Returns:
         One of 'bronze', 'silver', 'gold', 'platinum'.
     """
-    if points >= thresholds.get("platinum", 1000):
+    t = thresholds or DEFAULT_LOYALTY_THRESHOLDS
+    if points >= t.get("platinum", 1000):
         return "platinum"
-    if points >= thresholds.get("gold", 500):
+    if points >= t.get("gold", 500):
         return "gold"
-    if points >= thresholds.get("silver", 100):
+    if points >= t.get("silver", 100):
         return "silver"
     return "bronze"
 
@@ -190,6 +197,7 @@ async def build_sale_with_details(
         items_with_details.append(
             SaleItemWithDetails(
                 **item_dict,
+                contract_discount_amount=Decimal(str(item.discount_amount)),
                 drug_generic_name=drug.generic_name,
                 drug_manufacturer=drug.manufacturer,
                 usage_instructions=drug.usage_instructions,
@@ -205,6 +213,7 @@ async def build_sale_with_details(
     }
     return SaleWithDetails(
         **sale_dict,
+        contract_discount_amount=Decimal(str(sale.discount_amount)) if sale.discount_amount else Decimal("0"),
         items=items_with_details,
         items_count=sum(item.quantity for item in items_with_details),
         branch_name=branch.name,

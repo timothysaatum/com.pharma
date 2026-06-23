@@ -6,9 +6,11 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { BarChart2, Download, RefreshCw, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
+import { BarChart2, Download, RefreshCw, AlertCircle, ChevronLeft, ChevronRight, Building2, FileText } from 'lucide-react';
 import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
+import { branchApi } from '@/api/branches';
+import { contractsApi } from '@/api/contracts';
 import { isOfflineError } from '@/api/client';
 import { localRead } from '@/lib/localRead';
 import { offlineCache } from '@/lib/storage';
@@ -72,6 +74,9 @@ export default function ReportsPage() {
   const [showFilters] = useState(true);
   const [dailySalesFromCache, setDailySalesFromCache] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
+  const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
+  const [contracts, setContracts] = useState<{ id: string; name: string; code: string }[]>([]);
+  const [filterLoading, setFilterLoading] = useState(true);
 
   // Daily Sales Query
   const { data: dailySalesPaginated, isFetching: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
@@ -224,6 +229,29 @@ export default function ReportsPage() {
     setFilters(prev => ({ ...prev, page: 1 }));
   }, [activeTab]);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      setFilterLoading(true);
+      try {
+        const [branchRes, contractRes] = await Promise.all([
+          branchApi.list({ page: 1, page_size: 200 }),
+          contractsApi.list({ page: 1, page_size: 200 }),
+        ]);
+        if (!cancelled) {
+          setBranches((branchRes as any).items?.map((b: any) => ({ id: b.id, name: b.name })) ?? []);
+          setContracts((contractRes as any).contracts?.map((c: any) => ({ id: c.id, name: c.contract_name, code: c.contract_code })) ?? []);
+        }
+      } catch {
+        // non-critical — filters will just show "All"
+      } finally {
+        if (!cancelled) setFilterLoading(false);
+      }
+    }
+    void load();
+    return () => { cancelled = true; };
+  }, []);
+
   const exportToCSV = (data: any[], filename: string) => {
     if (!data || data.length === 0) return;
 
@@ -280,7 +308,9 @@ export default function ReportsPage() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
               >
                 <option value="">All Branches</option>
-                {/* Add branch options from API */}
+                {branches.map(b => (
+                  <option key={b.id} value={b.id}>{b.name}</option>
+                ))}
               </select>
             </div>
             <div>
@@ -291,7 +321,9 @@ export default function ReportsPage() {
                 className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm"
               >
                 <option value="">All Contracts</option>
-                {/* Add contract options from API */}
+                {contracts.map(c => (
+                  <option key={c.id} value={c.id}>{c.code} — {c.name}</option>
+                ))}
               </select>
             </div>
           </div>
@@ -356,7 +388,7 @@ export default function ReportsPage() {
                   <tr key={idx} className="hover:bg-gray-50">
                     <td className="px-6 py-3 text-sm text-gray-900">{row.sale_date}</td>
                     <td className="px-6 py-3 text-sm text-gray-900">{row.branch_name || '-'}</td>
-                    <td className="px-6 py-3 text-sm font-semibold text-gray-900">${parseFloat((row.net_revenue ?? row.gross_revenue) || 0).toFixed(2)}</td>
+                    <td className="px-6 py-3 text-sm font-semibold text-gray-900">₵{parseFloat((row.net_revenue ?? row.gross_revenue) || 0).toFixed(2)}</td>
                     <td className="px-6 py-3 text-sm text-gray-900">{row.total_items || 0}</td>
                     <td className="px-6 py-3 text-sm text-gray-900">{row.transaction_count || 0}</td>
                   </tr>
@@ -407,8 +439,8 @@ export default function ReportsPage() {
               <div key={idx} className="border border-gray-200 rounded-lg p-4">
                 <h4 className="font-semibold text-gray-900 mb-2">{contract.contract_name || 'Contract'}</h4>
                 <div className="space-y-1 text-sm text-gray-600">
-                  <div>Revenue: <span className="font-semibold text-gray-900">${contract.revenue.toFixed(2)}</span></div>
-                  <div>Discounts: <span className="font-semibold text-gray-900">${contract.discount_given.toFixed(2)}</span></div>
+                  <div>Revenue: <span className="font-semibold text-gray-900">₵{contract.revenue.toFixed(2)}</span></div>
+                  <div>Discounts: <span className="font-semibold text-gray-900">₵{contract.discount_given.toFixed(2)}</span></div>
                   <div>Customers: <span className="font-semibold text-gray-900">{contract.customer_count}</span></div>
                 </div>
               </div>

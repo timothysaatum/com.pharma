@@ -222,15 +222,14 @@ class InsuranceProviderService:
                 detail="Insurance provider not found",
             )
         
-        # Update fields
-        update_data = data.model_dump(exclude_none=True)
-        
-        if "address" in update_data and update_data["address"]:
-            update_data["address"] = update_data["address"].model_dump(exclude_none=True)
+        # Update fields — use exclude_unset to detect explicit None vs omitted
+        update_data = data.model_dump(exclude_unset=True)
         
         for field, value in update_data.items():
             if field == "code":
-                # Don't allow code changes
+                continue
+            if field == "address":
+                provider.address = value.model_dump(exclude_none=True) if value else None
                 continue
             if field == "name" and value:
                 value = value.strip()

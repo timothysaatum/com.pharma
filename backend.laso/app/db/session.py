@@ -11,7 +11,7 @@ is_sqlite = "sqlite" in settings.DATABASE_URL.lower()
 # Build engine kwargs based on database type
 engine_kwargs: dict[str, Any] = {
     "future": True,
-    "echo": True,
+    "echo": settings.ENVIRONMENT.lower() != "production",
 }
 
 # Only add pool settings for databases that support them (PostgreSQL, MySQL)

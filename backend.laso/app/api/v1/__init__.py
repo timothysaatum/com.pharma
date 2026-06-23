@@ -28,9 +28,11 @@ from .endpoints.reports_endpoints import router as reports_router
 from .endpoints.export_endpoints import router as export_router
 from .endpoints.insurance_provider_endpoints import router as insurance_provider_router
 from .endpoints.audit_endpoints import router as audit_router
+from .endpoints.auth_reset import router as auth_reset_router
 
 
 router.include_router(auth_router, tags=["Authentication"])
+router.include_router(auth_reset_router, tags=["Authentication"])
 router.include_router(org_onboarding_router, tags=["Organization Onboarding"])
 router.include_router(drugs_router, tags=["Drugs"])
 router.include_router(branch_router, tags=["Branch Management"])

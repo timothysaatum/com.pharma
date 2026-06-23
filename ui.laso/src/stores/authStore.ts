@@ -45,17 +45,19 @@ interface AuthState {
 //     (Org exists but the admin skipped branch setup — prompt to add one.)
 // ─────────────────────────────────────────────────────────────────────────────
 function deriveSetupState(user: User): SetupState {
-    // is_super_admin is a platform operator — always send to onboarding wizard
+    // Super admins are platform operators — always ready.
     if (user.is_super_admin) {
-        return "needs_onboard";
+        return "ready";
     }
 
-    // Org Admins (no branch assignments) are "ready" to manage the organization
-    const hasOrgManagePerm = user.roles.some(role =>
-        role.permissions.includes("manage_organization") ||
-        role.permissions.includes("manage_branches") ||
-        role.permissions.includes("*")
-    );
+    // Use effective permissions (includes hierarchy inheritance)
+    const effectivePerms = user.effective_permissions?.effective_permissions
+        ?? user.roles.flatMap(r => r.permissions);
+
+    const hasOrgManagePerm =
+        effectivePerms.includes("manage_organization") ||
+        effectivePerms.includes("manage_branches") ||
+        effectivePerms.includes("*");
 
     if (hasOrgManagePerm && (user.assigned_branches?.length ?? 0) === 0) {
         return "ready";

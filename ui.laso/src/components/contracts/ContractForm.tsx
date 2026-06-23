@@ -189,14 +189,14 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
             requires_approval: contract?.requires_approval ?? false,
             allowed_user_roles: contract?.allowed_user_roles ?? [],
             daily_usage_limit: contract?.daily_usage_limit ?? null,
-            per_customer_usage_limit: null,
+            per_customer_usage_limit: contract?.per_customer_usage_limit ?? null,
             minimum_purchase_amount: contract?.minimum_purchase_amount ?? null,
             maximum_purchase_amount: contract?.maximum_purchase_amount ?? null,
             maximum_discount_amount: contract?.maximum_discount_amount ?? null,
             insurance_provider_id: contract?.insurance_provider_id ?? "",
             copay_amount: contract?.copay_amount ?? null,
             copay_percentage: contract?.copay_percentage ?? null,
-            requires_preauthorization: false,
+            requires_preauthorization: contract?.requires_preauthorization ?? false,
         },
     });
 
@@ -343,7 +343,7 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
                 </div>
 
                 {/* Form */}
-                <form onSubmit={handleSubmit(onSubmit)} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+                <form id="contract-form" onSubmit={handleSubmit(onSubmit)} className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
                     {apiError && (
                         <div className="rounded-xl bg-red-50 border border-red-100 p-3 flex gap-2">
                             <AlertCircle className="w-4 h-4 text-red-500 flex-shrink-0 mt-0.5" />

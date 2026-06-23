@@ -22,7 +22,7 @@ export function DrugImportWizard({ onClose, onSuccess }: DrugImportWizardProps) 
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
-    if (selectedFile && selectedFile.type === "application/json") {
+    if (selectedFile && (selectedFile.type === "application/json" || selectedFile.name.endsWith(".json"))) {
       setFile(selectedFile);
       setStep(2);
     } else {

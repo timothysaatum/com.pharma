@@ -17,6 +17,11 @@ class RoleBase(BaseSchema):
     name: str = Field(..., min_length=1, max_length=100)
     description: Optional[str] = None
     permissions: List[str] = Field(default_factory=list)
+    level: int = Field(
+        default=0, ge=0, le=1000,
+        description="Hierarchy level. Higher = more authority. "
+                    "A role at level N inherits all permissions from roles at level < N."
+    )
 
 class RoleCreate(RoleBase):
     pass
@@ -25,11 +30,30 @@ class RoleUpdate(BaseSchema):
     name: Optional[str] = Field(None, min_length=1, max_length=100)
     description: Optional[str] = None
     permissions: Optional[List[str]] = None
+    level: Optional[int] = Field(None, ge=0, le=1000)
 
 class RoleResponse(RoleBase, SyncSchema, TimestampSchema):
     id: uuid.UUID
     organization_id: uuid.UUID
     model_config = ConfigDict(from_attributes=True)
+
+
+# Computed permission info returned alongside user data
+class EffectivePermissionInfo(BaseSchema):
+    """Effective permissions after role hierarchy resolution"""
+    direct_role_permissions: List[str] = Field(
+        default_factory=list,
+        description="Permissions from the user's directly assigned roles"
+    )
+    inherited_permissions: List[str] = Field(
+        default_factory=list,
+        description="Permissions inherited from lower-level roles via hierarchy"
+    )
+    effective_permissions: List[str] = Field(
+        default_factory=list,
+        description="Union of direct and inherited permissions"
+    )
+    max_role_level: int = Field(0, description="Highest role level assigned to this user")
 
 
 class UserBase(BaseSchema):
@@ -58,32 +82,6 @@ class UserCreate(UserBase):
         description="Password must be at least 8 characters"
     )
     organization_id: Optional[uuid.UUID]= None
-
-    @field_validator('password')
-    @classmethod
-    def validate_password_strength(cls, v: str) -> str:
-        """Enforce password complexity"""
-        if len(v) < 8:
-            raise ValueError("Password must be at least 8 characters long")
-        
-        checks = [
-            (any(c.isupper() for c in v), "Password must contain at least one uppercase letter"),
-            (any(c.islower() for c in v), "Password must contain at least one lowercase letter"),
-            (any(c.isdigit() for c in v), "Password must contain at least one digit"),
-            (any(c in "!@#$%^&*()_+-=[]{}|;:,.<>?" for c in v), 
-             "Password must contain at least one special character")
-        ]
-        
-        for check, error in checks:
-            if not check:
-                raise ValueError(error)
-        
-        # Check for common weak passwords
-        weak_passwords = ['password', '12345678', 'qwerty', 'abc123']
-        if v.lower() in weak_passwords:
-            raise ValueError("Password is too common. Please choose a stronger password")
-        
-        return v
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -127,6 +125,10 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
     is_active: bool
     is_super_admin: bool
     roles: List[RoleResponse] = Field(default_factory=list)
+    effective_permissions: EffectivePermissionInfo = Field(
+        default_factory=EffectivePermissionInfo,
+        description="Computed permissions after role hierarchy resolution"
+    )
     last_login: Optional[datetime] = None
     two_factor_enabled: bool
     deleted_at: Optional[datetime] = None
@@ -135,6 +137,29 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
     model_config = ConfigDict(
         from_attributes=True
     )
+
+    @model_validator(mode='before')
+    @classmethod
+    def _populate_effective_permissions(cls, data):
+        if isinstance(data, dict):
+            return data
+        user = data
+        if hasattr(user, '_effective_permissions') and user._effective_permissions is not None:
+            effective = user._effective_permissions
+            max_level = 0
+            if user.roles:
+                max_level = max(r.level for r in user.roles)
+            data.effective_permissions = EffectivePermissionInfo(
+                direct_role_permissions=sorted({
+                    p for role in user.roles for p in role.permissions
+                }),
+                inherited_permissions=sorted(effective - {
+                    p for role in user.roles for p in role.permissions
+                }),
+                effective_permissions=sorted(effective),
+                max_role_level=max_level,
+            )
+        return data
 
 
 

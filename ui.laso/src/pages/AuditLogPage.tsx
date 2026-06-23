@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from "react";
 import {
     Activity, RefreshCw, ChevronLeft,
-    ChevronRight, Calendar
+    ChevronRight, Calendar, Search, X
 } from "lucide-react";
 import { auditApi, type AuditLogEntry } from "@/api/audit";
 import { parseApiError } from "@/api/client";
@@ -45,6 +45,10 @@ export default function AuditLogPage() {
     const [page, setPage] = useState(1);
     const [totalPages, setTotalPages] = useState(1);
     const [total, setTotal] = useState(0);
+    const [search, setSearch] = useState("");
+    const [actionFilter, setActionFilter] = useState("");
+    const [startDate, setStartDate] = useState("");
+    const [endDate, setEndDate] = useState("");
 
     const fetchLogs = useCallback(async (targetPage = 1) => {
         setLoading(true);
@@ -52,7 +56,11 @@ export default function AuditLogPage() {
         try {
             const result = await auditApi.list({
                 page: targetPage,
-                page_size: PAGE_SIZE
+                page_size: PAGE_SIZE,
+                search: search || undefined,
+                action: actionFilter || undefined,
+                start_date: startDate || undefined,
+                end_date: endDate || undefined,
             });
             setLogs(result.items);
             setTotal(result.total);
@@ -63,11 +71,13 @@ export default function AuditLogPage() {
         } finally {
             setLoading(false);
         }
-    }, []);
+    }, [search, actionFilter, startDate, endDate]);
 
     useEffect(() => {
         void fetchLogs(1);
     }, [fetchLogs]);
+
+    const hasFilters = search || actionFilter || startDate || endDate;
 
     return (
         <div className="flex flex-col h-full bg-surface">
@@ -90,6 +100,56 @@ export default function AuditLogPage() {
                     <RefreshCw className={`w-4 h-4 ${loading ? "animate-spin" : ""}`} />
                     Refresh
                 </button>
+            </div>
+
+            {/* Filters */}
+            <div className="px-6 py-3 border-b border-slate-200 bg-white flex flex-wrap gap-3 items-center">
+                <div className="relative flex-1 min-w-[200px] max-w-sm">
+                    <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                    <input
+                        type="text"
+                        value={search}
+                        onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+                        placeholder="Search user, action, entity…"
+                        className="w-full pl-9 pr-3 h-9 rounded-xl border border-slate-200 text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500"
+                    />
+                </div>
+                <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => { setStartDate(e.target.value); setPage(1); }}
+                    className="h-9 px-3 rounded-xl border border-slate-200 text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                    title="Start date"
+                />
+                <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => { setEndDate(e.target.value); setPage(1); }}
+                    className="h-9 px-3 rounded-xl border border-slate-200 text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                    title="End date"
+                />
+                <select
+                    value={actionFilter}
+                    onChange={(e) => { setActionFilter(e.target.value); setPage(1); }}
+                    className="h-9 px-3 rounded-xl border border-slate-200 text-sm bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500/30"
+                >
+                    <option value="">All Actions</option>
+                    <option value="process_sale">Sale</option>
+                    <option value="refund_sale">Refund</option>
+                    <option value="create">Create</option>
+                    <option value="update">Update</option>
+                    <option value="delete">Delete</option>
+                    <option value="login">Login</option>
+                </select>
+                {hasFilters && (
+                    <button
+                        onClick={() => { setSearch(""); setActionFilter(""); setStartDate(""); setEndDate(""); setPage(1); }}
+                        className="flex items-center gap-1 px-3 h-9 text-sm text-slate-500 hover:text-slate-700 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors"
+                    >
+                        <X className="w-3.5 h-3.5" />
+                        Clear
+                    </button>
+                )}
             </div>
 
             {/* Table Area */}

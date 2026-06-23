@@ -690,7 +690,7 @@ export function CartPanel({
                                             type="number"
                                             min={0}
                                             step="0.01"
-                                            value={amountPaid || ""}
+                                            value={amountPaid ?? ""}
                                             onChange={(e) => {
                                                 // FIX: Mark as manually edited so the auto-sync effect
                                                 // stops overwriting what the cashier has typed.

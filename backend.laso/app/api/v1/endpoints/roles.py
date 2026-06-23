@@ -29,7 +29,7 @@ async def create_role(
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS))
 ):
     """Create a new role for the organization"""
-    return await RoleService.create_role(db, organization_id, role_data)
+    return await RoleService.create_role(db, organization_id, role_data, current_user)
 
 @router.get("/", response_model=List[RoleResponse])
 async def get_roles(
@@ -59,7 +59,7 @@ async def update_role(
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS))
 ):
     """Update a role"""
-    return await RoleService.update_role(db, role_id, organization_id, role_data)
+    return await RoleService.update_role(db, role_id, organization_id, role_data, current_user)
 
 @router.delete("/{role_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_role(

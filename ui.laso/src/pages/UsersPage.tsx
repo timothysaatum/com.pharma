@@ -490,7 +490,7 @@ function ActionMenu({
     const isSelf = user.id === currentUser.id;
     const canManageUser = !user.is_super_admin && (
         currentUser.is_super_admin ||
-        currentUser.assigned_branches.length === 0 || // Org admin
+        (currentUser.assigned_branches?.length ?? 0) === 0 || // Org admin
         user.assigned_branches.some((branchId) =>
             currentUser.assigned_branches.map(String).includes(String(branchId))
         )
@@ -769,7 +769,7 @@ export default function UsersPage() {
 
     if (!currentUser) return null;
 
-    const canCreate = currentUser.is_super_admin || currentUser.assigned_branches.length === 0;
+    const canCreate = currentUser.is_super_admin || (currentUser.assigned_branches?.length ?? 0) === 0;
 
     return (
         <div className="flex-1 flex flex-col min-h-0 bg-slate-50">
@@ -926,9 +926,9 @@ export default function UsersPage() {
                                                 {user.assigned_branches?.length > 0 ? (
                                                     <div className="flex items-center gap-1 text-xs text-ink-secondary">
                                                         <Building2 className="w-3 h-3 text-ink-muted flex-shrink-0" />
-                                                        {user.assigned_branches.length === 1
+                                                        {user.assigned_branches?.length === 1
                                                             ? branches.find((b) => String(b.id) === user.assigned_branches[0])?.name ?? "1 branch"
-                                                            : `${user.assigned_branches.length} branches`}
+                                                            : `${user.assigned_branches?.length ?? 0} branches`}
                                                     </div>
                                                 ) : (
                                                     <span className="text-xs text-ink-muted">—</span>

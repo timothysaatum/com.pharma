@@ -40,7 +40,7 @@ from decimal import Decimal
 from typing import List, Optional
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, func
+from sqlalchemy import select, func, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -227,7 +227,7 @@ class PurchaseOrderService:
             item.quantity_ordered * item.unit_cost for item in po_data.items
         )
         tax_amount = Decimal("0")  # Extend here if org-level tax rates are introduced
-        total_amount = subtotal + tax_amount + po_data.shipping_cost
+        total_amount = subtotal + tax_amount + (po_data.shipping_cost or Decimal("0"))
 
         # --- Generate collision-safe PO number ---
         po_number = await PurchaseOrderService._generate_po_number(db, branch.code)
@@ -625,7 +625,10 @@ class PurchaseOrderService:
                 )
                 batches_created += 1
 
-                # ── 3. Upsert BranchInventory (locked row) ───────────────────
+                # ── 3. Upsert BranchInventory (race-safe) ──────────────────
+                # Use a savepoint + IntegrityError fallback so concurrent
+                # first-receipt for the same (branch, drug) does not collide.
+                from sqlalchemy.exc import IntegrityError
                 inv_result = await db.execute(
                     select(BranchInventory)
                     .where(
@@ -643,18 +646,36 @@ class PurchaseOrderService:
                     inventory.updated_at = _now()
                     inventory.mark_as_pending_sync()
                 else:
-                    inventory = BranchInventory(
-                        id=uuid.uuid4(),
-                        branch_id=po.branch_id,
-                        drug_id=po_item.drug_id,
-                        quantity=item_receive.quantity_received,
-                        reserved_quantity=0,
-                        sync_status="pending",
-                        sync_version=1,
-                        created_at=_now(),
-                        updated_at=_now(),
-                    )
-                    db.add(inventory)
+                    try:
+                        inventory = BranchInventory(
+                            id=uuid.uuid4(),
+                            branch_id=po.branch_id,
+                            drug_id=po_item.drug_id,
+                            quantity=item_receive.quantity_received,
+                            reserved_quantity=0,
+                            sync_status="pending",
+                            sync_version=1,
+                            created_at=_now(),
+                            updated_at=_now(),
+                        )
+                        db.add(inventory)
+                        await db.flush()
+                    except IntegrityError:
+                        # Concurrent insert won – re-fetch and update
+                        await db.rollback()
+                        inv_result = await db.execute(
+                            select(BranchInventory)
+                            .where(
+                                BranchInventory.branch_id == po.branch_id,
+                                BranchInventory.drug_id == po_item.drug_id,
+                            )
+                            .with_for_update()
+                        )
+                        inventory = inv_result.scalar_one()
+                        previous_quantity = inventory.quantity
+                        inventory.quantity += item_receive.quantity_received
+                        inventory.updated_at = _now()
+                        inventory.mark_as_pending_sync()
 
                 inventory_updated += 1
 

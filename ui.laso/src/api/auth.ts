@@ -103,10 +103,25 @@ export const authApi = {
     /**
      * POST /auth/change-password
      * Updates the password and revokes all sessions.
-     * The user must re-login after this call.
+     * The backend returns 401 with detail="PASSWORD_CHANGED".
+     * The caller should handle this by redirecting to /login
+     * after clearing local state.
      */
-    changePassword(data: PasswordChange): Promise<{ message: string }> {
-        return post("/auth/change-password", data);
+    async changePassword(data: PasswordChange): Promise<void> {
+        try {
+            await post("/auth/change-password", data);
+        } catch (err: unknown) {
+            const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } };
+            if (
+                axiosErr?.response?.status === 401 &&
+                axiosErr?.response?.data?.detail === "PASSWORD_CHANGED"
+            ) {
+                await authStorage.clearTokens();
+                window.dispatchEvent(new Event("auth:logout"));
+                return;
+            }
+            throw err;
+        }
     },
 
     /**

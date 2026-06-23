@@ -8,11 +8,12 @@ Validators
 ----------
 check_customer_allergies     — SAFETY CRITICAL: block sale on allergy match
 load_and_validate_contract   — load PriceContract and run all applicability
-                               guards (date, branch, role, insurance)
+                                guards (date, branch, role, insurance)
 """
 from __future__ import annotations
 
 from datetime import date
+import re
 from typing import Dict, List, Optional, Tuple
 import uuid
 
@@ -81,31 +82,43 @@ async def check_customer_allergies(
             if not allergy_lower:
                 continue
 
-            if any(allergy_lower in field for field in name_fields):
-                # Persist the alert before raising so it survives a rollback
-                db.add(
-                    SystemAlert(
-                        id=uuid.uuid4(),
-                        organization_id=organization_id,
-                        branch_id=branch_id,
-                        alert_type="security",
-                        severity="critical",
-                        title=(
-                            f"ALLERGY ALERT: "
-                            f"{customer.first_name} {customer.last_name}"
-                        ),
-                        message=(
-                            f"Attempted to dispense '{drug.name}' to customer "
-                            f"allergic to '{allergy}'. Sale blocked. "
-                            f"Customer ID: {customer.id}."
-                        ),
-                        drug_id=drug.id,
-                        is_resolved=False,
-                        created_at=datetime.now(timezone.utc),
-                        updated_at=datetime.now(timezone.utc),
-                    )
+            # Word-boundary match: "pen" does not flag "penicillin"
+            try:
+                allergy_pattern = re.compile(
+                    r'\b' + re.escape(allergy_lower) + r'\b'
                 )
-                await db.flush()
+            except re.error:
+                allergy_pattern = None
+            if allergy_pattern and any(allergy_pattern.search(f) for f in name_fields):
+                # Create the alert outside any savepoint so it survives rollback.
+                # The caller (process_sale) wraps everything in begin_nested(),
+                # which would discard this flush. Instead, we do an independent
+                # connection to persist the alert unconditionally.
+                from app.db.session import AsyncSessionLocal
+                async with AsyncSessionLocal() as alert_db:
+                    alert_db.add(
+                        SystemAlert(
+                            id=uuid.uuid4(),
+                            organization_id=organization_id,
+                            branch_id=branch_id,
+                            alert_type="security",
+                            severity="critical",
+                            title=(
+                                f"ALLERGY ALERT: "
+                                f"{customer.first_name} {customer.last_name}"
+                            ),
+                            message=(
+                                f"Attempted to dispense '{drug.name}' to customer "
+                                f"allergic to '{allergy}'. Sale blocked. "
+                                f"Customer ID: {customer.id}."
+                            ),
+                            drug_id=drug.id,
+                            is_resolved=False,
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                    await alert_db.commit()
 
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,

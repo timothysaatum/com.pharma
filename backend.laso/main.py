@@ -21,6 +21,10 @@ from app.middleware.rate_limit import RateLimitMiddleware
 
 settings = get_settings()
 
+# Ensure logs directory exists before configuring file logging
+import os
+os.makedirs("logs", exist_ok=True)
+
 # Configure structured logging
 LOGGING_CONFIG = {
     "version": 1,
@@ -96,19 +100,41 @@ async def lifespan(app: FastAPI):
     logger.info(f"Database: {settings.DATABASE_URL}")
     
     try:
-        from app.db.base import Base
-        
-        # Database setup
+        # Database connection check
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
             logger.info("Database connection established")
-            await conn.run_sync(Base.metadata.create_all)
-            logger.info("Database tables created/verified")
+        
+        # Auto-create tables only in development
+        from app.db.base import Base
+        if settings.ENVIRONMENT.lower() == "development":
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+                logger.info("Database tables created/verified (development mode)")
+        else:
+            logger.info("Skipping auto-migration in production — use Alembic instead")
         
     except Exception as e:
         logger.error(f"Database connection failed: {str(e)}")
         raise
     
+    # Warn about unimplemented 2FA if any user has it enabled
+    try:
+        from app.models.user.user_model import User
+        from sqlalchemy import select, func
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                select(func.count(User.id)).where(User.two_factor_enabled == True)
+            )
+            twofa_count = result.scalar() or 0
+            if twofa_count > 0:
+                logger.warning(
+                    f"{twofa_count} user(s) have two_factor_enabled=True, but 2FA is "
+                    "not implemented. No authentication enforcement is in place for these users."
+                )
+    except Exception:
+        pass  # non-critical warning
+
     try:
         from app.utils.notifications import setup_notifications, EmailConfig, ArkeselConfig
         

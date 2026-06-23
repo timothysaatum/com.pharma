@@ -27,7 +27,7 @@ router = APIRouter(prefix="/inventory", tags=["Inventory Management"])
 
 
 def _ensure_branch_access(current_user: User, branch_id: uuid.UUID) -> None:
-    if str(branch_id) not in [str(b) for b in current_user.assigned_branches]:
+    if str(branch_id) not in [str(b) for b in (current_user.assigned_branches or [])]:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this branch"

@@ -271,7 +271,7 @@ export default function POSPage() {
                 drug_id: item.drug.id,
                 delta: -item.quantity,
             }));
-            const idempotencyKey = `${user?.id}-${payload.price_contract_id}-${Date.now()}`;
+            const idempotencyKey = `${user?.id}-${payload.price_contract_id}-${crypto.randomUUID()}`;
 
             const recordResult = await offlineSalesManager.recordSaleTransaction(
                 offlineSale as unknown as Parameters<typeof offlineSalesManager.recordSaleTransaction>[0],

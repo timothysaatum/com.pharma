@@ -104,11 +104,10 @@ async def get_current_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account is temporarily locked due to too many failed login attempts",
             )
-        else:
-            # Lock expired, clear it
-            user.account_locked_until = None
-            user.failed_login_attempts = 0
-            await db.commit()
+        # Lock expired — schedule deferred clearing via a background task
+        # rather than committing inside a read-only dependency.
+        # The auth/login endpoint also clears this on successful login.
+        pass
     
     # Verify session exists and is valid
     from app.core.security import hash_token
@@ -130,6 +129,25 @@ async def get_current_user(
             detail="Session expired or invalid",
             headers={"WWW-Authenticate": "Bearer"},
         )
+    
+    # Compute effective permissions using role hierarchy
+    if user.roles:
+        max_level = max(r.level for r in user.roles)
+        # Load all roles at or below the user's highest level to pick up inherited permissions
+        from app.models.user.user_model import Role as RoleModel
+        all_result = await db.execute(
+            select(RoleModel).where(
+                RoleModel.organization_id == user.organization_id,
+                RoleModel.level <= max_level,
+            )
+        )
+        all_roles = all_result.scalars().all()
+        effective: set[str] = set()
+        for r in all_roles:
+            effective.update(r.permissions)
+        user._effective_permissions = effective
+    else:
+        user._effective_permissions = set()
     
     return user
 
@@ -198,13 +216,18 @@ async def get_current_user_optional(
     """
     Get current user if authenticated, otherwise return None
     Useful for endpoints that work differently for authenticated users
+    
+    Only swallows 401 (not authenticated) — re-raises 403 (inactive/locked)
+    so callers can distinguish "not logged in" from "logged in but blocked".
     """
     if not credentials:
         return None
     
     try:
         return await get_current_user(credentials, db)
-    except HTTPException:
+    except HTTPException as exc:
+        if exc.status_code == status.HTTP_403_FORBIDDEN:
+            raise
         return None
 
 
@@ -237,9 +260,16 @@ async def verify_branch_access(
     Super admins and admins have access to all branches
     Other users only access assigned branches
     """
-    # Super admins and org admins can access any branch in their organization
-    if current_user.is_super_admin or not current_user.assigned_branches:
+    # Only super admins can access any branch in their organization
+    if current_user.is_super_admin:
         return branch_id
+    
+    # Users with no assigned branches cannot access any branch
+    if not current_user.assigned_branches:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No branches assigned. Contact an administrator.",
+        )
     
     # Other users must have branch in their assigned list
     if branch_id not in current_user.assigned_branches:

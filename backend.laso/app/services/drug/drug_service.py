@@ -136,7 +136,9 @@ class DrugService:
         drug.mark_as_pending_sync()
 
         db.add(drug)
-        await db.commit()
+        # Flush so the drug gets a DB identity for FK references,
+        # but do NOT commit — the caller owns the transaction boundary.
+        await db.flush()
         await db.refresh(drug)
         return drug
 

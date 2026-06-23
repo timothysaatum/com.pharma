@@ -64,18 +64,28 @@ export interface Role extends TimestampFields, SyncFields {
     name: string;
     description: string | null;
     permissions: string[];
+    level: number;
 }
 
 export interface RoleCreate {
     name: string;
     description?: string;
     permissions: string[];
+    level?: number;
 }
 
 export interface RoleUpdate {
     name?: string;
     description?: string;
     permissions?: string[];
+    level?: number;
+}
+
+export interface EffectivePermissionInfo {
+    direct_role_permissions: string[];
+    inherited_permissions: string[];
+    effective_permissions: string[];
+    max_role_level: number;
 }
 
 export interface User extends TimestampFields, SyncFields {
@@ -86,6 +96,7 @@ export interface User extends TimestampFields, SyncFields {
     full_name: string;
     is_super_admin: boolean;
     roles: Role[];
+    effective_permissions?: EffectivePermissionInfo;
     phone: string | null;
     employee_id: string | null;
     assigned_branches: string[];

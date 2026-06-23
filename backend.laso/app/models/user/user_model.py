@@ -61,6 +61,16 @@ class Role(Base, TimestampMixin, SyncTrackingMixin):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
 
+    # Hierarchical level — higher level inherits all permissions from lower levels
+    # e.g. Staff=10, Manager=20, Admin=30
+    level: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        index=True,
+        comment="Hierarchy level. Higher = more authority. Inherits permissions from all lower levels."
+    )
+
     # List of permission strings
     permissions: Mapped[List[str]] = mapped_column(
         ARRAY(String(100)),
@@ -77,6 +87,7 @@ class Role(Base, TimestampMixin, SyncTrackingMixin):
 
     __table_args__ = (
         Index('idx_role_org', 'organization_id'),
+        Index('idx_role_level', 'level'),
         # Ensure role name is unique within an organization
         Index('uq_role_org_name', 'organization_id', 'name', unique=True),
     )
@@ -182,7 +193,9 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         DateTime(timezone=True)
     )
     
-    # Two-factor authentication
+    # Two-factor authentication (STUB — NOT IMPLEMENTED)
+    # The column exists for future use only. 2FA is never enforced.
+    # two_factor_secret is never read by application code.
     two_factor_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -191,7 +204,21 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     two_factor_secret: Mapped[Optional[str]] = mapped_column(
         String(255),
-        comment="Encrypted TOTP secret"
+        comment="RESERVED for future TOTP — not currently enforced"
+    )
+    
+    # Password reset fields
+    reset_token_hash: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        index=True,
+        comment="SHA256 hash of password reset token"
+    )
+    
+    reset_token_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Expiration timestamp for reset token"
     )
     
     # Relationships
@@ -233,17 +260,31 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         return pwd_context.verify(password, self.password_hash)
     
     def has_permission(self, permission: str) -> bool:
-        """Check if user has specific permission"""
+        """Check if user has specific permission (hierarchical)"""
         if self.is_super_admin:
             return True
-        
-        # Aggregate permissions from all assigned roles
+
+        # Use pre-computed effective permissions if available
+        if hasattr(self, '_effective_permissions') and self._effective_permissions is not None:
+            return permission in self._effective_permissions or "*" in self._effective_permissions
+
+        # Fallback: check assigned roles directly
         for role in self.roles:
             if permission in role.permissions or "*" in role.permissions:
                 return True
-        
+
         return False
-    
+
+    def get_effective_permissions(self) -> set[str]:
+        """Get all permissions this user effectively has (including inherited)"""
+        if self.is_super_admin:
+            return {"*"}
+
+        result: set[str] = set()
+        for role in self.roles:
+            result.update(role.permissions)
+        return result
+
     def has_branch_access(self, branch_id: uuid.UUID) -> bool:
         """Check if user has access to a branch (instance method)"""
         return str(branch_id) in {str(b) for b in (self.assigned_branches or [])}

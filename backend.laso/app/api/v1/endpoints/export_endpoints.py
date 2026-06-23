@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user, get_db
+from app.core.deps import get_current_user, get_db, require_permission
 from app.models.user.user_model import User
 from app.services.export.excel_export_service import ExcelExportService
 
@@ -81,7 +81,7 @@ async def export_inventory_excel(
 
 @router.get("/staff/excel")
 async def export_staff_excel(
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("manage_users")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -91,7 +91,6 @@ async def export_staff_excel(
     
     Returns: Excel file download with staff directory
     """
-    # Permission check for admin/super_admin should be added if not in dependency
     file_stream = await ExcelExportService.export_staff_data(
         db=db,
         organization_id=current_user.organization_id,

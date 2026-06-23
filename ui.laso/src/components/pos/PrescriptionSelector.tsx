@@ -195,7 +195,7 @@ export function PrescriptionSelector({
                 const now = new Date().toISOString();
                 saved = {
                     id: crypto.randomUUID(),
-                    organization_id: "",
+                    organization_id: user?.organization_id ?? "",
                     ...payload,
                     prescriber_address: null,
                     diagnosis: null,

@@ -8,11 +8,15 @@ from app.core.deps import (
     get_db, get_current_user, get_current_active_user,
     get_client_ip, get_user_agent, require_permission
 )
+from app.core.config import get_settings
+from app.middleware.rate_limit import rate_limit
 from app.schemas.user_schema import (
     UserCreate, UserResponse, LoginRequest, TokenResponse,
     RefreshTokenRequest, PasswordChange
 )
 from app.models.user.user_model import User
+
+settings = get_settings()
 
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -35,7 +39,11 @@ async def register_user(
     return user
 
 
-@router.post("/login", response_model=TokenResponse)
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+    dependencies=[Depends(rate_limit(max_requests=5, window_seconds=60))]
+)
 async def login(
     request: Request,
     login_data: LoginRequest,
@@ -59,7 +67,7 @@ async def login(
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",
-        expires_in=30 * 60,  # 30 minutes in seconds
+        expires_in=settings.access_token_expire_seconds,
         user=UserResponse.model_validate(user)
     )
 
@@ -106,7 +114,7 @@ async def refresh_token(
         access_token=new_access_token,
         refresh_token=new_refresh_token,
         token_type="bearer",
-        expires_in=30 * 60,
+        expires_in=settings.access_token_expire_seconds,
         user=UserResponse.model_validate(user)
     )
 
@@ -170,7 +178,7 @@ async def get_current_user_info(
     return current_user
 
 
-@router.post("/change-password", status_code=status.HTTP_200_OK)
+@router.post("/change-password", status_code=status.HTTP_401_UNAUTHORIZED)
 async def change_password(
     password_data: PasswordChange,
     current_user: User = Depends(get_current_user),
@@ -181,7 +189,8 @@ async def change_password(
     
     - **Requires**: Valid access token and current password
     - **Action**: Updates password and revokes all sessions
-    - **Returns**: Success message
+    - **Returns**: 401 with PASSWORD_CHANGED detail so the frontend
+      forces re-login and clears stored tokens
     """
     await AuthService.change_password(
         db,
@@ -190,9 +199,11 @@ async def change_password(
         password_data.new_password
     )
     
-    return {
-        "message": "Password changed successfully. Please login again with new password."
-    }
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="PASSWORD_CHANGED",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
 
 
 @router.get("/sessions")
@@ -246,23 +257,31 @@ async def get_user_permissions(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get current user's aggregated permissions
+    Get current user's aggregated permissions (hierarchical)
     
     - **Requires**: Valid access token
-    - **Returns**: Aggregated list of permissions from all assigned roles
+    - **Returns**: Effective permissions after role hierarchy resolution.
+      A role at level N inherits all permissions from roles at level < N.
     """
     from app.models.user.user_model import Permission
     
     if current_user.is_super_admin:
-        permissions = ["*"]
-    else:
-        permissions = set()
-        for role in current_user.roles:
-            for perm in role.permissions:
-                permissions.add(perm)
+        return {
+            "is_super_admin": True,
+            "permissions": ["*"],
+            "branches": current_user.assigned_branches,
+            "max_role_level": 999,
+        }
+    
+    effective = getattr(current_user, '_effective_permissions', None)
+    if effective is None:
+        effective = current_user.get_effective_permissions()
+    
+    max_level = max((r.level for r in current_user.roles), default=0)
     
     return {
-        "is_super_admin": current_user.is_super_admin,
-        "permissions": list(permissions),
-        "branches": current_user.assigned_branches
+        "is_super_admin": False,
+        "permissions": sorted(effective),
+        "branches": current_user.assigned_branches,
+        "max_role_level": max_level,
     }

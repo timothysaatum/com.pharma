@@ -6,6 +6,7 @@ SMS powered by Arkesel (Ghana)
 from typing import Optional, List, Dict, Any
 from dataclasses import dataclass
 from enum import Enum
+import asyncio
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
@@ -15,7 +16,6 @@ import httpx
 import logging
 from pathlib import Path
 from jinja2 import Template
-import urllib.parse
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ class EmailNotifier:
             # Add attachments
             if attachments:
                 for filepath in attachments:
-                    self._add_attachment(msg, filepath)
+                    await self._add_attachment(msg, filepath)
             
             # Prepare recipient list
             recipients = [to] if isinstance(to, str) else to
@@ -145,17 +145,19 @@ class EmailNotifier:
             if bcc:
                 recipients.extend(bcc)
             
-            # Send email
-            if self.config.use_ssl:
-                server = smtplib.SMTP_SSL(self.config.smtp_host, self.config.smtp_port)
-            else:
-                server = smtplib.SMTP(self.config.smtp_host, self.config.smtp_port)
-                if self.config.use_tls:
-                    server.starttls()
-            
-            server.login(self.config.smtp_user, self.config.smtp_password)
-            server.send_message(msg)
-            server.quit()
+            # Send email — run blocking SMTP in a thread to avoid blocking the event loop
+            def _send():
+                if self.config.use_ssl:
+                    server = smtplib.SMTP_SSL(self.config.smtp_host, self.config.smtp_port)
+                else:
+                    server = smtplib.SMTP(self.config.smtp_host, self.config.smtp_port)
+                    if self.config.use_tls:
+                        server.starttls()
+                server.login(self.config.smtp_user, self.config.smtp_password)
+                server.send_message(msg)
+                server.quit()
+
+            await asyncio.to_thread(_send)
             
             logger.info(f"Email sent successfully to {to}")
             return True
@@ -164,16 +166,19 @@ class EmailNotifier:
             logger.error(f"Failed to send email: {str(e)}")
             return False
     
-    def _add_attachment(self, msg: MIMEMultipart, filepath: str):
-        """Add file attachment to email"""
+    async def _add_attachment(self, msg: MIMEMultipart, filepath: str):
+        """Add file attachment to email — async file read"""
         try:
-            with open(filepath, 'rb') as f:
-                part = MIMEBase('application', 'octet-stream')
-                part.set_payload(f.read())
-                encoders.encode_base64(part)
-                filename = Path(filepath).name
-                part.add_header('Content-Disposition', f'attachment; filename={filename}')
-                msg.attach(part)
+            def _read():
+                with open(filepath, 'rb') as f:
+                    return f.read()
+            payload = await asyncio.to_thread(_read)
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(payload)
+            encoders.encode_base64(part)
+            filename = Path(filepath).name
+            part.add_header('Content-Disposition', f'attachment; filename={filename}')
+            msg.attach(part)
         except Exception as e:
             logger.error(f"Failed to attach file {filepath}: {str(e)}")
     
@@ -210,8 +215,11 @@ class EmailNotifier:
             )
         """
         try:
-            with open(template_path, 'r') as f:
-                template = Template(f.read())
+            def _read_template():
+                with open(template_path, 'r') as f:
+                    return f.read()
+            template_source = await asyncio.to_thread(_read_template)
+            template = Template(template_source)
             
             html_body = template.render(**context)
             
@@ -287,25 +295,29 @@ class ArkeselSMSNotifier:
                 print(f"Failed: {result.get('error')}")
         """
         try:
-            # Encode message for URL
-            encoded_message = urllib.parse.quote(message)
-            
             recipients = [to] if isinstance(to, str) else to
             results = []
             
             for recipient in recipients:
-                # Build URL with query parameters (Arkesel v1 style)
-                url = (
-                    f"{self.config.base_url}?"
-                    f"action=send-sms&"
-                    f"api_key={self.config.api_key}&"
-                    f"to={recipient}&"
-                    f"from={self.config.sender_id}&"
-                    f"sms={encoded_message}"
-                )
+                # POST with API key in Authorization header (never in URL query string)
+                payload = {
+                    "action": "send-sms",
+                    "to": recipient,
+                    "from": self.config.sender_id,
+                    "sms": message,
+                }
+                headers = {
+                    "Authorization": f"Bearer {self.config.api_key}",
+                    "Content-Type": "application/json",
+                }
                 
                 async with httpx.AsyncClient() as client:
-                    response = await client.get(url, timeout=self.config.timeout)
+                    response = await client.post(
+                        self.config.base_url,
+                        json=payload,
+                        headers=headers,
+                        timeout=self.config.timeout
+                    )
                     
                     result = {
                         'recipient': recipient,

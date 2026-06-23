@@ -1,14 +1,15 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select, or_
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import uuid
 
-from app.core.deps import get_db, require_permission
+from app.core.deps import get_db, require_permission, get_client_ip, get_user_agent
 from app.models.user.user_model import User, Role, Permission
 from app.schemas.user_schema import UserCreate, UserUpdate, UserResponse
 from app.services.auth.auth_service import AuthService
+from app.services.audit_service import AuditService
 from app.utils.pagination import PaginatedResponse
 
 router = APIRouter(prefix="/users")
@@ -167,10 +168,10 @@ async def create_user(
     """
     Create a new user in the organization.
     """
-    if not user_data.organization_id:
-        user_data = user_data.model_copy(
-            update={"organization_id": current_user.organization_id}
-        )
+    # Always enforce the current user's organization — never trust client input
+    user_data = user_data.model_copy(
+        update={"organization_id": current_user.organization_id}
+    )
 
     if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_branch_assignment(current_user, user_data.assigned_branches)
@@ -252,26 +253,29 @@ async def update_user(
 
 @router.post("/{user_id}/activate", response_model=UserResponse)
 async def activate_user(
+    request: Request,
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """Re-activate a previously deactivated user."""
-    return await _set_active(db, user_id, current_user, True)
+    return await _set_active(db, user_id, current_user, True, request)
 
 
 @router.post("/{user_id}/deactivate", response_model=UserResponse)
 async def deactivate_user(
+    request: Request,
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """Deactivate a user account (non-destructive; preserves all data)."""
-    return await _set_active(db, user_id, current_user, False)
+    return await _set_active(db, user_id, current_user, False, request)
 
 
 async def _set_active(
-    db: AsyncSession, user_id: uuid.UUID, current_user: User, active: bool
+    db: AsyncSession, user_id: uuid.UUID, current_user: User, active: bool,
+    request: Request | None = None,
 ) -> UserResponse:
     from datetime import datetime, timezone
     from app.services.auth.auth_service import AuthService as AS
@@ -303,6 +307,22 @@ async def _set_active(
 
     await db.commit()
     await db.refresh(user)
+
+    # Audit: user activation/deactivation
+    ip = get_client_ip(request) if request else None
+    ua = get_user_agent(request) if request else None
+    await AuditService.log(
+        db, current_user.organization_id,
+        action="activate" if active else "deactivate",
+        user_id=current_user.id,
+        entity_type="user",
+        entity_id=user.id,
+        changes={"is_active": active},
+        ip_address=ip,
+        user_agent=ua,
+    )
+    await db.commit()
+
     return UserResponse.model_validate(user)
 
 
@@ -312,6 +332,7 @@ async def _set_active(
 
 @router.post("/{user_id}/unlock", response_model=UserResponse)
 async def unlock_user(
+    request: Request,
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
@@ -342,6 +363,22 @@ async def unlock_user(
 
     await db.commit()
     await db.refresh(user)
+
+    # Audit: account unlocked by admin
+    ip = get_client_ip(request)
+    ua = get_user_agent(request)
+    await AuditService.log(
+        db, current_user.organization_id,
+        action="unlock",
+        user_id=current_user.id,
+        entity_type="user",
+        entity_id=user.id,
+        changes={"account_locked_until": None, "failed_login_attempts": 0},
+        ip_address=ip,
+        user_agent=ua,
+    )
+    await db.commit()
+
     return UserResponse.model_validate(user)
 
 
@@ -351,6 +388,7 @@ async def unlock_user(
 
 @router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_user(
+    request: Request,
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
@@ -387,4 +425,20 @@ async def delete_user(
     user.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
+
+    # Audit: user soft-deleted
+    ip = get_client_ip(request)
+    ua = get_user_agent(request)
+    await AuditService.log(
+        db, current_user.organization_id,
+        action="delete",
+        user_id=current_user.id,
+        entity_type="user",
+        entity_id=user.id,
+        changes={"deleted_at": str(user.deleted_at), "is_active": False},
+        ip_address=ip,
+        user_agent=ua,
+    )
+    await db.commit()
+
     return None

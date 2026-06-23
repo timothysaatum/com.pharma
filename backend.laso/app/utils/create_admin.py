@@ -1,4 +1,6 @@
 import asyncio
+import secrets
+import string
 import uuid
 import sys
 from pathlib import Path
@@ -53,12 +55,14 @@ async def create_initial_admin():
             else:
                 print(f"Using existing organization: {org.name} (ID: {org.id})")
             
-            # Create admin user
+            # Create admin user with a cryptographically random password
+            alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
+            admin_password = "".join(secrets.choice(alphabet) for _ in range(24))
             print("Creating admin user...")
             admin_data = UserCreate(
                 username="admin",
                 email="admin@pharmacy.com",
-                password="Admin@123456",
+                password=admin_password,
                 full_name="System Administrator",
                 organization_id=org.id,
                 assigned_branches=[],
@@ -75,12 +79,12 @@ async def create_initial_admin():
             print("="*60)
             print(f"Username:     {user.username}")
             print(f"Email:        {user.email}")
-            print(f"Password:     Admin@123456")
+            print(f"Password:     {admin_password}")
             print(f"Super Admin:  Yes")
             print(f"Organization: {org.name}")
             print(f"User ID:      {user.id}")
             print("="*60)
-            print("\n  IMPORTANT: Change the default password after first login!")
+            print("\n  !!! SAVE THIS PASSWORD - IT WILL NOT BE SHOWN AGAIN !!!")
             print("\n")
             
         except Exception as e:

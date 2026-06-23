@@ -24,7 +24,15 @@ pwd_context = CryptContext(
 )
 
 # Encryption for sensitive data
-ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", Fernet.generate_key())
+# WARNING: ENCRYPTION_KEY must be set via environment variable.
+# Never auto-generate — that would make previously encrypted data undecryptable after restart.
+_raw_key = os.environ.get("ENCRYPTION_KEY")
+if not _raw_key:
+    raise RuntimeError(
+        "ENCRYPTION_KEY environment variable is not set. "
+        "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+    )
+ENCRYPTION_KEY = _raw_key.encode() if isinstance(_raw_key, str) else _raw_key
 cipher_suite = Fernet(ENCRYPTION_KEY)
 
 

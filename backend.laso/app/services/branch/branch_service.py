@@ -141,7 +141,11 @@ class BranchService:
             result = await db.execute(
                 select(User).where(
                     User.organization_id == branch_data.organization_id,
-                    or_(User.is_super_admin == True, User.assigned_branches == '[]', User.assigned_branches == []),
+                    or_(
+                        User.is_super_admin == True,
+                        User.assigned_branches.is_(None),
+                        func.array_length(User.assigned_branches, 1).is_(None),
+                    ),
                     User.is_active == True,
                     User.is_deleted == False,
                 )
@@ -498,8 +502,10 @@ class BranchService:
         sales_month = sales_month_query.scalar() or 0.0
 
         # 3. Active users
-        # Note: assigned_branches is a custom ARRAY type (stored as JSON string in SQLite)
-        # We use a LIKE check for compatibility with the SQLite implementation.
+        # assigned_branches is a custom ARRAY(UUID) column.
+        # PostgreSQL: use func.array_position(User.assigned_branches, branch_id).isnot(None)
+        # SQLite: use LIKE with JSON encoding — wrap in quotes to avoid substring false positives.
+        uuid_pattern = f'%"{str(branch_id)}"%'
         users_query = await db.execute(
             select(func.count(User.id))
             .where(
@@ -507,7 +513,7 @@ class BranchService:
                     User.organization_id == branch.organization_id,
                     User.is_active == True,
                     User.is_deleted == False,
-                    User.assigned_branches.like(f'%{str(branch_id)}%')
+                    User.assigned_branches.like(uuid_pattern)
                 )
             )
         )

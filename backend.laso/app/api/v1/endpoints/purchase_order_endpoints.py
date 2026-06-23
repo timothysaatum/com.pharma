@@ -103,6 +103,8 @@ async def get_supplier(
 ) -> Supplier:
     """Fetch a supplier by ID."""
     supplier = await PurchaseOrderService.get_supplier(db, supplier_id)
+    if not supplier:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
     if supplier.organization_id != current_user.organization_id:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
     return supplier

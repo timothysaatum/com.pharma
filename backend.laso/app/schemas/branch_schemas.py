@@ -169,11 +169,6 @@ class BranchAssignment(BaseSchema):
     """Schema for assigning users to branches"""
     user_id: uuid.UUID
     branch_ids: List[uuid.UUID] = Field(..., min_length=1, description="List of branch IDs to assign")
-    
-    @field_validator("branch_ids", mode="after")
-    @classmethod
-    def serialize_uuid_list(cls, values):
-        return [str(v) for v in values]
 
 
 

@@ -66,7 +66,7 @@ const DRUG_TYPE_COLORS: Record<string, string> = {
 
 export default function DrugListPage() {
     const { user, activeBranchId } = useAuthStore();
-    const canEdit = user?.is_super_admin || user?.assigned_branches.length === 0;
+    const canEdit = user?.is_super_admin || (user?.assigned_branches?.length ?? 0) === 0;
 
     // FIX: tree gives hierarchy in the filter dropdown — shared cache with DrugForm
     const { tree: categoryTree, invalidate: invalidateCategories } = useCategoryTree();

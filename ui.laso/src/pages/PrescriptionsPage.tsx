@@ -70,7 +70,7 @@ export default function PrescriptionsPage() {
   const [items, setItems] = useState<PrescriptionRow[]>([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"" | PrescriptionStatus>("");
-  const [includeExpired, setIncludeExpired] = useState(true);
+  const [includeExpired, setIncludeExpired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [updatingId, setUpdatingId] = useState<string | null>(null);

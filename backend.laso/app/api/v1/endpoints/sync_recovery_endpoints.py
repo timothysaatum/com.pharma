@@ -26,7 +26,7 @@ from app.services.sync.sync_integrity import (
 )
 
 router = APIRouter(
-    prefix="/api/v1/admin/sync-recovery",
+    prefix="/admin/sync-recovery",
     tags=["sync-recovery"],
     dependencies=[Depends(get_current_user)],
 )

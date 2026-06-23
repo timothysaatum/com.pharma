@@ -146,20 +146,62 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                         del self.requests[client_ip]
 
 
-# Decorator for route-specific rate limiting
+# ── Per-route rate limiter (FastAPI dependency) ──────────────────────
+
+_per_route_limits: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
+_route_lock = asyncio.Lock()
+
+
+def _get_client_ip_from_request(request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip
+    return request.client.host if request.client else "unknown"
+
+
 def rate_limit(max_requests: int = 10, window_seconds: int = 60):
     """
-    Decorator for custom rate limiting on specific routes
-    
+    Dependency factory for per-route per-IP rate limiting.
+
     Usage:
-        @router.post("/login")
-        @rate_limit(max_requests=5, window_seconds=300)
-        async def login(...):
+        @router.post("/login",
+                     dependencies=[Depends(rate_limit(5, 60))])
+        async def login(request: Request, ...):
             ...
     """
-    def decorator(func):
-        # Store rate limit config on function
-        func._rate_limit_max = max_requests
-        func._rate_limit_window = window_seconds
-        return func
-    return decorator
+    from fastapi import Request, HTTPException, status
+
+    # Unique key per call to rate_limit()
+    _rate_limit_counter[0] += 1
+    route_id = f"rl_{_rate_limit_counter[0]}"
+
+    async def _rate_limit_dependency(request: Request) -> None:
+        if not settings.RATE_LIMIT_ENABLED:
+            return
+
+        client_ip = _get_client_ip_from_request(request)
+        store_key = f"{route_id}:{client_ip}"
+        now = datetime.now()
+        cutoff = now - timedelta(seconds=window_seconds)
+
+        async with _route_lock:
+            entries = _per_route_limits[store_key]
+            entries = [ts for ts in entries if ts > cutoff]
+
+            if len(entries) >= max_requests:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail=f"Too many requests. Max {max_requests} per {window_seconds} seconds.",
+                    headers={"Retry-After": str(window_seconds)},
+                )
+
+            entries.append(now)
+            _per_route_limits[store_key] = entries
+
+    return _rate_limit_dependency
+
+
+_rate_limit_counter: list[int] = [0]

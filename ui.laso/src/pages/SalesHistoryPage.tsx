@@ -893,6 +893,7 @@ export default function SalesHistoryPage() {
                             branch_id: activeBranchId ?? undefined,
                             status: statusFilter || undefined,
                             payment_method: paymentFilter || undefined,
+                            search: debouncedSearch || undefined,
                             start_date: dateToIsoDateTime(startDate, false),
                             end_date: dateToIsoDateTime(endDate, true),
                         },

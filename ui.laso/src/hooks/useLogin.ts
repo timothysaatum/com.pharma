@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -53,9 +53,12 @@ export function useLogin(options: UseLoginOptions = {}) {
     });
 
     // Clear error whenever the user edits any field
-    form.watch(() => {
-        if (error) setError(null);
-    });
+    useEffect(() => {
+        const sub = form.watch(() => {
+            if (error) setError(null);
+        });
+        return () => sub.unsubscribe();
+    }, [form, error]);
 
     const submit = async (values: LoginValues) => {
         setIsSubmitting(true);

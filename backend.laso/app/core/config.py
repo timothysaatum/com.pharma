@@ -1,9 +1,13 @@
+import logging
+import secrets
 from functools import lru_cache
 from typing import List, Optional
 
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 import json
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -19,7 +23,11 @@ class Settings(BaseSettings):
     # -------------------------
     # Security / Auth
     # -------------------------
-    SECRET_KEY: str = ""
+    SECRET_KEY: str = Field(
+        default="",
+        min_length=32,
+        description="JWT signing key. Must be at least 32 characters in production."
+    )
     ALGORITHM: str = "HS256"
 
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 150
@@ -71,6 +79,11 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = Field(default_factory=list)
 
     # -------------------------
+    # Frontend URL (for password reset links, etc.)
+    # -------------------------
+    FRONTEND_URL: str = "http://localhost:5173"
+
+    # -------------------------
     # Email (SMTP)
     # -------------------------
     SMTP_HOST: str = ""
@@ -96,6 +109,19 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    def model_post_init(self, __context):
+        if self.ENVIRONMENT.lower() == "production":
+            if not self.SECRET_KEY or len(self.SECRET_KEY) < 32:
+                raise ValueError(
+                    "SECRET_KEY must be at least 32 characters in production. "
+                    "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
+                )
+            if self.DATABASE_URL.startswith("sqlite"):
+                logger.warning(
+                    "SQLite is not recommended for production. "
+                    "Use PostgreSQL with DATABASE_URL=postgresql+asyncpg://..."
+                )
 
     # -------------------------
     # Validators

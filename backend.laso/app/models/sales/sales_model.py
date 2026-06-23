@@ -125,6 +125,12 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
         Numeric(5, 2),
         comment="Snapshot of discount percentage from contract"
     )
+
+    contract_type: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        nullable=True,
+        comment="Snapshot of contract type (insurance, corporate, staff, etc.)"
+    )
     
     # ==================== PAYMENT DETAILS ====================
     
@@ -157,6 +163,18 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     payment_reference: Mapped[Optional[str]] = mapped_column(
         String(255),
         comment="Transaction ID from payment gateway"
+    )
+
+    split_payment_details: Mapped[Optional[dict]] = mapped_column(
+        JSONB,
+        nullable=True,
+        comment="Split payment breakdown: {method: amount}"
+    )
+
+    insurance_preauth_number: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Insurance pre-authorization number"
     )
     
     # ==================== PRESCRIPTION INFORMATION ====================

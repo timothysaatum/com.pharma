@@ -41,20 +41,15 @@ logger = logging.getLogger(__name__)
 # LOYALTY TIER THRESHOLDS
 # ─────────────────────────────────────────────────────────────────────────────
 
-LOYALTY_TIERS = [
-    ("platinum", 5000),
-    ("gold",     2000),
-    ("silver",   500),
-    ("bronze",   0),
-]
+from app.services.sales.utils.sale_helpers import resolve_loyalty_tier as _resolve_loyalty_tier, DEFAULT_LOYALTY_THRESHOLDS
 
 
 def _tier_for_points(points: int) -> str:
-    """Return the tier name for a given points total."""
-    for tier_name, threshold in LOYALTY_TIERS:
-        if points >= threshold:
-            return tier_name
-    return "bronze"
+    """
+    Return the tier name for a given points total.
+    Uses the same default thresholds as resolve_loyalty_tier in sale_helpers.
+    """
+    return _resolve_loyalty_tier(points, DEFAULT_LOYALTY_THRESHOLDS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

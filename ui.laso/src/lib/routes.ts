@@ -14,11 +14,11 @@ export function getHomePath(user: User | null): string {
     // Org Admins (no branch assignments) go to dashboard
     if (user.assigned_branches.length === 0) return "/admin";
 
-    // If user has management roles, go to admin dashboard
-    const managementRoles = ["Admin", "Manager", "Pharmacist"];
-    const hasManagementRole = user.roles.some(r => managementRoles.includes(r.name));
+    // Use hierarchical role level: roles at level >= 20 are management
+    const maxLevel = user.effective_permissions?.max_role_level
+        ?? Math.max(...user.roles.map(r => r.level), 0);
 
-    if (hasManagementRole) {
+    if (maxLevel >= 20) {
         return "/admin";
     }
 

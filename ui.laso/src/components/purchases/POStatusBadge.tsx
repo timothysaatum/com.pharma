@@ -11,7 +11,7 @@ const CONFIG: Record<
     draft: { label: "Draft", cls: "bg-slate-100 text-slate-600" },
     pending: { label: "Pending", cls: "bg-amber-50  text-amber-700 border border-amber-200" },
     approved: { label: "Approved", cls: "bg-blue-50   text-blue-700  border border-blue-200" },
-    ordered: { label: "Partial", cls: "bg-violet-50 text-violet-700 border border-violet-200" },
+    ordered: { label: "Ordered", cls: "bg-violet-50 text-violet-700 border border-violet-200" },
     received: { label: "Received", cls: "bg-green-50  text-green-700 border border-green-200" },
     cancelled: { label: "Cancelled", cls: "bg-red-50    text-red-600   border border-red-200" },
 };

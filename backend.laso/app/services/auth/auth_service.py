@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from typing import Tuple
+from typing import Tuple, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from sqlalchemy.orm import selectinload
@@ -15,6 +15,7 @@ from app.core.security import (
     create_refresh_token, decode_token, hash_token, SecurityUtils
 )
 from app.core.config import get_settings
+from app.services.audit_service import AuditService
 settings = get_settings()
 
 
@@ -123,7 +124,7 @@ class AuthService:
         )
         user = result.scalar_one_or_none()
         
-        # Generic error message for security
+        # Generic error message for security (prevents username enumeration)
         auth_error = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -133,39 +134,49 @@ class AuthService:
         if not user:
             raise auth_error
         
-        # Check if account is locked
+        # Check if account is locked — use generic message to prevent enumeration
+        if user.account_locked_until and user.account_locked_until > datetime.now(timezone.utc):
+            raise auth_error
+        
         if user.account_locked_until:
-            if user.account_locked_until > datetime.now(timezone.utc):
-                remaining_minutes = int(
-                    (user.account_locked_until - datetime.now(timezone.utc)).total_seconds() / 60
-                )
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Account locked. Try again in {remaining_minutes} minutes",
-                )
-            else:
-                # Lock expired, clear it
-                user.account_locked_until = None
-                user.failed_login_attempts = 0
+            user.account_locked_until = None
+            user.failed_login_attempts = 0
         
         # Verify password
         if not verify_password(login_data.password, user.password_hash):
+            # Check if the attempt window has expired — reset counter
+            window = timedelta(minutes=settings.LOGIN_ATTEMPT_WINDOW_MINUTES)
+            if user.last_login and (datetime.now(timezone.utc) - user.last_login) > window:
+                user.failed_login_attempts = 0
+            
             # Increment failed attempts
             user.failed_login_attempts += 1
             
-            # Lock account if too many failures
+            was_locked = False
+            # Lock account if too many failures within the window
             if user.failed_login_attempts >= settings.MAX_LOGIN_ATTEMPTS:
                 user.account_locked_until = datetime.now(timezone.utc) + timedelta(
                     minutes=settings.ACCOUNT_LOCKOUT_DURATION_MINUTES
                 )
-                await db.commit()
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Account locked due to too many failed login attempts. "
-                           f"Try again in {settings.ACCOUNT_LOCKOUT_DURATION_MINUTES} minutes",
-                )
+                was_locked = True
             
             await db.commit()
+
+            # Audit: failed login attempt
+            await AuditService.log(
+                db, user.organization_id,
+                action="login_failed",
+                user_id=user.id,
+                entity_type="user",
+                entity_id=user.id,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                context_metadata={
+                    "attempt": user.failed_login_attempts,
+                    "locked": was_locked,
+                },
+            )
+            
             raise auth_error
         
         # Check if user is active
@@ -188,9 +199,6 @@ class AuthService:
             data={"sub": str(user.id), "type": "refresh"}
         )
         
-        # Clean up old sessions (keep only recent ones)
-        await AuthService._cleanup_old_sessions(db, user.id)
-        
         # Create session
         session = UserSession(
             id=uuid.uuid4(),
@@ -208,8 +216,25 @@ class AuthService:
         )
         
         db.add(session)
+        await db.flush()
+        
+        # Clean up old sessions after adding the new one so the count is accurate
+        await AuthService._cleanup_old_sessions(db, user.id)
+        
         await db.commit()
         await db.refresh(user)
+
+        # Audit: successful login
+        await AuditService.log(
+            db, user.organization_id,
+            action="login",
+            user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            context_metadata={"method": "password"},
+        )
         
         return user, access_token, refresh_token
     
@@ -221,7 +246,12 @@ class AuthService:
         user_agent: str
     ) -> Tuple[str, str]:
         """
-        Refresh access token using refresh token
+        Refresh access token using refresh token (with rotation)
+        
+        - Revokes the old session on every refresh (rotation)
+        - Creates a brand-new session record
+        - If a stolen refresh token is used, the legitimate session's
+          token_hash no longer matches — detecting theft immediately
         
         Args:
             db: Async database session
@@ -245,13 +275,14 @@ class AuthService:
         
         user_id = uuid.UUID(payload.get("sub"))
         
-        # Verify session exists
+        # Verify session exists and is not expired
         token_hash_value = hash_token(refresh_token)
         result = await db.execute(
             select(UserSession).where(
                 UserSession.user_id == user_id,
                 UserSession.refresh_token_hash == token_hash_value,
-                UserSession.is_revoked == False
+                UserSession.is_revoked == False,
+                UserSession.expires_at > datetime.now(timezone.utc)
             )
         )
         session = result.scalar_one_or_none()
@@ -288,15 +319,26 @@ class AuthService:
             data={"sub": str(user.id), "type": "refresh"}
         )
         
-        # Update session
-        session.token_hash = hash_token(new_access_token)
-        session.refresh_token_hash = hash_token(new_refresh_token)
-        session.expires_at = datetime.now(timezone.utc) + timedelta(
-            minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+        # Revoke old session (rotation)
+        session.is_revoked = True
+        session.revoked_at = datetime.now(timezone.utc)
+        
+        # Create new session record
+        new_session = UserSession(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            token_hash=hash_token(new_access_token),
+            refresh_token_hash=hash_token(new_refresh_token),
+            ip_address=ip_address,
+            user_agent=user_agent,
+            expires_at=datetime.now(timezone.utc) + timedelta(
+                minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+            ),
+            is_revoked=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
         )
-        session.ip_address = ip_address
-        session.user_agent = user_agent
-        session.updated_at = datetime.now(timezone.utc)
+        db.add(new_session)
         
         await db.commit()
         
@@ -339,6 +381,18 @@ class AuthService:
         Returns:
             Number of sessions revoked
         """
+        count = await AuthService._revoke_all_sessions(db, user)
+        await db.commit()
+        return count
+
+    @staticmethod
+    async def _revoke_all_sessions(db: AsyncSession, user: User) -> int:
+        """
+        Revoke all user sessions without committing (for batching).
+        
+        Returns:
+            Number of sessions revoked
+        """
         result = await db.execute(
             select(UserSession).where(
                 UserSession.user_id == user.id,
@@ -353,7 +407,6 @@ class AuthService:
             session.revoked_at = datetime.now(timezone.utc)
             count += 1
         
-        await db.commit()
         return count
     
     @staticmethod
@@ -403,8 +456,20 @@ class AuthService:
         user.updated_at = datetime.now(timezone.utc)
         
         # Revoke all existing sessions for security
-        await AuthService.logout_all_sessions(db, user)
+        count = await AuthService._revoke_all_sessions(db, user)
         
+        await db.commit()
+        
+        # Audit: password changed (batch with a second commit for the audit entry)
+        await AuditService.log(
+            db, user.organization_id,
+            action="password_change",
+            user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            changes={"password_changed_at": str(user.password_changed_at)},
+            context_metadata={"sessions_revoked": count},
+        )
         await db.commit()
     
     @staticmethod
