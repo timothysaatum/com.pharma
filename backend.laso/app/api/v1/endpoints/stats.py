@@ -37,7 +37,7 @@ async def get_branch_with_stats(
     **Use Case**: Branch dashboard, performance monitoring
     """
     # Check access
-    if current_user.role not in ['admin', 'super_admin']:
+    if not current_user.is_super_admin:
         assigned_branch_ids = {str(b) for b in (current_user.assigned_branches or [])}
         if str(branch_id) not in assigned_branch_ids:
             raise HTTPException(

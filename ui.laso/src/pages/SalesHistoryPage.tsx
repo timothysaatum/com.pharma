@@ -1009,7 +1009,7 @@ export default function SalesHistoryPage() {
                 <div>
                     <h1 className="font-display text-2xl font-bold text-ink">Sales History</h1>
                     <p className="text-sm text-ink-muted mt-0.5">
-                        {user?.full_name} · {user?.role}
+                        {user?.full_name} · {user?.is_super_admin ? "Super Admin" : user?.roles?.map(r => r.name).join(", ")}
                         {total > 0 && (
                             <span className="ml-2 text-ink-muted">· {total.toLocaleString()} sales</span>
                         )}

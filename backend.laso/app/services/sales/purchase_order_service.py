@@ -187,7 +187,7 @@ class PurchaseOrderService:
             )
         if (
             str(po_data.branch_id) not in {str(b) for b in (user.assigned_branches or [])}
-            and user.role not in ("super_admin", "admin")
+            and not user.is_super_admin
         ):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

@@ -28,7 +28,7 @@ router = APIRouter(prefix="/drugs", tags=["Drugs"])
 
 
 def _ensure_branch_price_access(current_user: User, branch_id: Optional[uuid.UUID]) -> None:
-    if branch_id is None or current_user.role in ("super_admin", "admin"):
+    if branch_id is None or current_user.is_super_admin:
         return
     if str(branch_id) not in {str(b) for b in (current_user.assigned_branches or [])}:
         raise HTTPException(

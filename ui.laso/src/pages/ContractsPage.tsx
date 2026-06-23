@@ -64,8 +64,8 @@ function StatusBadge({ status }: { status: string }) {
 
 export default function ContractsPage() {
     const { user } = useAuthStore();
-    const canManage = !!user?.role && ["super_admin", "admin", "manager"].includes(user.role);
-    const canDelete = !!user?.role && ["super_admin", "admin"].includes(user.role);
+    const canManage = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0 || user?.roles.some(r => r.permissions.includes("manage_pricing") || r.permissions.includes("*"));
+    const canDelete = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0;
 
     // ── List state ─────────────────────────────────────────────────────────────
     const [contracts, setContracts] = useState<ContractResponse[]>([]);

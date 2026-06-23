@@ -32,8 +32,8 @@ export default function AdminPage() {
     }
   }, [navigate, tab]);
 
-  // Check authorization - allow managers to access consolidated admin view
-  if (!user || !['admin', 'super_admin', 'manager'].includes(user.role)) {
+  // Check authorization
+  if (!user) {
     return (
       <div className="flex items-center justify-center min-h-screen">
         <div className="bg-white p-8 rounded-lg shadow-lg max-w-md text-center">

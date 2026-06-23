@@ -3,7 +3,6 @@ import type {
     UserResponse,
     UserCreate,
     UserUpdate,
-    UserRole,
     PaginatedResponse,
 } from "@/types";
 
@@ -15,7 +14,6 @@ export interface UserFilters {
     page?: number;
     page_size?: number;
     search?: string;
-    role?: UserRole | "";
     is_active?: boolean | null;
     branch_id?: string;
 }
@@ -34,7 +32,6 @@ export const usersApi = {
         if (filters.page) params.page = filters.page;
         if (filters.page_size) params.page_size = filters.page_size;
         if (filters.search) params.search = filters.search;
-        if (filters.role) params.role = filters.role;
         if (filters.branch_id) params.branch_id = filters.branch_id;
         if (filters.is_active !== null && filters.is_active !== undefined) {
             params.is_active = filters.is_active;

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
+from sqlalchemy.orm import selectinload
 from fastapi import HTTPException, status
 import uuid
 
@@ -74,7 +75,6 @@ class AuthService:
             username=user_data.username,
             email=user_data.email.lower(),
             full_name=user_data.full_name,
-            role=user_data.role,
             phone=user_data.phone,
             employee_id=user_data.employee_id,
             assigned_branches=user_data.assigned_branches or [],
@@ -114,7 +114,9 @@ class AuthService:
         """
         # Find user
         result = await db.execute(
-            select(User).where(
+            select(User)
+            .options(selectinload(User.roles))
+            .where(
                 User.username == login_data.username,
                 User.deleted_at.is_(None)
             )
@@ -180,7 +182,7 @@ class AuthService:
         
         # Create tokens
         access_token = create_access_token(
-            data={"sub": str(user.id), "username": user.username, "role": user.role}
+            data={"sub": str(user.id), "username": user.username}
         )
         refresh_token = create_refresh_token(
             data={"sub": str(user.id), "type": "refresh"}
@@ -262,7 +264,9 @@ class AuthService:
         
         # Get user
         result = await db.execute(
-            select(User).where(
+            select(User)
+            .options(selectinload(User.roles))
+            .where(
                 User.id == user_id,
                 User.is_active == True,
                 User.deleted_at.is_(None)
@@ -278,7 +282,7 @@ class AuthService:
         
         # Create new tokens
         new_access_token = create_access_token(
-            data={"sub": str(user.id), "username": user.username, "role": user.role}
+            data={"sub": str(user.id), "username": user.username}
         )
         new_refresh_token = create_refresh_token(
             data={"sub": str(user.id), "type": "refresh"}

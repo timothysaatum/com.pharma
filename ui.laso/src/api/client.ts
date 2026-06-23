@@ -131,18 +131,23 @@ export async function get<T>(url: string, config?: { signal?: AbortSignal; param
     return data;
 }
 
-export async function post<T>(url: string, body?: unknown): Promise<T> {
-    const { data } = await apiClient.post<T>(url, body);
+export async function post<T>(url: string, body?: unknown, config?: { signal?: AbortSignal }): Promise<T> {
+    const { data } = await apiClient.post<T>(url, body, { signal: config?.signal });
     return data;
 }
 
-export async function patch<T>(url: string, body?: unknown): Promise<T> {
-    const { data } = await apiClient.patch<T>(url, body);
+export async function put<T>(url: string, body?: unknown, config?: { signal?: AbortSignal }): Promise<T> {
+    const { data } = await apiClient.put<T>(url, body, { signal: config?.signal });
     return data;
 }
 
-export async function del<T>(url: string): Promise<T> {
-    const { data } = await apiClient.delete<T>(url);
+export async function patch<T>(url: string, body?: unknown, config?: { signal?: AbortSignal }): Promise<T> {
+    const { data } = await apiClient.patch<T>(url, body, { signal: config?.signal });
+    return data;
+}
+
+export async function del<T>(url: string, config?: { signal?: AbortSignal }): Promise<T> {
+    const { data } = await apiClient.delete<T>(url, { signal: config?.signal });
     return data;
 }
 

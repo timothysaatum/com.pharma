@@ -2,10 +2,11 @@ from app.services.auth.auth_service import AuthService
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.deps import (
     get_db, get_current_user, get_current_active_user,
-    get_client_ip, get_user_agent, require_role
+    get_client_ip, get_user_agent, require_permission
 )
 from app.schemas.user_schema import (
     UserCreate, UserResponse, LoginRequest, TokenResponse,
@@ -21,12 +22,12 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 async def register_user(
     user_data: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin"))
+    current_user: User = Depends(require_permission("manage_users"))
 ):
     """
     Register a new user (Admin only)
     
-    - **Requires**: admin or super_admin role
+    - **Requires**: manage_users permission
     - **Validates**: username, email uniqueness and password strength
     - **Returns**: Created user information
     """
@@ -94,7 +95,11 @@ async def refresh_token(
         )
     
     user_id = uuid.UUID(payload["sub"])
-    result = await db.execute(select(User).where(User.id == user_id))
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.roles))
+        .where(User.id == user_id)
+    )
     user = result.scalar_one_or_none()
     
     return TokenResponse(
@@ -232,7 +237,7 @@ async def verify_token(
         "valid": True,
         "user_id": str(current_user.id),
         "username": current_user.username,
-        "role": current_user.role
+        "is_super_admin": current_user.is_super_admin
     }
 
 
@@ -241,49 +246,23 @@ async def get_user_permissions(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get current user's permissions
+    Get current user's aggregated permissions
     
     - **Requires**: Valid access token
-    - **Returns**: List of permissions based on role
+    - **Returns**: Aggregated list of permissions from all assigned roles
     """
-    # Define role-based permissions
-    role_permissions = {
-        'super_admin': ['*'],
-        'admin': [
-            'manage_users', 'manage_branches', 'manage_drugs',
-            'manage_inventory', 'process_sales', 'view_reports',
-            'export_data', 'manage_suppliers', 'manage_purchase_orders'
-        ],
-        'manager': [
-            'manage_drugs', 'manage_inventory', 'process_sales',
-            'view_reports', 'export_data', 'manage_suppliers'
-        ],
-        'pharmacist': [
-            'view_drugs', 'process_sales', 'view_inventory',
-            'manage_prescriptions', 'verify_prescriptions'
-        ],
-        'cashier': [
-            'view_drugs', 'process_sales', 'view_inventory'
-        ],
-        'viewer': [
-            'view_drugs', 'view_inventory', 'view_reports'
-        ]
-    }
+    from app.models.user.user_model import Permission
     
-    base_permissions = role_permissions.get(current_user.role, [])
-    additional_permissions = current_user.permissions.get('additional', [])
-    denied_permissions = current_user.permissions.get('denied', [])
-    
-    # Combine permissions
-    if '*' in base_permissions:
-        permissions = ['*']
+    if current_user.is_super_admin:
+        permissions = ["*"]
     else:
-        permissions = list(set(base_permissions + additional_permissions))
-        # Remove denied permissions
-        permissions = [p for p in permissions if p not in denied_permissions]
+        permissions = set()
+        for role in current_user.roles:
+            for perm in role.permissions:
+                permissions.add(perm)
     
     return {
-        "role": current_user.role,
-        "permissions": permissions,
+        "is_super_admin": current_user.is_super_admin,
+        "permissions": list(permissions),
         "branches": current_user.assigned_branches
     }

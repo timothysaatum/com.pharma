@@ -18,7 +18,7 @@ import UsersPage from "@/pages/UsersPage";
 import ReportsPage from "@/pages/ReportsPage";
 import AdminPage from "@/pages/AdminPage";
 import AuditLogPage from "@/pages/AuditLogPage";
-import { getHomePathForRole } from "@/lib/routes";
+import { getHomePath } from "@/lib/routes";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -57,20 +57,25 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
  */
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
-  if (!user || !["admin", "super_admin"].includes(user.role)) {
-    return <Navigate to={getHomePathForRole(user?.role)} replace />;
+  if (!user) return <Navigate to="/login" replace />;
+
+  if (!user.is_super_admin && user.assigned_branches.length > 0) {
+    // Branch-assigned user trying to access admin pages.
+    // We allow them if they have management roles (handled by the page itself)
+    // but the Home redirect should be stable.
+    return <Navigate to={getHomePath(user)} replace />;
   }
   return <>{children}</>;
 }
 
 /**
- * Guards routes that require admin, super_admin, or manager role.
- * Managers have read access to users in their branch scope.
+ * Guards routes that require manager-level or higher access.
  */
 function RequireManager({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
-  if (!user || !["admin", "super_admin", "manager"].includes(user.role)) {
-    return <Navigate to={getHomePathForRole(user?.role)} replace />;
+  // Basically all authenticated users for now, as specific pages handle granular permissions
+  if (!user) {
+    return <Navigate to="/login" replace />;
   }
   return <>{children}</>;
 }
@@ -85,7 +90,7 @@ function RequireUnauthenticated({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, setupState, user } = useAuthStore();
 
   if (isAuthenticated && setupState === "ready") {
-    return <Navigate to={getHomePathForRole(user?.role)} replace />;
+    return <Navigate to={getHomePath(user)} replace />;
   }
   return <>{children}</>;
 }
@@ -101,7 +106,7 @@ function RequireSetupAccess({ children }: { children: React.ReactNode }) {
 
   // Fully authenticated + all set up — nothing to do here
   if (isAuthenticated && setupState === "ready") {
-    return <Navigate to={getHomePathForRole(user?.role)} replace />;
+    return <Navigate to={getHomePath(user)} replace />;
   }
   return <>{children}</>;
 }
@@ -352,10 +357,10 @@ function AppRoutes() {
         <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />
 
         {/* ── Redirects ── */}
-        <Route path="/dashboard" element={<Navigate to={getHomePathForRole(user?.role)} replace />} />
+        <Route path="/dashboard" element={<Navigate to={getHomePath(user)} replace />} />
         <Route
           path="/"
-          element={<Navigate to={isReady ? getHomePathForRole(user?.role) : "/login"} replace />}
+          element={<Navigate to={isReady ? getHomePath(user) : "/login"} replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

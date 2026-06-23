@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     from app.models.inventory.branch_inventory import BranchInventory
     from app.models.inventory.inventory_model import Drug
     from app.models.sales.sales_model import Sale
-    from app.models.user.user_model import User
+    from app.models.user.user_model import User, Role
 
 
 class Organization(Base, TimestampMixin, SyncTrackingMixin):
@@ -93,6 +93,10 @@ class Organization(Base, TimestampMixin, SyncTrackingMixin):
     
     # Relationships
     branches: Mapped[List["Branch"]] = relationship(
+        back_populates="organization",
+        cascade="all, delete-orphan"
+    )
+    roles: Mapped[List["Role"]] = relationship(
         back_populates="organization",
         cascade="all, delete-orphan"
     )

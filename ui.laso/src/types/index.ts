@@ -53,17 +53,29 @@ export interface ApiError {
 // AUTH / USER TYPES
 // ============================================================
 
-export type UserRole =
-    | "super_admin"
-    | "admin"
-    | "manager"
-    | "pharmacist"
-    | "cashier"
-    | "viewer";
+export interface PermissionInfo {
+    name: string;
+    description: string | null;
+}
 
-export interface UserPermissions {
-    additional: string[];
-    denied: string[];
+export interface Role extends TimestampFields, SyncFields {
+    id: string;
+    organization_id: string;
+    name: string;
+    description: string | null;
+    permissions: string[];
+}
+
+export interface RoleCreate {
+    name: string;
+    description?: string;
+    permissions: string[];
+}
+
+export interface RoleUpdate {
+    name?: string;
+    description?: string;
+    permissions?: string[];
 }
 
 export interface User extends TimestampFields, SyncFields {
@@ -72,11 +84,11 @@ export interface User extends TimestampFields, SyncFields {
     username: string;
     email: string;
     full_name: string;
-    role: UserRole;
+    is_super_admin: boolean;
+    roles: Role[];
     phone: string | null;
     employee_id: string | null;
     assigned_branches: string[];
-    permissions: UserPermissions;
     account_locked_until: string | null;
     is_active: boolean;
     last_login: string | null;
@@ -89,7 +101,7 @@ export interface UserCreate {
     email: string;
     full_name: string;
     password: string;
-    role?: UserRole;
+    role_ids?: string[];
     phone?: string;
     employee_id?: string;
     organization_id?: string;
@@ -113,7 +125,7 @@ export interface AdminCreate {
 export interface UserUpdate {
     full_name?: string;
     phone?: string;
-    role?: UserRole;
+    role_ids?: string[];
     assigned_branches?: string[];
     is_active?: boolean;
 }

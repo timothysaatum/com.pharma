@@ -27,7 +27,6 @@ from app.core.deps import (
     get_db,
     get_current_active_user,
     require_permission,
-    require_role,
 )
 from app.models.user.user_model import User
 from app.services.customer.customer_service import CustomerService
@@ -323,7 +322,7 @@ async def update_customer(
 )
 async def delete_customer(
     customer_id: uuid.UUID,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -363,7 +362,7 @@ async def delete_customer(
 async def award_loyalty_points(
     customer_id: uuid.UUID,
     request: AwardLoyaltyPointsRequest,
-    current_user: User = Depends(require_role("manager", "admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -407,7 +406,7 @@ async def award_loyalty_points(
 async def deduct_loyalty_points(
     customer_id: uuid.UUID,
     request: DeductLoyaltyPointsRequest,
-    current_user: User = Depends(require_role("manager", "admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """

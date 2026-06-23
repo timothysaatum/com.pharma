@@ -8,7 +8,7 @@ import {
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
 import { parseApiError } from "@/api/client";
-import { getHomePathForRole } from "@/lib/routes";
+import { getHomePath } from "@/lib/routes";
 import { APP_NAME } from "@/lib/appConfig";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,7 +96,7 @@ function AddBranchPanel() {
                     : undefined,
             });
             markReady(branch.id);
-            navigate(getHomePathForRole(user?.role), { replace: true });
+            navigate(getHomePath(user), { replace: true });
         } catch (err) {
             setApiError(parseApiError(err));
         } finally {
