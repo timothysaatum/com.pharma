@@ -33,21 +33,16 @@ function fmtGHS(value: number | string | null | undefined): string {
 // A user can also approve if "approve_purchase_orders" is in their
 // `additional` list, UNLESS it is explicitly in their `denied` list.
 //
-const APPROVER_ROLES = new Set(["super_admin", "admin", "manager"]);
 const APPROVE_PERMISSION = "approve_purchase_orders";
 
 function hasApprovePermission(user: User | null): boolean {
     if (!user) return false;
+    if (user.is_super_admin) return true;
 
-    const denied = user.permissions?.denied ?? [];
-    if (denied.includes(APPROVE_PERMISSION)) return false;
-
-    // Role-based access
-    if (APPROVER_ROLES.has(user.role)) return true;
-
-    // Explicit grant via additional permissions
-    const additional = user.permissions?.additional ?? [];
-    return additional.includes(APPROVE_PERMISSION);
+    // Aggregated permissions from roles
+    return user.roles.some(role =>
+        role.permissions.includes(APPROVE_PERMISSION) || role.permissions.includes("*")
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

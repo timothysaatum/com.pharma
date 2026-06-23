@@ -13,6 +13,7 @@ import { offlineCache } from "@/lib/storage";
 import { APP_NAME } from "@/lib/appConfig";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
+import { usePermissions } from "@/hooks/usePermissions";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -60,14 +61,6 @@ export const NAV_ITEMS: NavItem[] = [
     },
 ];
 
-const ROLE_LABELS: Record<string, string> = {
-    super_admin: "Super Admin",
-    admin: "Admin",
-    manager: "Manager",
-    pharmacist: "Pharmacist",
-    cashier: "Cashier",
-    viewer: "Viewer",
-};
 
 export function AppShell({ children }: { children: React.ReactNode }) {
     const { user, logout, activeBranchId, setActiveBranch } = useAuthStore();
@@ -177,9 +170,35 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         navigate("/login", { replace: true });
     };
 
-    const visibleNav = NAV_ITEMS.filter(
-        (item) => !item.roles || (user?.role && item.roles.includes(user.role))
-    );
+    const { checkPermission } = usePermissions();
+
+    const visibleNav = NAV_ITEMS.filter((item) => {
+        // If no role restriction, everyone can see it
+        if (!item.roles) return true;
+
+        // Super admin has access to everything
+        if (user?.is_super_admin) return true;
+
+        // Map legacy roles to permissions for sidebar visibility
+        // If the item had roles: ["admin", "manager"], we check for MANAGE_ORGANIZATION or VIEW_REPORTS
+        const permissionMap: Record<string, string> = {
+            "/reports": "view_reports",
+            "/admin": "manage_inventory", // Admin link usually goes to drugs/inventory
+            "/users": "manage_users",
+            "/settings": "manage_organization",
+            "/audit-logs": "view_audit_logs"
+        };
+
+        const requiredPermission = permissionMap[item.to];
+        if (requiredPermission) {
+            return checkPermission(user, requiredPermission);
+        }
+
+        // Fallback: If we don't have a specific permission mapping, use the old logic
+        // but allow branch-assigned users if they are super admins (handled above)
+        // or if they are org admins (no branch assignments).
+        return user?.assigned_branches?.length === 0;
+    });
 
     const initials = user?.full_name
         ? user.full_name.split(" ").map((n) => n[0]).join("").slice(0, 2).toUpperCase()
@@ -323,7 +342,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                                     {user?.full_name}
                                 </p>
                                 <p className="text-xs text-white/40 truncate leading-tight">
-                                    {ROLE_LABELS[user?.role ?? ""] ?? user?.role}
+                                    {user?.is_super_admin ? "Super Admin" : user?.roles?.map(r => r.name).join(", ") || "Staff"}
                                 </p>
                             </div>
                             <button

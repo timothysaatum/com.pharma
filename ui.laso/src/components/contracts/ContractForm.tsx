@@ -101,8 +101,6 @@ const schema = z.object({
     // Staff
     if (v.contract_type === "staff") {
         if (!v.allowed_user_roles.length) ctx.addIssue({ code: "custom", path: ["allowed_user_roles"], message: "Staff contracts must restrict which roles can apply them" });
-        const hasApprover = v.allowed_user_roles.includes("manager") || v.allowed_user_roles.includes("admin");
-        if (!hasApprover) ctx.addIssue({ code: "custom", path: ["allowed_user_roles"], message: "Staff contracts must include manager or admin role" });
     }
     // Branch logic
     if (!v.applies_to_all_branches && (!v.applicable_branch_ids || v.applicable_branch_ids.length === 0)) {
@@ -138,7 +136,6 @@ const CONTRACT_TYPES: Array<{ value: ContractType; label: string; description: s
     { value: "promotional", label: "Promotional", description: "Time-limited promotional pricing" },
 ];
 
-const ALL_ROLES = ["super_admin", "admin", "manager", "pharmacist", "cashier"] as const;
 
 const inputCls = "w-full h-10 px-3 rounded-xl border border-slate-200 text-sm text-ink bg-white focus:outline-none focus:ring-2 focus:ring-brand-500/30 focus:border-brand-500";
 const labelCls = "block text-sm font-medium text-ink mb-1.5";
@@ -166,6 +163,7 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [apiError, setApiError] = useState<string | null>(null);
     const [branches, setBranches] = useState<Branch[]>([]);
+    const [roles, setRoles] = useState<{ id: string; name: string }[]>([]);
 
     const today = new Date().toISOString().split("T")[0];
 
@@ -208,10 +206,13 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
     const watchRoles = watch("allowed_user_roles");
     const watchIsDefault = watch("is_default_contract");
 
-    // Load branches for the branch selector
+    // Load branches and roles
     useEffect(() => {
         if (!user?.organization_id) return;
         branchApi.list().then((res) => setBranches((res.items ?? []) as any)).catch(() => { });
+        import("@/api/roles").then(({ rolesApi }) => {
+            rolesApi.getRoles().then(setRoles).catch(() => {});
+        });
     }, [user?.organization_id]);
 
     // When type changes to default-compatible, auto-set constraints
@@ -585,17 +586,17 @@ export function ContractForm({ contract, onSuccess, onCancel }: ContractFormProp
                                 Allowed Roles {watchType === "staff" && <span className="text-red-500">*</span>}
                             </label>
                             <div className="flex gap-2 flex-wrap">
-                                {ALL_ROLES.map((role) => (
+                                {roles.map((role) => (
                                     <button
-                                        key={role}
+                                        key={role.id}
                                         type="button"
-                                        onClick={() => toggleRole(role)}
-                                        className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors capitalize ${(watchRoles ?? []).includes(role)
+                                        onClick={() => toggleRole(role.id)}
+                                        className={`px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${(watchRoles ?? []).includes(role.id)
                                                 ? "bg-brand-600 text-white"
                                                 : "bg-white border border-slate-200 text-ink-secondary hover:text-ink"
                                             }`}
                                     >
-                                        {role.replace("_", " ")}
+                                        {role.name}
                                     </button>
                                 ))}
                             </div>

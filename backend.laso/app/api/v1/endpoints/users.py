@@ -1,19 +1,17 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, or_
+from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import uuid
 
-from app.core.deps import get_db, require_role
-from app.models.user.user_model import User
+from app.core.deps import get_db, require_permission
+from app.models.user.user_model import User, Role, Permission
 from app.schemas.user_schema import UserCreate, UserUpdate, UserResponse
 from app.services.auth.auth_service import AuthService
 from app.utils.pagination import PaginatedResponse
 
 router = APIRouter(prefix="/users")
-
-MANAGER_MANAGED_ROLES = {"pharmacist", "cashier", "viewer"}
-
 
 def _branch_id_set(branches) -> set[str]:
     return {str(branch_id) for branch_id in (branches or [])}
@@ -25,7 +23,7 @@ def _shares_branch(user: User, branch_ids: set[str]) -> bool:
 
 def _ensure_manager_can_manage_user(current_user: User, user: User) -> None:
     manager_branch_ids = _branch_id_set(current_user.assigned_branches)
-    if user.role not in MANAGER_MANAGED_ROLES or not _shares_branch(user, manager_branch_ids):
+    if user.is_super_admin or not _shares_branch(user, manager_branch_ids):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
 
 
@@ -55,50 +53,26 @@ async def list_users(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None, max_length=100),
-    role: Optional[str] = Query(None),
     is_active: Optional[bool] = Query(None),
     branch_id: Optional[uuid.UUID] = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     List users in the organization with optional filtering.
-
-    - **super_admin / admin**: can see all users in the org
-    - **manager**: can only see users assigned to their branch(es)
     """
     base_query = select(User).where(
         User.organization_id == current_user.organization_id,
         User.deleted_at.is_(None),
-    )
+    ).options(selectinload(User.roles))
 
     manager_branch_ids = _branch_id_set(current_user.assigned_branches)
     branch_filter_id = str(branch_id) if branch_id else None
 
-    # Managers only see users in their own branches. assigned_branches is a
-    # JSON-backed compatibility type on SQLite, so overlap/contains operators
-    # are applied in Python after scalar SQL filters.
-    if current_user.role == "manager":
-        if not manager_branch_ids:
-            return {
-                "items": [],
-                "total": 0,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": 1,
-                "has_next": False,
-                "has_prev": False,
-            }
-        if branch_filter_id and branch_filter_id not in manager_branch_ids:
-            return {
-                "items": [],
-                "total": 0,
-                "page": page,
-                "page_size": page_size,
-                "total_pages": 1,
-                "has_next": False,
-                "has_prev": False,
-            }
+    # Simplified: If user has MANAGE_USERS but is limited to certain branches,
+    # they only see users in those branches.
+    if not current_user.is_super_admin and current_user.assigned_branches:
+         pass # Filtering logic below handles this
 
     if search:
         term = f"%{search.strip()}%"
@@ -111,19 +85,17 @@ async def list_users(
             )
         )
 
-    if role:
-        base_query = base_query.where(User.role == role)
-
     if is_active is not None:
         base_query = base_query.where(User.is_active == is_active)
 
     result = await db.execute(base_query.order_by(User.full_name.asc()))
     filtered_users = list(result.scalars().all())
 
-    if current_user.role == "manager":
+    # Apply branch filtering and manager-level restrictions
+    if not current_user.is_super_admin and current_user.assigned_branches:
         filtered_users = [
             user for user in filtered_users
-            if user.role in MANAGER_MANAGED_ROLES and _shares_branch(user, manager_branch_ids)
+            if _shares_branch(user, manager_branch_ids)
         ]
 
     if branch_filter_id:
@@ -159,26 +131,24 @@ async def list_users(
 async def get_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     Retrieve a single user by ID.
-    Managers can only access users who share at least one branch.
     """
     result = await db.execute(
         select(User).where(
             User.id == user_id,
             User.organization_id == current_user.organization_id,
             User.deleted_at.is_(None),
-        )
+        ).options(selectinload(User.roles))
     )
     user = result.scalar_one_or_none()
 
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    # Managers can only view branch staff users in their assigned branches.
-    if current_user.role == "manager":
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_can_manage_user(current_user, user)
 
     return UserResponse.model_validate(user)
@@ -192,42 +162,25 @@ async def get_user(
 async def create_user(
     user_data: UserCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     Create a new user in the organization.
-
-    - **Requires**: admin or super_admin
-    - Inherits the caller's organization_id if not provided.
     """
     if not user_data.organization_id:
         user_data = user_data.model_copy(
             update={"organization_id": current_user.organization_id}
         )
 
-    if current_user.role == "manager":
-        role = user_data.role or "cashier"
-        if role not in MANAGER_MANAGED_ROLES:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Managers can only create branch staff users",
-            )
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_branch_assignment(current_user, user_data.assigned_branches)
-        user_data = user_data.model_copy(
-            update={
-                "organization_id": current_user.organization_id,
-                "role": role,
-            }
-        )
-
-    # Prevent privilege escalation: admins cannot create super_admins
-    if current_user.role == "admin" and user_data.role == "super_admin":
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Admins cannot create super_admin accounts",
-        )
 
     user = await AuthService.create_user(db, user_data)
+    # Reload with roles
+    result = await db.execute(
+        select(User).where(User.id == user.id).options(selectinload(User.roles))
+    )
+    user = result.scalar_one()
     return UserResponse.model_validate(user)
 
 
@@ -240,60 +193,52 @@ async def update_user(
     user_id: uuid.UUID,
     update_data: UserUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
-    Update user fields (full_name, phone, role, assigned_branches, is_active).
-
-    - **manager**: can only update users in their branch; cannot change roles.
-    - **admin**: can update anyone except super_admins; cannot elevate to super_admin.
-    - **super_admin**: unrestricted within the org.
+    Update user fields.
     """
     result = await db.execute(
         select(User).where(
             User.id == user_id,
             User.organization_id == current_user.organization_id,
             User.deleted_at.is_(None),
-        )
+        ).options(selectinload(User.roles))
     )
     user = result.scalar_one_or_none()
 
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    # Prevent editing yourself through this endpoint (use /auth/me or /auth/change-password)
     if user.id == current_user.id:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Use /auth/me or /auth/change-password to update your own account",
         )
 
-    # Role-based restrictions
-    if current_user.role == "manager":
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_can_manage_user(current_user, user)
-        if update_data.role is not None:
-            raise HTTPException(
-                status_code=403, detail="Managers cannot change user roles"
-            )
         if update_data.assigned_branches is not None:
             _ensure_manager_branch_assignment(current_user, update_data.assigned_branches)
-
-    if current_user.role == "admin":
-        if user.role == "super_admin":
-            raise HTTPException(
-                status_code=403, detail="Admins cannot modify super_admin accounts"
-            )
-        if update_data.role == "super_admin":
-            raise HTTPException(
-                status_code=403, detail="Admins cannot promote users to super_admin"
-            )
 
     # Apply updates
     from datetime import datetime, timezone
 
     changes = update_data.model_dump(exclude_unset=True)
+
+    if "role_ids" in changes:
+        role_ids = changes.pop("role_ids")
+        result = await db.execute(
+            select(Role).where(
+                Role.organization_id == current_user.organization_id,
+                Role.id.in_(role_ids)
+            )
+        )
+        user.roles = list(result.scalars().all())
+
     for field, value in changes.items():
         setattr(user, field, value)
+
     user.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
@@ -309,7 +254,7 @@ async def update_user(
 async def activate_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """Re-activate a previously deactivated user."""
     return await _set_active(db, user_id, current_user, True)
@@ -319,7 +264,7 @@ async def activate_user(
 async def deactivate_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """Deactivate a user account (non-destructive; preserves all data)."""
     return await _set_active(db, user_id, current_user, False)
@@ -336,7 +281,7 @@ async def _set_active(
             User.id == user_id,
             User.organization_id == current_user.organization_id,
             User.deleted_at.is_(None),
-        )
+        ).options(selectinload(User.roles))
     )
     user = result.scalar_one_or_none()
 
@@ -346,11 +291,8 @@ async def _set_active(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot change your own active status")
 
-    if current_user.role == "manager":
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_can_manage_user(current_user, user)
-
-    if current_user.role == "admin" and user.role == "super_admin":
-        raise HTTPException(status_code=403, detail="Admins cannot deactivate super_admin accounts")
 
     user.is_active = active
     user.updated_at = datetime.now(timezone.utc)
@@ -372,7 +314,7 @@ async def _set_active(
 async def unlock_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     Manually clear an account lockout caused by too many failed login attempts.
@@ -384,14 +326,14 @@ async def unlock_user(
             User.id == user_id,
             User.organization_id == current_user.organization_id,
             User.deleted_at.is_(None),
-        )
+        ).options(selectinload(User.roles))
     )
     user = result.scalar_one_or_none()
 
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if current_user.role == "manager":
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_can_manage_user(current_user, user)
 
     user.account_locked_until = None
@@ -411,13 +353,10 @@ async def unlock_user(
 async def delete_user(
     user_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role("super_admin", "admin", "manager")),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
 ):
     """
     Soft-delete a user. The record is retained for audit purposes.
-
-    - **admin**: cannot delete super_admins
-    - **super_admin**: can delete any non-self user in the org
     """
     from datetime import datetime, timezone
     from app.services.auth.auth_service import AuthService as AS
@@ -437,11 +376,8 @@ async def delete_user(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    if current_user.role == "manager":
+    if not current_user.is_super_admin and current_user.assigned_branches:
         _ensure_manager_can_manage_user(current_user, user)
-
-    if current_user.role == "admin" and user.role == "super_admin":
-        raise HTTPException(status_code=403, detail="Admins cannot delete super_admin accounts")
 
     # Revoke all sessions first
     await AS.logout_all_sessions(db, user)

@@ -109,7 +109,7 @@ function renderCategoryOptions(
 export function DrugForm({ drug, onSuccess, onCancel }: DrugFormProps) {
     const { user } = useAuthStore();
     const isEdit = !!drug;
-    const canEdit = !!user?.role && ["admin", "manager", "super_admin"].includes(user.role);
+    const canEdit = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0 || user?.roles.some(r => r.permissions.includes("manage_drugs") || r.permissions.includes("*"));
 
     // FIX: use tree instead of flat list so hierarchy is visible in the picker
     const { tree: categoryTree, invalidate: invalidateCategories } = useCategoryTree();

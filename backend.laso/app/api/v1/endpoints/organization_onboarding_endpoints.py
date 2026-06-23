@@ -12,7 +12,7 @@ import uuid
 from app.db.dependencies import get_db
 from app.core.deps import (
     get_current_user,
-    require_role
+    require_permission
 )
 from app.models.user.user_model import User
 from app.models.pharmacy.pharmacy_model import Organization, Branch
@@ -46,7 +46,7 @@ router = APIRouter(prefix="/organizations", tags=["Organization Onboarding"])
     
     **Requires super_admin role**
     """,
-    dependencies=[Depends(require_role("super_admin"))]
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def onboard_organization(
     request: Request,
@@ -132,8 +132,8 @@ async def onboard_organization(
     "",
     response_model=PaginatedResponse[OrganizationResponse],
     summary="List all organizations",
-    description="Get paginated list of all organizations. **Requires super_admin or admin role**",
-    dependencies=[Depends(require_role("super_admin", "admin"))]
+    description="Get paginated list of all organizations. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def list_organizations(
     pagination: PaginationParams = Depends(),
@@ -159,8 +159,8 @@ async def list_organizations(
     # Build query
     query = select(Organization)
 
-    if current_user.role == "admin":
-        # Admins can only see their own organization
+    if not current_user.is_super_admin:
+        # Non-super-admins can only see their own organization
         query = query.where(Organization.id == current_user.organization_id)
     
     # Apply filters
@@ -204,7 +204,7 @@ async def get_organization(
     Users can only view their own organization unless they are super_admin
     """
     # Check authorization
-    if current_user.role != "super_admin":
+    if not current_user.is_super_admin:
         if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -230,8 +230,8 @@ async def get_organization(
     "/{organization_id}",
     response_model=OrganizationResponse,
     summary="Update organization",
-    description="Update organization details. **Requires admin or super_admin role**",
-    dependencies=[Depends(require_role("admin", "super_admin"))]
+    description="Update organization details. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def update_organization(
     organization_id: uuid.UUID,
@@ -242,11 +242,10 @@ async def update_organization(
     """
     Update organization information
     
-    Admins can only update their own organization
-    Super admins can update any organization
+    Users with manage_organization can only update their own organization unless they are super_admin
     """
     # Check authorization
-    if current_user.role != "super_admin":
+    if not current_user.is_super_admin:
         if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -280,8 +279,8 @@ async def update_organization(
     "/{organization_id}/activate",
     response_model=OrganizationResponse,
     summary="Activate organization",
-    description="Activate an inactive organization. **Requires super_admin role**",
-    dependencies=[Depends(require_role("super_admin"))]
+    description="Activate an inactive organization. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def activate_organization(
     organization_id: uuid.UUID,
@@ -301,8 +300,8 @@ async def activate_organization(
     "/{organization_id}/deactivate",
     response_model=OrganizationResponse,
     summary="Deactivate organization",
-    description="Deactivate an active organization. **Requires super_admin role**",
-    dependencies=[Depends(require_role("super_admin"))]
+    description="Deactivate an active organization. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def deactivate_organization(
     organization_id: uuid.UUID,
@@ -324,8 +323,8 @@ async def deactivate_organization(
     "/{organization_id}/subscription",
     response_model=OrganizationResponse,
     summary="Update subscription",
-    description="Update organization subscription tier and duration. **Requires super_admin role**",
-    dependencies=[Depends(require_role("super_admin"))]
+    description="Update organization subscription tier and duration. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def update_subscription(
     organization_id: uuid.UUID,
@@ -353,8 +352,8 @@ async def update_subscription(
     "/{organization_id}/settings",
     response_model=OrganizationResponse,
     summary="Update organization settings",
-    description="Update organization-specific settings. **Requires admin or super_admin role**",
-    dependencies=[Depends(require_role("admin", "super_admin"))]
+    description="Update organization-specific settings. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def update_organization_settings(
     organization_id: uuid.UUID,
@@ -372,7 +371,7 @@ async def update_organization_settings(
     - And more...
     """
     # Check authorization
-    if current_user.role != "super_admin":
+    if not current_user.is_super_admin:
         if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -423,7 +422,7 @@ async def get_organization_stats(
     - Subscription status
     """
     # Check authorization
-    if current_user.role != "super_admin":
+    if not current_user.is_super_admin:
         if current_user.organization_id != organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

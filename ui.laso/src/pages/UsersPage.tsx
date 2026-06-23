@@ -15,26 +15,11 @@ import { toast } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
 import { usersApi } from "@/api/users";
 import { branchApi } from "@/api/branches";
+import { rolesApi } from "@/api/roles";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
-import type { UserResponse, UserRole, BranchListItem } from "@/types";
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Constants
-// ─────────────────────────────────────────────────────────────────────────────
-
-const ROLES: { value: UserRole; label: string; color: string }[] = [
-    { value: "super_admin", label: "Super Admin", color: "bg-purple-100 text-purple-700" },
-    { value: "admin", label: "Admin", color: "bg-blue-100 text-blue-700" },
-    { value: "manager", label: "Manager", color: "bg-indigo-100 text-indigo-700" },
-    { value: "pharmacist", label: "Pharmacist", color: "bg-teal-100 text-teal-700" },
-    { value: "cashier", label: "Cashier", color: "bg-amber-100 text-amber-700" },
-    { value: "viewer", label: "Viewer", color: "bg-slate-100 text-slate-600" },
-];
-
-const roleInfo = (role: UserRole) => ROLES.find((r) => r.value === role) ?? ROLES[5];
-const MANAGER_CREATABLE_ROLES: UserRole[] = ["pharmacist", "cashier", "viewer"];
+import type { UserResponse, BranchListItem, Role } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Zod schemas
@@ -52,7 +37,7 @@ const createUserSchema = z.object({
         .regex(/[a-z]/, "Must contain a lowercase letter")
         .regex(/[0-9]/, "Must contain a digit")
         .regex(/[!@#$%^&*()_+\-=\[\]{}|;:,.<>?]/, "Must contain a special character"),
-    role: z.enum(["super_admin", "admin", "manager", "pharmacist", "cashier", "viewer"]),
+    role_ids: z.array(z.string()).min(0),
     phone: z.string().max(20).optional().or(z.literal("")),
     employee_id: z.string().max(50).optional().or(z.literal("")),
     assigned_branches: z.array(z.string()),
@@ -61,7 +46,7 @@ const createUserSchema = z.object({
 const editUserSchema = z.object({
     full_name: z.string().min(2).max(255),
     phone: z.string().max(20).optional().or(z.literal("")),
-    role: z.enum(["super_admin", "admin", "manager", "pharmacist", "cashier", "viewer"]),
+    role_ids: z.array(z.string()).min(0),
     assigned_branches: z.array(z.string()),
 });
 
@@ -72,11 +57,10 @@ type EditValues = z.infer<typeof editUserSchema>;
 // Sub-components
 // ─────────────────────────────────────────────────────────────────────────────
 
-function RoleBadge({ role }: { role: UserRole }) {
-    const info = roleInfo(role);
+function RoleBadge({ role }: { role: Role }) {
     return (
-        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${info.color}`}>
-            {info.label}
+        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tight bg-brand-50 text-brand-700 border border-brand-100">
+            {role.name}
         </span>
     );
 }
@@ -135,14 +119,49 @@ function BranchPicker({
 // Create User Modal
 // ─────────────────────────────────────────────────────────────────────────────
 
+function RolePicker({
+    roles,
+    selected,
+    onChange,
+}: {
+    roles: Role[];
+    selected: string[];
+    onChange: (ids: string[]) => void;
+}) {
+    const toggle = (id: string) => {
+        onChange(selected.includes(id) ? selected.filter((s) => s !== id) : [...selected, id]);
+    };
+    return (
+        <div className="flex flex-wrap gap-2">
+            {roles.map((r) => {
+                const active = selected.includes(String(r.id));
+                return (
+                    <button
+                        key={r.id}
+                        type="button"
+                        onClick={() => toggle(String(r.id))}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${active
+                            ? "border-brand-500 bg-brand-50 text-brand-700"
+                            : "border-slate-200 bg-white text-slate-500 hover:border-slate-300"
+                            }`}
+                    >
+                        <Shield className="w-3 h-3" />
+                        {r.name}
+                    </button>
+                );
+            })}
+        </div>
+    );
+}
+
 function CreateUserModal({
     branches,
-    currentUserRole,
+    roles,
     onClose,
     onCreated,
 }: {
     branches: BranchListItem[];
-    currentUserRole: UserRole;
+    roles: Role[];
     onClose: () => void;
     onCreated: (user: UserResponse) => void;
 }) {
@@ -152,21 +171,13 @@ function CreateUserModal({
     const { register, handleSubmit, formState: { errors }, setValue, watch } = useForm<CreateValues>({
         resolver: zodResolver(createUserSchema),
         defaultValues: {
-            role: "cashier",
-            assigned_branches: currentUserRole === "manager"
-                ? branches.map((branch) => String(branch.id))
-                : [],
+            role_ids: [],
+            assigned_branches: [],
         },
     });
 
     const selectedBranches = watch("assigned_branches");
-
-    const allowedRoles = ROLES.filter((r) => {
-        if (currentUserRole === "super_admin") return true;
-        if (currentUserRole === "admin") return r.value !== "super_admin";
-        if (currentUserRole === "manager") return MANAGER_CREATABLE_ROLES.includes(r.value);
-        return false;
-    });
+    const selectedRoles = watch("role_ids");
 
     const onSubmit = async (values: CreateValues) => {
         setIsSubmitting(true);
@@ -198,19 +209,15 @@ function CreateUserModal({
                 </div>
                 <div className="grid grid-cols-2 gap-4">
                     <Input label="Employee ID" placeholder="EMP001" error={errors.employee_id?.message} {...register("employee_id")} />
-                    <div>
-                        <label className="block text-xs font-semibold text-ink mb-1.5">
-                            Role <span className="text-red-500">*</span>
-                        </label>
-                        <select
-                            {...register("role")}
-                            className="w-full h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500"
-                        >
-                            {allowedRoles.map((r) => (
-                                <option key={r.value} value={r.value}>{r.label}</option>
-                            ))}
-                        </select>
-                    </div>
+                </div>
+
+                <div>
+                    <label className="block text-xs font-semibold text-ink mb-2">Roles</label>
+                    <RolePicker
+                        roles={roles}
+                        selected={selectedRoles}
+                        onChange={(ids) => setValue("role_ids", ids)}
+                    />
                 </div>
                 <div className="relative">
                     <Input
@@ -258,13 +265,13 @@ function CreateUserModal({
 function EditUserModal({
     user,
     branches,
-    currentUserRole,
+    roles,
     onClose,
     onUpdated,
 }: {
     user: UserResponse;
     branches: BranchListItem[];
-    currentUserRole: UserRole;
+    roles: Role[];
     onClose: () => void;
     onUpdated: (user: UserResponse) => void;
 }) {
@@ -275,18 +282,13 @@ function EditUserModal({
         defaultValues: {
             full_name: user.full_name,
             phone: user.phone ?? "",
-            role: user.role,
+            role_ids: user.roles.map(r => r.id),
             assigned_branches: user.assigned_branches ?? [],
         },
     });
 
     const selectedBranches = watch("assigned_branches");
-    const canChangeRole = currentUserRole === "super_admin" || currentUserRole === "admin";
-    const allowedRoles = ROLES.filter((r) => {
-        if (currentUserRole === "super_admin") return true;
-        if (currentUserRole === "admin") return r.value !== "super_admin";
-        return false;
-    });
+    const selectedRoles = watch("role_ids");
 
     const onSubmit = async (values: EditValues) => {
         setIsSubmitting(true);
@@ -294,7 +296,7 @@ function EditUserModal({
             const updated = await usersApi.update(user.id, {
                 full_name: values.full_name,
                 phone: values.phone || undefined,
-                role: canChangeRole ? values.role : undefined,
+                role_ids: values.role_ids,
                 assigned_branches: values.assigned_branches,
             });
             onUpdated(updated);
@@ -314,8 +316,12 @@ function EditUserModal({
                     <p className="text-sm font-semibold text-ink">{user.full_name}</p>
                     <p className="text-xs text-ink-muted">@{user.username}</p>
                 </div>
-                <div className="ml-auto">
-                    <RoleBadge role={user.role} />
+                <div className="ml-auto flex gap-1">
+                    {user.is_super_admin ? (
+                        <span className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase">Super Admin</span>
+                    ) : (
+                        user.roles.map(r => <RoleBadge key={r.id} role={r} />)
+                    )}
                 </div>
             </div>
 
@@ -325,17 +331,14 @@ function EditUserModal({
                     <Input label="Phone" placeholder="+233 24 000 0000" error={errors.phone?.message} {...register("phone")} />
                 </div>
 
-                {canChangeRole && (
+                {!user.is_super_admin && (
                     <div>
-                        <label className="block text-xs font-semibold text-ink mb-1.5">Role</label>
-                        <select
-                            {...register("role")}
-                            className="w-full h-10 rounded-lg border border-slate-200 bg-white px-3 text-sm text-ink focus:outline-none focus:ring-2 focus:ring-brand-500"
-                        >
-                            {allowedRoles.map((r) => (
-                                <option key={r.value} value={r.value}>{r.label}</option>
-                            ))}
-                        </select>
+                        <label className="block text-xs font-semibold text-ink mb-2">Roles</label>
+                        <RolePicker
+                            roles={roles}
+                            selected={selectedRoles}
+                            onChange={(ids) => setValue("role_ids", ids)}
+                        />
                     </div>
                 )}
 
@@ -485,15 +488,13 @@ function ActionMenu({
     const [open, setOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
     const isSelf = user.id === currentUser.id;
-    const canManageUser =
-        ["super_admin", "admin"].includes(currentUser.role) ||
-        (
-            currentUser.role === "manager" &&
-            MANAGER_CREATABLE_ROLES.includes(user.role) &&
-            user.assigned_branches.some((branchId) =>
-                currentUser.assigned_branches.map(String).includes(String(branchId))
-            )
-        );
+    const canManageUser = !user.is_super_admin && (
+        currentUser.is_super_admin ||
+        currentUser.assigned_branches.length === 0 || // Org admin
+        user.assigned_branches.some((branchId) =>
+            currentUser.assigned_branches.map(String).includes(String(branchId))
+        )
+    );
     const isLocked = !!user.account_locked_until;
 
     useEffect(() => {
@@ -603,10 +604,10 @@ export default function UsersPage() {
     const [totalPages, setTotalPages] = useState(1);
     const [isLoading, setIsLoading] = useState(true);
     const [branches, setBranches] = useState<BranchListItem[]>([]);
+    const [roles, setRoles] = useState<Role[]>([]);
 
     // ── Filters ─────────────────────────────────────────────
     const [search, setSearch] = useState("");
-    const [roleFilter, setRoleFilter] = useState<UserRole | "">("");
     const [statusFilter, setStatusFilter] = useState<"" | "active" | "inactive">("");
     const [page, setPage] = useState(1);
     const PAGE_SIZE = 15;
@@ -617,23 +618,25 @@ export default function UsersPage() {
 
     const abortRef = useRef<AbortController | null>(null);
 
-    // ── Load branches once ──────────────────────────────────
+    // ── Load branches and roles once ────────────────────────
     useEffect(() => {
         if (!isBackendReachable()) {
             offlineCache.getBranches().then((cached) => setBranches(cached ?? []));
             return;
         }
-        branchApi
-            .listMine()
-            .then((items) => {
-                setBranches(items);
-                offlineCache.setBranches(items);
-            })
-            .catch(async (err) => {
-                if (isOfflineError(err)) {
-                    setBranches((await offlineCache.getBranches()) ?? []);
-                }
-            });
+
+        Promise.all([
+            branchApi.listMine(),
+            rolesApi.getRoles()
+        ]).then(([branchItems, rolesData]) => {
+            setBranches(branchItems);
+            setRoles(rolesData);
+            offlineCache.setBranches(branchItems);
+        }).catch(async (err) => {
+            if (isOfflineError(err)) {
+                setBranches((await offlineCache.getBranches()) ?? []);
+            }
+        });
     }, []);
 
     // ── Fetch users ─────────────────────────────────────────
@@ -650,11 +653,10 @@ export default function UsersPage() {
                 const filtered = source.filter((item) => {
                     const text = `${item.full_name} ${item.username} ${item.email}`.toLowerCase();
                     const matchesSearch = !search || text.includes(search.toLowerCase());
-                    const matchesRole = !roleFilter || item.role === roleFilter;
                     const matchesStatus =
                         !statusFilter ||
                         (statusFilter === "active" ? item.is_active : !item.is_active);
-                    return matchesSearch && matchesRole && matchesStatus;
+                    return matchesSearch && matchesStatus;
                 });
                 const start = (page - 1) * PAGE_SIZE;
                 const pageItems = filtered.slice(start, start + PAGE_SIZE);
@@ -668,7 +670,6 @@ export default function UsersPage() {
                     page,
                     page_size: PAGE_SIZE,
                     search: search || undefined,
-                    role: roleFilter || undefined,
                     is_active: statusFilter === "active" ? true : statusFilter === "inactive" ? false : null,
                 },
                 ctrl.signal,
@@ -689,11 +690,10 @@ export default function UsersPage() {
                 const filtered = source.filter((item) => {
                     const text = `${item.full_name} ${item.username} ${item.email}`.toLowerCase();
                     const matchesSearch = !search || text.includes(search.toLowerCase());
-                    const matchesRole = !roleFilter || item.role === roleFilter;
                     const matchesStatus =
                         !statusFilter ||
                         (statusFilter === "active" ? item.is_active : !item.is_active);
-                    return matchesSearch && matchesRole && matchesStatus;
+                    return matchesSearch && matchesStatus;
                 });
                 const start = (page - 1) * PAGE_SIZE;
                 const pageItems = filtered.slice(start, start + PAGE_SIZE);
@@ -706,7 +706,7 @@ export default function UsersPage() {
         } finally {
             setIsLoading(false);
         }
-    }, [page, search, roleFilter, statusFilter, currentUser]);
+    }, [page, search, statusFilter, currentUser]);
 
     useEffect(() => {
         fetchUsers();
@@ -715,7 +715,7 @@ export default function UsersPage() {
     // Debounce search
     useEffect(() => {
         setPage(1);
-    }, [search, roleFilter, statusFilter]);
+    }, [search, statusFilter]);
 
     // ── Action handlers ─────────────────────────────────────
     const handleToggleActive = async (user: UserResponse) => {
@@ -769,7 +769,7 @@ export default function UsersPage() {
 
     if (!currentUser) return null;
 
-    const canCreate = ["super_admin", "admin", "manager"].includes(currentUser.role);
+    const canCreate = currentUser.is_super_admin || currentUser.assigned_branches.length === 0;
 
     return (
         <div className="flex-1 flex flex-col min-h-0 bg-slate-50">
@@ -819,16 +819,6 @@ export default function UsersPage() {
 
                 <div className="flex items-center gap-2">
                     <Filter className="w-3.5 h-3.5 text-ink-muted" />
-                    <select
-                        value={roleFilter}
-                        onChange={(e) => setRoleFilter(e.target.value as UserRole | "")}
-                        className="h-9 rounded-lg border border-slate-200 bg-white px-3 text-xs text-ink focus:outline-none focus:ring-2 focus:ring-brand-500"
-                    >
-                        <option value="">All roles</option>
-                        {ROLES.map((r) => (
-                            <option key={r.value} value={r.value}>{r.label}</option>
-                        ))}
-                    </select>
                     <select
                         value={statusFilter}
                         onChange={(e) => setStatusFilter(e.target.value as "" | "active" | "inactive")}
@@ -919,7 +909,16 @@ export default function UsersPage() {
 
                                             {/* Role */}
                                             <td className="px-4 py-3">
-                                                <RoleBadge role={user.role} />
+                                                <div className="flex flex-wrap gap-1">
+                                                    {user.is_super_admin ? (
+                                                        <span className="bg-purple-100 text-purple-700 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-tight">Super Admin</span>
+                                                    ) : (
+                                                        user.roles.map(r => <RoleBadge key={r.id} role={r} />)
+                                                    )}
+                                                    {!user.is_super_admin && user.roles.length === 0 && (
+                                                        <span className="text-xs text-slate-400">No roles</span>
+                                                    )}
+                                                </div>
                                             </td>
 
                                             {/* Branches */}
@@ -1018,7 +1017,7 @@ export default function UsersPage() {
                 {modal?.type === "create" && (
                     <CreateUserModal
                         branches={branches}
-                        currentUserRole={currentUser.role}
+                        roles={roles}
                         onClose={() => setModal(null)}
                         onCreated={(user) => {
                             setUsers((prev) => [user, ...prev]);
@@ -1031,7 +1030,7 @@ export default function UsersPage() {
                     <EditUserModal
                         user={modal.user}
                         branches={branches}
-                        currentUserRole={currentUser.role}
+                        roles={roles}
                         onClose={() => setModal(null)}
                         onUpdated={(updated) => {
                             setUsers((prev) => prev.map((u) => (u.id === updated.id ? updated : u)));

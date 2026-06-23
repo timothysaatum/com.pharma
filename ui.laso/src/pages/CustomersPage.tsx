@@ -51,7 +51,7 @@ const TYPE_CONFIG: Record<string, { label: string; cls: string; icon: React.Elem
 
 export default function CustomersPage() {
     const { user } = useAuthStore();
-    const canManage = !!user?.role && ["super_admin", "admin", "manager", "pharmacist"].includes(user.role);
+    const canManage = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0 || user?.roles.some(r => r.permissions.includes("manage_customers") || r.permissions.includes("*"));
 
     // ── List state ─────────────────────────────────────────────────────────────
     const [customers, setCustomers] = useState<CustomerWithDetails[]>([]);

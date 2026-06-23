@@ -211,14 +211,16 @@ async def load_and_validate_contract(
             )
 
     # User role restriction
-    if contract.allowed_user_roles and user.role not in contract.allowed_user_roles:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Your role '{user.role}' is not permitted to apply "
-                f"contract '{contract.contract_name}'."
-            ),
-        )
+    if not user.is_super_admin and contract.allowed_user_roles:
+        user_role_ids = {str(r.id) for r in user.roles}
+        if not any(rid in contract.allowed_user_roles for rid in user_role_ids):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"You are not permitted to apply "
+                    f"the '{contract.contract_name}' contract."
+                ),
+            )
 
     # Contract-specific guards
     if contract.contract_type in ("insurance", "corporate", "wholesale"):

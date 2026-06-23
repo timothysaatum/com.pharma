@@ -55,10 +55,9 @@ async def setup_test_data(db: AsyncSession):
         email="test@pharmacy.com",
         password_hash="hashed_pwd",
         full_name="Test User",
-        role="admin",
+        is_super_admin=True,
         is_active=True,
         assigned_branches=[branch.id],
-        permissions={"additional": ["process_refunds"]}
     )
 
     drugs = [

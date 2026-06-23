@@ -368,7 +368,7 @@ export default function POSPage() {
                 <div>
                     <h1 className="font-display text-2xl font-bold text-ink">Point of Sale</h1>
                     <p className="text-sm text-ink-muted mt-0.5">
-                        {user?.full_name} · {user?.role}
+                        {user?.full_name} · {user?.is_super_admin ? "Super Admin" : user?.roles?.map(r => r.name).join(", ")}
                     </p>
                 </div>
 

@@ -82,7 +82,7 @@ class PriceContractService:
         4. Insurance contracts require a valid, active insurance_provider_id.
         5. Specific-branch contracts require valid branch IDs (deduplicated).
         """
-        if user.role not in ("admin", "super_admin", "manager"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admins and managers can create price contracts.",
@@ -468,7 +468,7 @@ class PriceContractService:
         - ``applicable_branch_ids`` check uses ``is False`` explicitly so that
           an unset field is not confused with ``False``.
         """
-        if user.role not in ("admin", "super_admin", "manager"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admins and managers can update price contracts.",
@@ -580,7 +580,7 @@ class PriceContractService:
         - Default contracts cannot be deleted.
         - Contracts used in the last 30 days must be suspended instead.
         """
-        if user.role not in ("admin", "super_admin"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admins can delete price contracts.",
@@ -654,7 +654,7 @@ class PriceContractService:
         notes: Optional[str] = None,
     ) -> PriceContract:
         """Transition a draft contract to active."""
-        if user.role not in ("admin", "super_admin", "manager"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only managers and admins can approve contracts.",
@@ -692,7 +692,7 @@ class PriceContractService:
         The reason is appended to the contract's description so there is a
         visible audit trail without adding a dedicated column.
         """
-        if user.role not in ("admin", "super_admin", "manager"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only managers and admins can suspend contracts.",
@@ -735,7 +735,7 @@ class PriceContractService:
         user: User,
     ) -> PriceContract:
         """Re-activate a suspended contract after checking its date range."""
-        if user.role not in ("admin", "super_admin", "manager"):
+        if not (user.is_super_admin or user.has_permission("manage_pricing")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only managers and admins can activate contracts.",
@@ -803,9 +803,9 @@ class PriceContractService:
                 or_(
                     PriceContract.allowed_user_roles == [],
                     PriceContract.allowed_user_roles == "[]",
-                    PriceContract.allowed_user_roles.contains([user.role]),
-                    PriceContract.allowed_user_roles.like(f'%"{user.role}"%')
-                ),
+                    *[PriceContract.allowed_user_roles.contains([str(r.id)]) for r in (user.roles or [])],
+                    *[PriceContract.allowed_user_roles.like(f'%"{str(r.id)}"%') for r in (user.roles or [])]
+                ) if not user.is_super_admin else True,
             )
             .order_by(
                 PriceContract.is_default_contract.desc(),

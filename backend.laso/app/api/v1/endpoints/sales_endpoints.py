@@ -330,7 +330,7 @@ async def cancel_sale(
             select(UserModel).where(
                 UserModel.id == cancel_data.manager_approval_user_id,
                 UserModel.organization_id == current_user.organization_id
-            )
+            ).options(selectinload(UserModel.roles))
         )
         approver = result.scalar_one_or_none()
         if not approver:
@@ -338,10 +338,10 @@ async def cancel_sale(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Approving manager not found"
             )
-        if approver.role not in ['manager', 'admin', 'super_admin']:
+        if not (approver.is_super_admin or not approver.assigned_branches or approver.has_permission("process_sales")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cancellation approver must be a manager or admin"
+                detail="Cancellation approver does not have required permissions"
             )
     
     sale.status = 'cancelled'

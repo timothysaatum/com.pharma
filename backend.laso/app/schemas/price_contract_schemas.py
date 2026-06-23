@@ -259,13 +259,7 @@ class PriceContractBase(BaseSchema):
     @field_validator('allowed_user_roles')
     @classmethod
     def validate_roles(cls, v: List[str]) -> List[str]:
-        """Validate user roles"""
-        valid_roles = {'super_admin', 'admin', 'manager', 'pharmacist', 'cashier', 'viewer'}
-        
-        for role in v:
-            if role not in valid_roles:
-                raise ValueError(f"Invalid role: {role}. Must be one of {valid_roles}")
-        
+        """Validate user roles (now accepts role IDs)"""
         return list(set(v))  # Remove duplicates
 
 
@@ -355,9 +349,6 @@ class PriceContractCreate(PriceContractBase):
         if self.contract_type == 'staff':
             if not self.allowed_user_roles:
                 raise ValueError("Staff contracts should restrict which roles can apply them")
-            
-            if 'manager' not in self.allowed_user_roles and 'admin' not in self.allowed_user_roles:
-                raise ValueError("Staff contracts should require manager or admin approval")
         
         return self
 

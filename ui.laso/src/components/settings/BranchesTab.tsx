@@ -168,7 +168,7 @@ export function BranchesTab() {
 
     const { saving: editSaving, saveError: editError, clearSaveError: clearEditError, updateBranch } = useBranchEdit();
 
-    const canManage = user?.role === "admin" || user?.role === "super_admin";
+    const canManage = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0 || user?.roles.some(r => r.permissions.includes("manage_branches") || r.permissions.includes("*"));
 
     const handleBranchSaved = (updated: Branch) => {
         // Merge updated branch back into the list
@@ -332,7 +332,7 @@ export function BranchesTab() {
                                     onDeactivate={deactivateBranch}
                                     onEdit={(b) => { clearEditError(); setEditingBranch(b); setShowCreate(false); }}
                                     actionLoading={actionState.loading}
-                                    canManage={canManage}
+                                    canManage={!!canManage}
                                     isOffline={isOffline}
                                 />
                             ))}

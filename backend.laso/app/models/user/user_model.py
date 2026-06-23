@@ -20,14 +20,82 @@ if TYPE_CHECKING:
     from app.models.system_md.sys_models import AuditLog
 
 
-class UserRole(str, Enum):
-    """User roles for role-based access control"""
-    super_admin = "super_admin"
-    admin = "admin"
-    manager = "manager"
-    pharmacist = "pharmacist"
-    cashier = "cashier"
-    viewer = "viewer"
+class Permission(str, Enum):
+    """Fixed system permissions"""
+    MANAGE_USERS = "manage_users"
+    MANAGE_BRANCHES = "manage_branches"
+    MANAGE_DRUGS = "manage_drugs"
+    VIEW_DRUGS = "view_drugs"
+    MANAGE_SUPPLIERS = "manage_suppliers"
+    APPROVE_PURCHASE_ORDERS = "approve_purchase_orders"
+    MANAGE_INVENTORY = "manage_inventory"
+    VIEW_INVENTORY = "view_inventory"
+    PROCESS_SALES = "process_sales"
+    PROCESS_REFUNDS = "process_refunds"
+    VIEW_REPORTS = "view_reports"
+    EXPORT_DATA = "export_data"
+    MANAGE_CUSTOMERS = "manage_customers"
+    MANAGE_PRESCRIPTIONS = "manage_prescriptions"
+    VIEW_AUDIT_LOGS = "view_audit_logs"
+    MANAGE_ORGANIZATION = "manage_organization"
+    MANAGE_PRICING = "manage_pricing"
+
+
+class Role(Base, TimestampMixin, SyncTrackingMixin):
+    """Organization-specific roles with associated permissions"""
+    __tablename__ = 'roles'
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('organizations.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[Optional[str]] = mapped_column(Text)
+
+    # List of permission strings
+    permissions: Mapped[List[str]] = mapped_column(
+        ARRAY(String(100)),
+        default=list,
+        nullable=False
+    )
+
+    # Relationships
+    organization: Mapped["Organization"] = relationship(back_populates="roles")
+    users: Mapped[List["User"]] = relationship(
+        secondary="user_roles",
+        back_populates="roles"
+    )
+
+    __table_args__ = (
+        Index('idx_role_org', 'organization_id'),
+        # Ensure role name is unique within an organization
+        Index('uq_role_org_name', 'organization_id', 'name', unique=True),
+    )
+
+
+class UserRole(Base, TimestampMixin):
+    """Junction table for User and Role (Many-to-Many)"""
+    __tablename__ = 'user_roles'
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='CASCADE'),
+        primary_key=True
+    )
+    role_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('roles.id', ondelete='CASCADE'),
+        primary_key=True
+    )
 
 
 class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
@@ -69,11 +137,12 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     
-    role: Mapped[str] = mapped_column(
-        String(50),
+    is_super_admin: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
         nullable=False,
         index=True,
-        comment="super_admin, admin, manager, pharmacist, cashier, viewer"
+        comment="Hardcoded super admin flag with absolute access"
     )
     
     phone: Mapped[Optional[str]] = mapped_column(String(20))
@@ -84,13 +153,6 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         ARRAY(UUID(as_uuid=True)),
         default=list,
         comment="Branches this user can access"
-    )
-    
-    # Custom permissions (in addition to role)
-    permissions: Mapped[dict] = mapped_column(
-        JSONB,
-        default=dict,
-        comment="{ additional: ['perm1', 'perm2'], denied: ['perm3'] }"
     )
     
     is_active: Mapped[bool] = mapped_column(
@@ -134,6 +196,10 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     # Relationships
     organization: Mapped["Organization"] = relationship(back_populates="users")
+    roles: Mapped[List["Role"]] = relationship(
+        secondary="user_roles",
+        back_populates="users"
+    )
     sessions: Mapped[List["UserSession"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan"
@@ -141,13 +207,9 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     audit_logs: Mapped[List["AuditLog"]] = relationship(back_populates="user")
     
     __table_args__ = (
-        CheckConstraint(
-            "role IN ('super_admin', 'admin', 'manager', 'pharmacist', 'cashier', 'viewer')",
-            name='check_user_role'
-        ),
         Index('idx_user_org', 'organization_id'),
         Index('idx_user_active', 'is_active'),
-        Index('idx_user_role', 'role'),
+        Index('idx_user_super_admin', 'is_super_admin'),
     )
     
     @validates('email')
@@ -172,29 +234,15 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     def has_permission(self, permission: str) -> bool:
         """Check if user has specific permission"""
-        # Check denied permissions first
-        if permission in self.permissions.get('denied', []):
-            return False
-        
-        # Check additional permissions
-        if permission in self.permissions.get('additional', []):
+        if self.is_super_admin:
             return True
         
-        # Check role-based permissions
-        role_permissions = {
-            'super_admin': ['*'],
-            'admin': ['manage_users', 'manage_branches', 'manage_drugs', 'manage_suppliers', 'approve_purchase_orders',
-                     'manage_inventory', 'process_sales', 'view_reports', 'export_data', 'manage_customers'],
-            'manager': ['manage_drugs', 'manage_inventory', 'process_sales', 'approve_purchase_orders',
-                       'view_reports', 'export_data', 'manage_suppliers', 'manage_customers'],
-            'pharmacist': ['view_drugs', 'process_sales', 'view_inventory', 'approve_purchase_orders',
-                          'manage_prescriptions', 'manage_suppliers', 'manage_customers'],
-            'cashier': ['view_drugs', 'process_sales', 'view_inventory', 'manage_customers'],
-            'viewer': ['view_drugs', 'view_inventory', 'view_reports']
-        }
+        # Aggregate permissions from all assigned roles
+        for role in self.roles:
+            if permission in role.permissions or "*" in role.permissions:
+                return True
         
-        user_perms = role_permissions.get(self.role, [])
-        return '*' in user_perms or permission in user_perms
+        return False
     
     def has_branch_access(self, branch_id: uuid.UUID) -> bool:
         """Check if user has access to a branch (instance method)"""

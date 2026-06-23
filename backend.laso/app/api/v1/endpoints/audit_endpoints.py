@@ -10,7 +10,7 @@ from sqlalchemy import select
 from typing import Optional
 import uuid
 
-from app.core.deps import get_current_user, require_role
+from app.core.deps import get_current_user, require_permission
 from app.db.dependencies import get_db
 from app.models.user.user_model import User
 from app.models.system_md.sys_models import AuditLog
@@ -22,7 +22,7 @@ router = APIRouter(prefix="/audit", tags=["Audit Logs"])
 @router.get(
     "/",
     response_model=PaginatedResponse[AuditLogResponse],
-    dependencies=[Depends(require_role("admin", "manager", "super_admin"))]
+    dependencies=[Depends(require_permission("view_audit_logs"))]
 )
 async def list_audit_logs(
     pagination: PaginationParams = Depends(),

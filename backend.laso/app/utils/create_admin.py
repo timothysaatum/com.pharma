@@ -60,7 +60,6 @@ async def create_initial_admin():
                 email="admin@pharmacy.com",
                 password="Admin@123456",
                 full_name="System Administrator",
-                role="super_admin",
                 organization_id=org.id,
                 assigned_branches=[],
                 employee_id=None,
@@ -68,6 +67,8 @@ async def create_initial_admin():
             )
             
             user = await AuthService.create_user(db, admin_data)
+            user.is_super_admin = True
+            await db.commit()
             
             print("\n" + "="*60)
             print("ADMIN USER CREATED SUCCESSFULLY!")
@@ -75,7 +76,7 @@ async def create_initial_admin():
             print(f"Username:     {user.username}")
             print(f"Email:        {user.email}")
             print(f"Password:     Admin@123456")
-            print(f"Role:         {user.role}")
+            print(f"Super Admin:  Yes")
             print(f"Organization: {org.name}")
             print(f"User ID:      {user.id}")
             print("="*60)

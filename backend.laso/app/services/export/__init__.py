@@ -20,6 +20,17 @@ try:
     OPENPYXL_AVAILABLE = True
 except ImportError:
     OPENPYXL_AVAILABLE = False
+    # Mock classes for when openpyxl is not available to avoid NameErrors at class definition time
+    class PatternFill:
+        def __init__(self, **kwargs): pass
+    class Font:
+        def __init__(self, **kwargs): pass
+    class Border:
+        def __init__(self, **kwargs): pass
+    class Side:
+        def __init__(self, **kwargs): pass
+    class Alignment:
+        def __init__(self, **kwargs): pass
 
 
 class ExcelExportService:

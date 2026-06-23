@@ -3,7 +3,6 @@ import type {
     LoginRequest,
     TokenResponse,
     UserResponse,
-    UserRole,
     PasswordChange,
 } from "@/types";
 import { authStorage } from "@/lib/storage";
@@ -17,7 +16,7 @@ export interface VerifyResponse {
     /** UUID of the authenticated user */
     user_id: string;
     username: string;
-    role: UserRole;
+    is_super_admin: boolean;
 }
 
 export interface SessionInfo {
@@ -34,7 +33,7 @@ export interface SessionsResponse {
 }
 
 export interface PermissionsResponse {
-    role: UserRole;
+    is_super_admin: boolean;
     permissions: string[];
     branches: string[];
 }

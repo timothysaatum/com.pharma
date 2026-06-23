@@ -26,7 +26,7 @@ router = APIRouter(prefix="/branches", tags=["Branch Management"])
 @router.post("", response_model=BranchResponse, status_code=status.HTTP_201_CREATED)
 async def create_branch(
     branch_data: BranchCreate,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_branches")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -193,8 +193,8 @@ async def get_branch(
             detail="Branch not found"
         )
     
-    # Check if user has access (unless admin/super_admin)
-    if current_user.role not in ['admin', 'super_admin']:
+    # Check if user has access (unless super admin)
+    if not current_user.is_super_admin:
         assigned_branch_ids = {str(b) for b in (current_user.assigned_branches or [])}
         if str(branch_id) not in assigned_branch_ids:
             raise HTTPException(
@@ -240,7 +240,7 @@ async def get_branch_by_code(
 async def update_branch(
     branch_id: uuid.UUID,
     branch_data: BranchUpdate,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_branches")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -275,7 +275,7 @@ async def update_branch(
 async def delete_branch(
     branch_id: uuid.UUID,
     hard_delete: bool = Query(False, description="Permanently delete (default: soft delete)"),
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_branches")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -310,7 +310,7 @@ async def delete_branch(
 @router.post("/{branch_id}/activate", response_model=BranchResponse)
 async def activate_branch(
     branch_id: uuid.UUID,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_branches")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -338,7 +338,7 @@ async def activate_branch(
 @router.post("/{branch_id}/deactivate", response_model=BranchResponse)
 async def deactivate_branch(
     branch_id: uuid.UUID,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_branches")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -370,7 +370,7 @@ async def deactivate_branch(
 @router.post("/assign-user", status_code=status.HTTP_200_OK)
 async def assign_user_to_branches(
     assignment: BranchAssignment,
-    current_user: User = Depends(require_role("admin", "super_admin")),
+    current_user: User = Depends(require_permission("manage_users")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -458,7 +458,7 @@ async def get_branch_users(
             "username": user.username,
             "full_name": user.full_name,
             "email": user.email,
-            "role": user.role,
+            "is_super_admin": user.is_super_admin,
             "is_active": user.is_active
         }
         for user in branch_users

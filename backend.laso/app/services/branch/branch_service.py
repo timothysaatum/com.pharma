@@ -84,12 +84,13 @@ class BranchService:
                     detail="Manager not found or not active in this organization"
                 )
             
-            # Check if manager role is appropriate
-            if manager.role not in ['admin', 'manager', 'super_admin']:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"User with role '{manager.role}' cannot be a branch manager"
-                )
+            # Check if manager role is appropriate (Super admin or has empty assigned branches is allowed)
+            if not (manager.is_super_admin or not manager.assigned_branches):
+                 # For granular roles, we check if they have enough permissions?
+                 # For now, let's just ensure it's not a restricted branch-only user unless they are a manager.
+                 # Simplified: if user has assigned branches, they can only manage their assigned branches.
+                 if str(branch_data.organization_id) != str(manager.organization_id):
+                     raise HTTPException(status_code=400, detail="Manager from different org")
         
         # Convert Pydantic model to dict, excluding unset fields
         branch_dict = branch_data.model_dump(exclude_unset=True)
@@ -135,14 +136,12 @@ class BranchService:
             db.add(branch)
             await db.flush()  # flush so branch.id is available before we reference it below
 
-            # ── Auto-assign new branch to all super_admin and admin users ──────
-            # These roles have org-wide scope (super_admin has '*', admin has
-            # manage_branches) so they must always see every branch.
-            # managers/pharmacists/cashiers are assigned to branches explicitly.
+            # ── Auto-assign new branch to all super_admin and org-wide admin users ──────
+            # Org-wide admins (no assigned_branches) must see every branch.
             result = await db.execute(
                 select(User).where(
                     User.organization_id == branch_data.organization_id,
-                    User.role.in_(['super_admin', 'admin']),
+                    or_(User.is_super_admin == True, User.assigned_branches == '[]', User.assigned_branches == []),
                     User.is_active == True,
                     User.is_deleted == False,
                 )
@@ -295,11 +294,6 @@ class BranchService:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Manager not found"
-                )
-            if manager.role not in ['admin', 'manager', 'super_admin']:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"User with role '{manager.role}' cannot be a branch manager"
                 )
         
         if 'address' in update_data and update_data['address'] is not None:

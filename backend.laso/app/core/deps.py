@@ -3,6 +3,7 @@ from fastapi import Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from datetime import datetime, timezone
 import uuid
 
@@ -74,7 +75,9 @@ async def get_current_user(
     
     # Get user from database
     result = await db.execute(
-        select(User).where(
+        select(User)
+        .options(selectinload(User.roles))
+        .where(
             User.id == user_id,
             User.deleted_at.is_(None)
         )
@@ -143,30 +146,17 @@ async def get_current_active_user(
 
 def require_role(*allowed_roles: str):
     """
-    Dependency factory for role-based access control
-    
-    Usage:
-        @router.get("/admin", dependencies=[Depends(require_role("admin", "super_admin"))])
+    [DEPRECATED] Use require_permission instead.
+    Hardcoded roles are being replaced by dynamic roles and fixed permissions.
+    For now, this maps old roles to Permission.MANAGE_ORGANIZATION as a proxy.
     """
-    async def role_checker(current_user: User = Depends(get_current_user)) -> User:
-        if current_user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Access denied. Required roles: {', '.join(allowed_roles)}",
-            )
-        return current_user
-    
-    return role_checker
+    from app.models.user.user_model import Permission
+    return require_permission(Permission.MANAGE_ORGANIZATION)
 
 def require_any_role(allowed_roles: list[str]):
-    def role_checker(user: User = Depends(get_current_user)):
-        if user.role not in allowed_roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN, 
-                detail="Operation not permitted"
-            )
-        return user
-    return role_checker
+    """[DEPRECATED] Use require_permission instead."""
+    from app.models.user.user_model import Permission
+    return require_permission(Permission.MANAGE_ORGANIZATION)
 
 def require_permission(permission: str):
     """
@@ -247,8 +237,8 @@ async def verify_branch_access(
     Super admins and admins have access to all branches
     Other users only access assigned branches
     """
-    # Super admins and admins can access any branch in their organization
-    if current_user.role in ["super_admin", "admin"]:
+    # Super admins and org admins can access any branch in their organization
+    if current_user.is_super_admin or not current_user.assigned_branches:
         return branch_id
     
     # Other users must have branch in their assigned list

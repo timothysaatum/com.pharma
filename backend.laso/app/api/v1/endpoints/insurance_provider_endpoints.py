@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 import uuid
 
-from app.core.deps import get_db, get_current_user, require_role
+from app.core.deps import get_db, get_current_user, require_permission
 from app.models.user.user_model import User
 from app.services.insurance import InsuranceProviderService
 from app.schemas.insurance_provider_schemas import (
@@ -38,7 +38,7 @@ router = APIRouter(prefix="/insurance-providers", tags=["insurance-providers"])
     "/",
     response_model=InsuranceProviderResponse,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_role("admin", "super_admin"))],
+    dependencies=[Depends(require_permission("manage_pricing"))],
 )
 async def create_insurance_provider(
     data: InsuranceProviderCreate,
@@ -169,7 +169,7 @@ async def get_insurance_provider(
 @router.patch(
     "/{provider_id}",
     response_model=InsuranceProviderResponse,
-    dependencies=[Depends(require_role("admin", "super_admin"))],
+    dependencies=[Depends(require_permission("manage_pricing"))],
 )
 async def update_insurance_provider(
     provider_id: uuid.UUID,
@@ -201,7 +201,7 @@ async def update_insurance_provider(
 @router.post(
     "/{provider_id}/deactivate",
     response_model=InsuranceProviderResponse,
-    dependencies=[Depends(require_role("admin", "super_admin"))],
+    dependencies=[Depends(require_permission("manage_pricing"))],
 )
 async def deactivate_insurance_provider(
     provider_id: uuid.UUID,
@@ -228,7 +228,7 @@ async def deactivate_insurance_provider(
 @router.post(
     "/{provider_id}/activate",
     response_model=InsuranceProviderResponse,
-    dependencies=[Depends(require_role("admin", "super_admin"))],
+    dependencies=[Depends(require_permission("manage_pricing"))],
 )
 async def activate_insurance_provider(
     provider_id: uuid.UUID,
@@ -256,7 +256,7 @@ async def activate_insurance_provider(
 @router.delete(
     "/{provider_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_role("admin", "super_admin"))],
+    dependencies=[Depends(require_permission("manage_pricing"))],
 )
 async def delete_insurance_provider(
     provider_id: uuid.UUID,

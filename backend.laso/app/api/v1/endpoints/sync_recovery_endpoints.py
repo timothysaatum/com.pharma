@@ -18,8 +18,8 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_db, get_current_user
-from app.models.user.user_model import User, UserRole
+from app.core.deps import get_db, get_current_user, require_permission
+from app.models.user.user_model import User
 from app.services.sync.sync_integrity import (
     SyncIntegrityService,
     SyncIntegrityIssue,
@@ -35,7 +35,7 @@ router = APIRouter(
 @router.get("/health")
 async def get_sync_health(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("view_reports")),
     branch_id: Optional[uuid.UUID] = Query(None),
 ):
     """
@@ -46,14 +46,7 @@ async def get_sync_health(
     - Distribution by sync status
     - Stale pending records
     - Recent sync activity
-    
-    Admin-only endpoint.
     """
-    if current_user.role not in [UserRole.admin, UserRole.super_admin]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access sync recovery endpoints"
-        )
     
     summary = await SyncIntegrityService.get_sync_status_summary(
         db,
@@ -70,7 +63,7 @@ async def get_sync_health(
 @router.get("/check-integrity")
 async def check_integrity(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("view_reports")),
     branch_id: Optional[uuid.UUID] = Query(None),
     max_issues: int = Query(100, ge=1, le=1000),
 ):
@@ -87,14 +80,7 @@ async def check_integrity(
     - List of detected issues
     - Issue type, severity, and details
     - Record IDs for further investigation
-    
-    Admin-only endpoint.
     """
-    if current_user.role not in [UserRole.admin, UserRole.super_admin]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access sync recovery endpoints"
-        )
     
     issues = await SyncIntegrityService.check_sale_integrity(
         db,
@@ -121,7 +107,7 @@ async def fix_issue(
     issue_type: str,
     record_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("manage_inventory")),
 ):
     """
     Attempt to auto-fix a detected integrity issue.
@@ -140,14 +126,7 @@ async def fix_issue(
     Returns:
     - success: True if fixed, False if cannot be auto-fixed
     - reason: Explanation if cannot fix
-    
-    Admin-only endpoint.
     """
-    if current_user.role not in [UserRole.admin, UserRole.super_admin]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access sync recovery endpoints"
-        )
     
     # Create a synthetic issue object for fixing
     issue = SyncIntegrityIssue(
@@ -186,7 +165,7 @@ async def bulk_fix_issues(
         description="List of issue types to auto-fix",
     ),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("manage_inventory")),
     branch_id: Optional[uuid.UUID] = Query(None),
     dry_run: bool = Query(False, description="If true, report what would be fixed without applying"),
 ):
@@ -204,14 +183,7 @@ async def bulk_fix_issues(
     - total_fixed: Number of issues fixed
     - by_type: Breakdown of fixes by issue type
     - details: If dry_run, lists what would be fixed
-    
-    Admin-only endpoint.
     """
-    if current_user.role not in [UserRole.admin, UserRole.super_admin]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access sync recovery endpoints"
-        )
     
     # Get all issues
     issues = await SyncIntegrityService.check_sale_integrity(
@@ -269,7 +241,7 @@ async def bulk_fix_issues(
 @router.get("/report")
 async def generate_integrity_report(
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("view_reports")),
     branch_id: Optional[uuid.UUID] = Query(None),
 ):
     """
@@ -285,14 +257,7 @@ async def generate_integrity_report(
     - issues: Detected problems grouped by severity
     - recommendations: Suggested fixes
     - export_url: URL to download full report as CSV
-    
-    Admin-only endpoint.
     """
-    if current_user.role not in [UserRole.admin, UserRole.super_admin]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only admins can access sync recovery endpoints"
-        )
     
     # Get health summary
     summary = await SyncIntegrityService.get_sync_status_summary(

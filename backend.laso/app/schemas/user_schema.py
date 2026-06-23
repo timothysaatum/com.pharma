@@ -9,6 +9,29 @@ import uuid
 
 
 
+class PermissionInfo(BaseSchema):
+    name: str
+    description: Optional[str] = None
+
+class RoleBase(BaseSchema):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = None
+    permissions: List[str] = Field(default_factory=list)
+
+class RoleCreate(RoleBase):
+    pass
+
+class RoleUpdate(BaseSchema):
+    name: Optional[str] = Field(None, min_length=1, max_length=100)
+    description: Optional[str] = None
+    permissions: Optional[List[str]] = None
+
+class RoleResponse(RoleBase, SyncSchema, TimestampSchema):
+    id: uuid.UUID
+    organization_id: uuid.UUID
+    model_config = ConfigDict(from_attributes=True)
+
+
 class UserBase(BaseSchema):
     username: str = Field(
         ..., 
@@ -19,10 +42,6 @@ class UserBase(BaseSchema):
     )
     email: EmailStr
     full_name: str = Field(..., min_length=2, max_length=255)
-    role: Optional[str] = Field(
-        None,
-        pattern="^(super_admin|admin|manager|pharmacist|cashier|viewer)$"
-    )
     phone: Optional[str] = Field(None, max_length=20)
     employee_id: Optional[str] = Field(None, max_length=50)
     assigned_branches: Optional[List[uuid.UUID]] = Field(
@@ -85,10 +104,7 @@ class UserCreate(UserBase):
 class UserUpdate(BaseSchema):
     full_name: Optional[str] = Field(None, min_length=2, max_length=255)
     phone: Optional[str] = None
-    role: Optional[str] = Field(
-        None,
-        pattern="^(super_admin|admin|manager|pharmacist|cashier|viewer)$"
-    )
+    role_ids: Optional[List[uuid.UUID]] = None
     assigned_branches: Optional[List[uuid.UUID]] = None
     is_active: Optional[bool] = None
 
@@ -109,6 +125,8 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
     id: uuid.UUID
     organization_id: uuid.UUID
     is_active: bool
+    is_super_admin: bool
+    roles: List[RoleResponse] = Field(default_factory=list)
     last_login: Optional[datetime] = None
     two_factor_enabled: bool
     deleted_at: Optional[datetime] = None

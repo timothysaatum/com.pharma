@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 import uuid
 
-from app.core.deps import get_current_user, require_role
+from app.core.deps import get_current_user, require_permission
 from app.db.dependencies import get_db
 from app.models.user.user_model import User
 
@@ -44,7 +44,7 @@ router = APIRouter(prefix="/contracts", tags=["Price Contracts"])
 async def create_contract(
     contract_data: PriceContractCreate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Create a new price contract.
@@ -308,7 +308,7 @@ async def update_contract(
     contract_id: uuid.UUID,
     update_data: PriceContractUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Update price contract (partial update).
@@ -357,7 +357,7 @@ async def update_contract(
 async def delete_contract(
     contract_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Soft delete price contract.
@@ -396,7 +396,7 @@ async def approve_contract(
     contract_id: uuid.UUID,
     request: ApproveContractRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Approve a draft contract and activate it.
@@ -427,7 +427,7 @@ async def suspend_contract(
     contract_id: uuid.UUID,
     request: SuspendContractRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Suspend an active contract.
@@ -461,7 +461,7 @@ async def activate_contract(
     contract_id: uuid.UUID,
     request: ActivateContractRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Activate a suspended or draft contract.
@@ -566,7 +566,7 @@ async def duplicate_contract(
     new_code: str = Query(..., min_length=1, max_length=50, description="Code for new contract"),
     new_name: str = Query(..., min_length=1, max_length=255, description="Name for new contract"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_role('admin', 'super_admin', 'manager'))
+    current_user: User = Depends(require_permission('manage_pricing'))
 ):
     """
     Create a copy of existing contract with new code and name.
