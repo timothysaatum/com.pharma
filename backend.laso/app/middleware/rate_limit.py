@@ -14,26 +14,35 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     Simple in-memory rate limiting middleware
     For production, consider using Redis or similar
     """
-    
+
+    _cleanup_task: asyncio.Task | None = None
+
     def __init__(self, app):
         super().__init__(app)
         # Store: {ip_address: [(timestamp, count)]}
         self.requests: Dict[str, list[Tuple[datetime, int]]] = defaultdict(list)
         self.lock = asyncio.Lock()
-        
-        # Start cleanup task
-        asyncio.create_task(self._cleanup_old_entries())
+
+    async def _ensure_cleanup(self) -> None:
+        """Start the cleanup background task once the event loop is running."""
+        if RateLimitMiddleware._cleanup_task is None:
+            RateLimitMiddleware._cleanup_task = asyncio.create_task(
+                self._cleanup_old_entries()
+            )
     
     async def dispatch(self, request: Request, call_next):
         """Process request with rate limiting"""
-        
+
         if not settings.RATE_LIMIT_ENABLED:
             return await call_next(request)
-        
+
+        # Ensure cleanup background task is running
+        await self._ensure_cleanup()
+
         # Skip rate limiting for health check and static files
         if request.url.path in ["/health", "/docs", "/redoc", "/openapi.json"]:
             return await call_next(request)
-        
+
         # Get client IP
         client_ip = self._get_client_ip(request)
         
@@ -148,8 +157,30 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
 # ── Per-route rate limiter (FastAPI dependency) ──────────────────────
 
-_per_route_limits: dict[str, list[tuple[datetime, str]]] = defaultdict(list)
+_per_route_limits: dict[str, list[datetime]] = defaultdict(list)
 _route_lock = asyncio.Lock()
+
+
+async def _cleanup_per_route_limits() -> None:
+    """Periodically clean up stale per-route rate-limit entries."""
+    while True:
+        await asyncio.sleep(300)
+        cutoff = datetime.now() - timedelta(seconds=settings.RATE_LIMIT_WINDOW_SECONDS * 2)
+        async with _route_lock:
+            stale_keys = []
+            for key, entries in list(_per_route_limits.items()):
+                _per_route_limits[key] = [ts for ts in entries if ts > cutoff]
+                if not _per_route_limits[key]:
+                    stale_keys.append(key)
+            for key in stale_keys:
+                del _per_route_limits[key]
+
+
+# Start the cleanup in the background (module-level singleton)
+try:
+    asyncio.create_task(_cleanup_per_route_limits())
+except RuntimeError:
+    pass  # no event loop yet — will be created on first use
 
 
 def _get_client_ip_from_request(request) -> str:
@@ -188,8 +219,7 @@ def rate_limit(max_requests: int = 10, window_seconds: int = 60):
         cutoff = now - timedelta(seconds=window_seconds)
 
         async with _route_lock:
-            entries = _per_route_limits[store_key]
-            entries = [ts for ts in entries if ts > cutoff]
+            entries = [ts for ts in _per_route_limits.get(store_key, []) if ts > cutoff]
 
             if len(entries) >= max_requests:
                 raise HTTPException(

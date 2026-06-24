@@ -9,7 +9,7 @@ from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime, date
 import uuid
 
-from app.models.core.mixins import SoftDeleteMixin, SoftDeleteMixin, SyncTrackingMixin, TimestampMixin
+from app.models.core.mixins import SoftDeleteMixin, SyncTrackingMixin, TimestampMixin
 from app.models.pricing.pricing_model import PriceContract
 from app.schemas.base_schemas import Money
 if TYPE_CHECKING:

@@ -8,7 +8,7 @@ import {
     Shield, ShieldOff, Trash2, KeyRound, Edit3,
     CheckCircle, XCircle, Clock, ChevronLeft,
     ChevronRight, RefreshCw, UserCog, Eye, EyeOff,
-    Building2, Mail, Phone, BadgeCheck, AlertTriangle,
+    Building2, Mail, Phone, AlertTriangle,
     X, Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -877,11 +877,6 @@ export default function UsersPage() {
                                                     <div className="min-w-0">
                                                         <div className="flex items-center gap-1.5">
                                                             <p className="text-xs font-semibold text-ink truncate">{user.full_name}</p>
-                                                            {user.two_factor_enabled && (
-                                                                <span title="2FA enabled">
-                                                                    <BadgeCheck className="w-3 h-3 text-brand-500 flex-shrink-0" />
-                                                                </span>
-                                                            )}
                                                         </div>
                                                         <p className="text-xs text-ink-muted truncate">@{user.username}</p>
                                                         {user.employee_id && (

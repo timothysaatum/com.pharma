@@ -12,7 +12,8 @@ from app.schemas.user_schema import (
 )
 from app.core.security import (
     hash_password, verify_password, create_access_token,
-    create_refresh_token, decode_token, hash_token, SecurityUtils
+    create_refresh_token, decode_token, hash_token, SecurityUtils,
+    generate_totp_secret, get_totp_provisioning_uri, verify_totp,
 )
 from app.core.config import get_settings
 from app.services.audit_service import AuditService
@@ -186,6 +187,31 @@ class AuthService:
                 detail="User account is inactive",
             )
         
+        # Check MFA / TOTP before committing any state changes
+        if user.two_factor_enabled:
+            if not login_data.totp_code:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="MFA_REQUIRED",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            if not verify_totp(user.two_factor_secret, login_data.totp_code):
+                await AuditService.log(
+                    db, user.organization_id,
+                    action="mfa_failed",
+                    user_id=user.id,
+                    entity_type="user",
+                    entity_id=user.id,
+                    ip_address=ip_address,
+                    user_agent=user_agent,
+                    context_metadata={"method": "totp"},
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid verification code",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
         # Reset failed attempts on successful login
         user.failed_login_attempts = 0
         user.account_locked_until = None
@@ -476,7 +502,10 @@ class AuthService:
     async def _cleanup_old_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
         """
         Remove expired and old sessions, keep only recent ones
-        
+
+        Uses ``flush()`` instead of ``commit()`` so callers (e.g. login)
+        can own the transaction boundary without a double-commit.
+
         Args:
             db: Async database session
             user_id: User ID
@@ -488,7 +517,7 @@ class AuthService:
                 UserSession.expires_at < datetime.now(timezone.utc)
             )
         )
-        
+
         # Remove revoked sessions older than cleanup hours
         cleanup_time = datetime.now(timezone.utc) - timedelta(
             hours=settings.SESSION_CLEANUP_HOURS
@@ -500,7 +529,7 @@ class AuthService:
                 UserSession.revoked_at < cleanup_time
             )
         )
-        
+
         # Keep only max sessions per user
         result = await db.execute(
             select(UserSession).where(
@@ -510,15 +539,62 @@ class AuthService:
             ).order_by(UserSession.created_at.desc())
         )
         active_sessions = result.scalars().all()
-        
+
         if len(active_sessions) > settings.MAX_SESSIONS_PER_USER:
             # Revoke oldest sessions
             for session in active_sessions[settings.MAX_SESSIONS_PER_USER:]:
                 session.is_revoked = True
                 session.revoked_at = datetime.now(timezone.utc)
-        
-        await db.commit()
+
+        await db.flush()
     
+    # ── MFA / TOTP ──────────────────────────────────────────────────────
+
+    @staticmethod
+    async def setup_mfa(user: User) -> tuple[str, str]:
+        """Generate a TOTP secret and provisioning URI for the user.
+
+        Does NOT enable MFA yet — the user must verify with a code first.
+        Returns (secret, provisioning_uri).
+        """
+        secret = generate_totp_secret()
+        uri = get_totp_provisioning_uri(secret, user.email)
+        user.two_factor_secret = secret
+        user.two_factor_enabled = False  # not active until verified
+        return secret, uri
+
+    @staticmethod
+    async def verify_and_enable_mfa(db: AsyncSession, user: User, totp_code: str) -> None:
+        """Verify a TOTP code and enable MFA for the user."""
+        if not user.two_factor_secret:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="MFA has not been set up. Call setup first.",
+            )
+        if not verify_totp(user.two_factor_secret, totp_code):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid verification code",
+            )
+        user.two_factor_enabled = True
+        user.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
+    @staticmethod
+    async def disable_mfa(
+        db: AsyncSession, user: User, password: str
+    ) -> None:
+        """Disable MFA after verifying the user's password."""
+        if not verify_password(password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Incorrect password",
+            )
+        user.two_factor_enabled = False
+        user.two_factor_secret = None
+        user.updated_at = datetime.now(timezone.utc)
+        await db.commit()
+
     @staticmethod
     async def get_user_sessions(db: AsyncSession, user_id: uuid.UUID) -> list[UserSession]:
         """

@@ -103,8 +103,9 @@ export interface User extends TimestampFields, SyncFields {
     account_locked_until: string | null;
     is_active: boolean;
     last_login: string | null;
-    two_factor_enabled: boolean;
     deleted_at: string | null;
+    two_factor_enabled: boolean;
+    mfa_warning: boolean;
 }
 
 export interface UserCreate {
@@ -144,6 +145,7 @@ export interface UserUpdate {
 export interface LoginRequest {
     username: string;
     password: string;
+    totp_code?: string;
     device_info?: string;
 }
 
@@ -165,6 +167,21 @@ export interface RefreshTokenRequest {
 }
 
 export type UserResponse = User;
+
+// ── MFA ───────────────────────────────────────────────────────────────
+
+export interface MfaSetupResponse {
+    secret: string;
+    provisioning_uri: string;
+}
+
+export interface MfaVerifyRequest {
+    totp_code: string;
+}
+
+export interface MfaDisableRequest {
+    password: string;
+}
 
 // ============================================================
 // ORGANIZATION TYPES

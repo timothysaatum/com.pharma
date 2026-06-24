@@ -77,6 +77,13 @@ class OrganizationOnboardingRequest(BaseSchema):
     # Admin user details
     admin: UserCreate = Field(..., description="Admin user details")
     
+    # Idempotency key for safe retry
+    idempotency_key: Optional[str] = Field(
+        None,
+        max_length=64,
+        description="Unique key to prevent duplicate onboarding on retry"
+    )
+
     # Branches to create
     branches: Optional[List[BranchCreate]] = Field(
         None,

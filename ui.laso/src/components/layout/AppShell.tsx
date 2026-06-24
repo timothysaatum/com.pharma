@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import {
     ShoppingCart, Users, BarChart2, FileText,
     LogOut, Building2, Menu, X, Activity,
-    Receipt, Settings, UserCog, Cog, ChevronDown, Check,
+    Receipt, Settings, UserCog, Cog, ChevronDown, Check, ShieldAlert,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import { branchApi } from "@/api/branches";
@@ -372,6 +372,20 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 {status === "offline" && (
                     <div className="pointer-events-none absolute right-28 top-5 z-10 rounded-full border border-amber-200 bg-amber-50/90 px-2 py-1 text-xs font-semibold text-amber-700 shadow-sm backdrop-blur-sm">
                         offline
+                    </div>
+                )}
+                {user?.mfa_warning && (
+                    <div className="flex-shrink-0 flex items-center gap-3 px-4 py-2.5 bg-amber-50 border-b border-amber-200 text-amber-800 text-xs">
+                        <ShieldAlert className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                        <span className="flex-1">
+                            <strong>Security recommendation:</strong> Enable multi-factor authentication (MFA) for maximum account protection.
+                        </span>
+                        <button
+                            onClick={() => navigate("/settings?tab=security")}
+                            className="font-semibold text-amber-700 hover:text-amber-900 underline underline-offset-2 whitespace-nowrap"
+                        >
+                            Set up now
+                        </button>
                     </div>
                 )}
                 {children}

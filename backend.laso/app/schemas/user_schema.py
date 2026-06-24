@@ -129,8 +129,15 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
         default_factory=EffectivePermissionInfo,
         description="Computed permissions after role hierarchy resolution"
     )
+    two_factor_enabled: bool = Field(
+        default=False,
+        description="Whether the user has TOTP multi-factor authentication enabled"
+    )
+    mfa_warning: bool = Field(
+        default=False,
+        description="True when the user is an admin without MFA enabled — frontend should show a warning"
+    )
     last_login: Optional[datetime] = None
-    two_factor_enabled: bool
     deleted_at: Optional[datetime] = None
     account_locked_until: Optional[datetime] = None
     # Security: Never expose password hash or 2FA secret
@@ -140,10 +147,11 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
 
     @model_validator(mode='before')
     @classmethod
-    def _populate_effective_permissions(cls, data):
+    def _populate_computed_fields(cls, data):
         if isinstance(data, dict):
             return data
         user = data
+        # Effective permissions
         if hasattr(user, '_effective_permissions') and user._effective_permissions is not None:
             effective = user._effective_permissions
             max_level = 0
@@ -159,6 +167,11 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
                 effective_permissions=sorted(effective),
                 max_role_level=max_level,
             )
+        # MFA warning for admins without 2FA enabled
+        data.mfa_warning = (
+            not getattr(user, 'two_factor_enabled', False)
+            and getattr(user, '_is_admin', False)
+        )
         return data
 
 
@@ -166,6 +179,10 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
 class LoginRequest(BaseSchema):
     username: str = Field(..., min_length=3)
     password: str = Field(..., min_length=8)
+    totp_code: Optional[str] = Field(
+        None, min_length=6, max_length=6,
+        description="TOTP code required if the user has MFA enabled"
+    )
     device_info: Optional[str] = Field(None, max_length=500)
 
     # Security: Don't include password in logs/examples
@@ -190,4 +207,22 @@ class TokenResponse(BaseSchema):
 
 class RefreshTokenRequest(BaseSchema):
     refresh_token: str = Field(..., min_length=20)
+
+
+# ── MFA / TOTP ─────────────────────────────────────────────────────────
+
+class MfaSetupResponse(BaseSchema):
+    """Returned when setting up MFA — contains the secret and provisioning URI."""
+    secret: str = Field(..., description="Base32 TOTP secret")
+    provisioning_uri: str = Field(..., description="otpauth:// URI for QR code")
+
+
+class MfaVerifyRequest(BaseSchema):
+    """Verify a TOTP code to enable MFA."""
+    totp_code: str = Field(..., min_length=6, max_length=6)
+
+
+class MfaDisableRequest(BaseSchema):
+    """Disable MFA — requires current password for security."""
+    password: str = Field(..., min_length=8)
 

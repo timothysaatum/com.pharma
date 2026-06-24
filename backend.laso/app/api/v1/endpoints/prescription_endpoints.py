@@ -379,10 +379,9 @@ async def cancel_prescription(
 
 @router.delete(
     "/{prescription_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    status_code=status.HTTP_200_OK,
     dependencies=[Depends(require_permission("manage_prescriptions"))],
-    deprecated=True,
-    description="Deprecated — use PATCH /{id}/cancel instead. Hard-deletes the prescription row."
+    description="Soft-delete a prescription. Redirects to PATCH /{id}/cancel."
 )
 async def delete_prescription(
     prescription_id: uuid.UUID,
@@ -390,27 +389,12 @@ async def delete_prescription(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Hard-delete a prescription.
+    Soft-delete a prescription (alias for PATCH /cancel).
 
-    **Deprecated:** Use PATCH /cancel for soft-delete (regulatory compliance).
-    **Permissions:** manage_prescriptions
+    Sets status to 'cancelled' with a note.  Never hard-deletes — regulatory
+    compliance requires prescriptions to be retained for the audit trail.
     """
-    res = await db.execute(
-        select(Prescription).where(
-            Prescription.id == prescription_id,
-            Prescription.organization_id == current_user.organization_id,
-        )
-    )
-    prescription = res.scalar_one_or_none()
-    if not prescription:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Prescription not found"
-        )
-
-    await db.delete(prescription)
-    await db.commit()
-    return None
+    return await cancel_prescription(prescription_id, db, current_user)
 
 
 @router.get(
@@ -754,12 +738,12 @@ async def update_prescription(
         medications_list = [m.model_dump() for m in update_data.medications]
         prescription.medications = medications_list
     
-    # Update refills
+    # Update refills — only change the allowed limit, never inflate remaining
     if update_data.refills_allowed is not None:
         prescription.refills_allowed = update_data.refills_allowed
-        # If increasing refills, replenish remaining
-        if update_data.refills_allowed > prescription.refills_remaining:
-            prescription.refills_remaining = update_data.refills_allowed
+        # Clamp remaining to the new ceiling if it somehow exceeds it
+        if prescription.refills_remaining > prescription.refills_allowed:
+            prescription.refills_remaining = prescription.refills_allowed
     
     # Update clinical info
     if update_data.diagnosis is not None:
@@ -771,8 +755,17 @@ async def update_prescription(
     if update_data.special_instructions is not None:
         prescription.special_instructions = update_data.special_instructions
     
-    # Update status
+    # Update status — validate against allowed values
+    _VALID_PRESCRIPTION_STATUSES = {"active", "filled", "expired", "cancelled"}
     if update_data.status is not None:
+        if update_data.status not in _VALID_PRESCRIPTION_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Invalid status '{update_data.status}'. "
+                    f"Must be one of: {', '.join(sorted(_VALID_PRESCRIPTION_STATUSES))}."
+                ),
+            )
         prescription.status = update_data.status
     
     prescription.updated_at = datetime.now(timezone.utc)

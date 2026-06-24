@@ -12,7 +12,8 @@ from app.core.config import get_settings
 from app.middleware.rate_limit import rate_limit
 from app.schemas.user_schema import (
     UserCreate, UserResponse, LoginRequest, TokenResponse,
-    RefreshTokenRequest, PasswordChange
+    RefreshTokenRequest, PasswordChange,
+    MfaSetupResponse, MfaVerifyRequest, MfaDisableRequest,
 )
 from app.models.user.user_model import User
 
@@ -178,7 +179,7 @@ async def get_current_user_info(
     return current_user
 
 
-@router.post("/change-password", status_code=status.HTTP_401_UNAUTHORIZED)
+@router.post("/change-password")
 async def change_password(
     password_data: PasswordChange,
     current_user: User = Depends(get_current_user),
@@ -186,11 +187,12 @@ async def change_password(
 ):
     """
     Change user password
-    
+
     - **Requires**: Valid access token and current password
     - **Action**: Updates password and revokes all sessions
-    - **Returns**: 401 with PASSWORD_CHANGED detail so the frontend
-      forces re-login and clears stored tokens
+    - **Returns**: 200 on success, 401 on failure
+    - **Note**: After a successful change, all existing sessions are revoked
+      so the client MUST redirect the user to the login page.
     """
     await AuthService.change_password(
         db,
@@ -198,12 +200,11 @@ async def change_password(
         password_data.old_password,
         password_data.new_password
     )
-    
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="PASSWORD_CHANGED",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+
+    return {
+        "detail": "PASSWORD_CHANGED",
+        "message": "Password changed successfully. All sessions have been revoked. Please log in again.",
+    }
 
 
 @router.get("/sessions")
@@ -285,3 +286,54 @@ async def get_user_permissions(
         "branches": current_user.assigned_branches,
         "max_role_level": max_level,
     }
+
+
+# ── MFA / TOTP ─────────────────────────────────────────────────────────
+
+@router.post("/mfa/setup", response_model=MfaSetupResponse)
+async def setup_mfa(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Generate a TOTP secret and provisioning URI.
+
+    The user should scan the QR code with an authenticator app, then call
+    ``/auth/mfa/verify`` with a code to enable MFA.
+    """
+    secret, uri = await AuthService.setup_mfa(current_user)
+    await db.commit()
+    return MfaSetupResponse(secret=secret, provisioning_uri=uri)
+
+
+@router.post("/mfa/verify", response_model=UserResponse)
+async def verify_mfa(
+    body: MfaVerifyRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Verify a TOTP code to enable MFA.
+
+    Call this after ``/auth/mfa/setup`` once the user has added the secret
+    to their authenticator app.
+    """
+    await AuthService.verify_and_enable_mfa(db, current_user, body.totp_code)
+    await db.refresh(current_user)
+    return current_user
+
+
+@router.post("/mfa/disable", response_model=UserResponse)
+async def disable_mfa(
+    body: MfaDisableRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Disable MFA.
+
+    Requires the user's current password for security.
+    """
+    await AuthService.disable_mfa(db, current_user, body.password)
+    await db.refresh(current_user)
+    return current_user

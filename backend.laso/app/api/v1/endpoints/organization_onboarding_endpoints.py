@@ -12,7 +12,9 @@ import uuid
 from app.db.dependencies import get_db
 from app.core.deps import (
     get_current_user,
-    require_permission
+    require_permission,
+    get_client_ip,
+    get_user_agent,
 )
 from app.models.user.user_model import User
 from app.models.pharmacy.pharmacy_model import Organization, Branch
@@ -64,6 +66,9 @@ async def onboard_organization(
     - **branches**: Optional list of branches to create (max 10). If not provided, one default branch is created.
     
     Returns complete organization details with admin credentials and created branches
+    
+    **IMPORTANT:** Only super admins should call this endpoint. The created admin user
+    must be prompted to set up MFA on first login.
     """
     service = OrganizationOnboardingService(db)
     
@@ -107,12 +112,15 @@ async def onboard_organization(
             for branch in onboarding_data.branches
         ]
     
-    # Create organization
+    # Create organization with full audit context
     result = await service.create_organization_with_admin(
         org_data=org_data,
         admin_data=admin_data,
         branches_data=branches_data,
-        created_by=current_user.id
+        created_by=current_user.id,
+        ip_address=get_client_ip(request),
+        user_agent=get_user_agent(request),
+        idempotency_key=onboarding_data.idempotency_key
     )
     
     # Return response with temporary credentials

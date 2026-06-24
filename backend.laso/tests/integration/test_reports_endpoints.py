@@ -3,7 +3,7 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from httpx import AsyncClient
+from httpx import AsyncClient, ASGITransport
 
 from main import app
 from app.api.v1.endpoints import reports_endpoints
@@ -13,7 +13,12 @@ from app.services.reports import reports_service
 @pytest.mark.asyncio
 async def test_daily_sales_endpoint_returns_data(monkeypatch):
     # Create a fake user object
-    fake_user = SimpleNamespace(organization_id=uuid.uuid4())
+    fake_user = SimpleNamespace(
+        organization_id=uuid.uuid4(),
+        has_permission=lambda perm: True,
+        is_super_admin=True,
+        assigned_branches=[],
+    )
 
     async def fake_get_current_user():
         return fake_user
@@ -51,13 +56,13 @@ async def test_daily_sales_endpoint_returns_data(monkeypatch):
         "has_prev": False
     }
 
-    async def fake_daily(db, organization_id, start_date, end_date, branch_id=None, contract_id=None, cashier_id=None, pagination=None):
+    async def fake_daily(db, organization_id, start_date, end_date, branch_id=None, branch_ids=None, contract_id=None, cashier_id=None, pagination=None):
         from app.utils.pagination import PaginatedResponse
         return PaginatedResponse(**sample_response)
 
     monkeypatch.setattr(reports_service.ReportsService, 'get_daily_sales_summary', staticmethod(fake_daily))
 
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         resp = await ac.get(
             "/api/v1/reports/daily-sales-summary",
             params={"start_date": "2026-05-23", "end_date": "2026-05-25"},

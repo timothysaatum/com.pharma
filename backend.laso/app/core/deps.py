@@ -104,10 +104,6 @@ async def get_current_user(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Account is temporarily locked due to too many failed login attempts",
             )
-        # Lock expired — schedule deferred clearing via a background task
-        # rather than committing inside a read-only dependency.
-        # The auth/login endpoint also clears this on successful login.
-        pass
     
     # Verify session exists and is valid
     from app.core.security import hash_token
@@ -303,3 +299,36 @@ def get_client_ip(request: Request) -> str:
 def get_user_agent(request: Request) -> str:
     """Get user agent from request"""
     return request.headers.get("User-Agent", "unknown")
+
+
+async def check_subscription_expiry(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+) -> User:
+    """
+    Dependency that checks whether the user's organization subscription has expired.
+    Raise 403 if expired; pass-through if still valid.
+
+    Compose into any route that should be blocked for expired subscriptions:
+        @router.get("/sales", dependencies=[Depends(check_subscription_expiry)])
+    """
+    from app.models.pharmacy.pharmacy_model import Organization
+
+    result = await db.execute(
+        select(Organization).where(Organization.id == current_user.organization_id)
+    )
+    org = result.scalar_one_or_none()
+
+    if not org:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found",
+        )
+
+    if org.subscription_expires_at and org.subscription_expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Organization subscription has expired. Please renew to continue.",
+        )
+
+    return current_user

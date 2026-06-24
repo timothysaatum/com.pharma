@@ -105,8 +105,8 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
     },
 
-    login: async (username, password) => {
-        const data = await authApi.login({ username, password });
+    login: async (username: string, password: string, totp_code?: string) => {
+        const data = await authApi.login({ username, password, totp_code });
         await authStorage.setUser(data.user);
 
         const setupState = deriveSetupState(data.user);

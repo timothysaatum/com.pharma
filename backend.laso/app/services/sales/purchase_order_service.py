@@ -140,6 +140,24 @@ class PurchaseOrderService:
             )
         return supplier
 
+    @staticmethod
+    async def delete_supplier(
+        db: AsyncSession,
+        supplier_id: uuid.UUID,
+        user: User,
+    ) -> None:
+        """Soft-delete a supplier."""
+        supplier = await PurchaseOrderService.get_supplier(db, supplier_id)
+        if supplier.organization_id != user.organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied",
+            )
+        supplier.is_deleted = True
+        supplier.deleted_at = _now()
+        supplier.deleted_by = user.id
+        await db.commit()
+
     # =========================================================================
     # Purchase Order CRUD
     # =========================================================================
@@ -605,6 +623,36 @@ class PurchaseOrderService:
                 po_item.expiry_date = item_receive.expiry_date
                 po_item.updated_at = _now()
 
+                # ── 1a. Guard: drug must not be soft-deleted ────────────────
+                drug = await db.scalar(
+                    select(Drug).where(
+                        Drug.id == po_item.drug_id,
+                        Drug.organization_id == po.organization_id,
+                    )
+                )
+                if not drug or drug.is_deleted:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Cannot receive goods for a deleted drug (ID: {po_item.drug_id})",
+                    )
+
+                # ── 1b. Guard: duplicate batch ──────────────────────────────
+                dup = await db.scalar(
+                    select(DrugBatch.id).where(
+                        DrugBatch.branch_id == po.branch_id,
+                        DrugBatch.drug_id == po_item.drug_id,
+                        DrugBatch.batch_number == item_receive.batch_number,
+                    )
+                )
+                if dup:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Batch '{item_receive.batch_number}' already exists "
+                            f"for this drug at this branch"
+                        ),
+                    )
+
                 # ── 2. Create DrugBatch ──────────────────────────────────────
                 db.add(
                     DrugBatch(
@@ -713,6 +761,15 @@ class PurchaseOrderService:
                     else:
                         drug.cost_price = po_item.unit_cost
                     drug.updated_at = _now()
+
+                # ── 5a. Warn when stock exceeds max_stock_level ──────────────
+                if drug and drug.max_stock_level and inventory:
+                    new_total = inventory.quantity
+                    if new_total > drug.max_stock_level:
+                        warnings.append(
+                            f"Stock for '{drug.name}' ({new_total}) "
+                            f"exceeds max level ({drug.max_stock_level})"
+                        )
 
             # ── Update PO status ─────────────────────────────────────────────
             all_received = all(
@@ -943,6 +1000,57 @@ class PurchaseOrderService:
                     "total_cost": str(item.total_cost),
                 },
                 "new_po_total": str(po.total_amount),
+            },
+        )
+
+        await db.commit()
+        await db.refresh(po)
+        return po
+
+    @staticmethod
+    async def remove_purchase_order_item(
+        db: AsyncSession,
+        po_id: uuid.UUID,
+        item_id: uuid.UUID,
+        user: User,
+    ) -> PurchaseOrder:
+        """Remove an item from a draft PO."""
+        po = await PurchaseOrderService.get_purchase_order(db, po_id)
+        PurchaseOrderService._assert_org_access(po, user)
+
+        if po.status != "draft":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cannot remove items from a PO with status '{po.status}' — only drafts are editable",
+            )
+
+        item = await db.scalar(
+            select(PurchaseOrderItem).where(
+                PurchaseOrderItem.id == item_id,
+                PurchaseOrderItem.purchase_order_id == po_id,
+            )
+        )
+        if not item:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Item not found in this purchase order",
+            )
+
+        await db.delete(item)
+        await db.flush()
+        await PurchaseOrderService._recalculate_po_totals(db, po)
+
+        await PurchaseOrderService._create_audit_log(
+            db,
+            action="remove_po_item",
+            entity_type="PurchaseOrder",
+            entity_id=po.id,
+            user_id=user.id,
+            organization_id=po.organization_id,
+            changes={
+                "item_id": str(item_id),
+                "drug_id": str(item.drug_id),
+                "removed_quantity": item.quantity_ordered,
             },
         )
 

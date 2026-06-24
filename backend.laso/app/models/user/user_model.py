@@ -1,9 +1,9 @@
 from app.db.base import Base
 from sqlalchemy import (
     String, Integer, Boolean, DateTime, Text, 
-    ForeignKey, Index, CheckConstraint
+    ForeignKey, Index
 )
-from app.models.db_types import UUID, ARRAY, INET, JSONB
+from app.models.db_types import UUID, ARRAY, INET
 from sqlalchemy.orm import (
     Mapped, mapped_column, relationship,
     validates
@@ -193,9 +193,7 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         DateTime(timezone=True)
     )
     
-    # Two-factor authentication (STUB — NOT IMPLEMENTED)
-    # The column exists for future use only. 2FA is never enforced.
-    # two_factor_secret is never read by application code.
+    # TOTP multi-factor authentication
     two_factor_enabled: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -204,7 +202,8 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     two_factor_secret: Mapped[Optional[str]] = mapped_column(
         String(255),
-        comment="RESERVED for future TOTP — not currently enforced"
+        nullable=True,
+        comment="Base32-encoded TOTP secret"
     )
     
     # Password reset fields
@@ -280,10 +279,20 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         if self.is_super_admin:
             return {"*"}
 
+        if hasattr(self, '_effective_permissions') and self._effective_permissions is not None:
+            return self._effective_permissions
+
         result: set[str] = set()
         for role in self.roles:
             result.update(role.permissions)
         return result
+
+    @property
+    def _is_admin(self) -> bool:
+        """Check if user has admin-level privileges (non-ORM property for schema use)."""
+        if self.is_super_admin:
+            return True
+        return self.has_permission(Permission.MANAGE_ORGANIZATION)
 
     def has_branch_access(self, branch_id: uuid.UUID) -> bool:
         """Check if user has access to a branch (instance method)"""

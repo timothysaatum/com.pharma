@@ -141,6 +141,29 @@ async def update_supplier(
     return supplier
 
 
+@supplier_router.delete(
+    "/{supplier_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(require_permission("manage_suppliers"))],
+    summary="Delete supplier",
+)
+async def delete_supplier(
+    supplier_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """
+    Soft-delete a supplier.
+
+    **Permissions:** `manage_suppliers`
+
+    The supplier is marked as deleted (not physically removed) so that
+    historical purchase orders referencing it remain intact.
+    """
+    await PurchaseOrderService.delete_supplier(db, supplier_id, current_user)
+    return None
+
+
 @supplier_router.get(
     "/",
     response_model=PaginatedResponse[SupplierResponse],
@@ -490,6 +513,31 @@ async def update_purchase_order_item(
     """
     po = await PurchaseOrderService.update_purchase_order_item(
         db, po_id, item_id, quantity_ordered, unit_cost, current_user
+    )
+    return await PurchaseOrderService._build_po_with_details(db, po)
+
+
+@router.delete(
+    "/{po_id}/items/{item_id}",
+    response_model=PurchaseOrderWithDetails,
+    dependencies=[Depends(require_permission("manage_inventory"))],
+    summary="Remove a line item from a draft PO",
+)
+async def remove_purchase_order_item(
+    po_id: uuid.UUID,
+    item_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PurchaseOrderWithDetails:
+    """
+    Remove a line item from a **draft** purchase order.
+
+    **Permissions:** `manage_inventory`
+
+    The PO's financial totals are recalculated after removal.
+    """
+    po = await PurchaseOrderService.remove_purchase_order_item(
+        db, po_id, item_id, current_user
     )
     return await PurchaseOrderService._build_po_with_details(db, po)
 

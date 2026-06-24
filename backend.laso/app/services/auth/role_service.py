@@ -30,6 +30,27 @@ class RoleService:
                 )
 
     @staticmethod
+    def _validate_level_not_exceed_user(level: int, current_user: User) -> None:
+        user_max_level = max((r.level for r in current_user.roles), default=0)
+        if level > user_max_level:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Cannot create/edit role at level {level}. Your highest role level is {user_max_level}.",
+            )
+
+    @staticmethod
+    def _validate_permissions_not_exceed_user(permissions: list[str], current_user: User) -> None:
+        if current_user.is_super_admin:
+            return
+        user_perms = current_user.get_effective_permissions()
+        extra = [p for p in permissions if p not in user_perms and p != "*"]
+        if extra:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"You cannot grant permissions you don't have: {extra}",
+            )
+
+    @staticmethod
     async def _validate_level_not_duplicate(
         db: AsyncSession,
         organization_id: uuid.UUID,
@@ -81,6 +102,11 @@ class RoleService:
         # Validate permissions (restrict wildcard to super admins)
         is_super = current_user.is_super_admin if current_user else False
         RoleService._validate_permissions(role_data.permissions, is_super)
+
+        # Prevent privilege escalation: can't create a role above your own level
+        if current_user and not current_user.is_super_admin:
+            RoleService._validate_level_not_exceed_user(role_data.level, current_user)
+            RoleService._validate_permissions_not_exceed_user(role_data.permissions, current_user)
 
         await RoleService._validate_level_not_duplicate(db, organization_id, role_data.level)
 
@@ -171,7 +197,13 @@ class RoleService:
             # Validate permissions (restrict wildcard to super admins)
             is_super = current_user.is_super_admin if current_user else False
             RoleService._validate_permissions(role_data.permissions, is_super)
+            if current_user and not current_user.is_super_admin:
+                RoleService._validate_permissions_not_exceed_user(role_data.permissions, current_user)
             role.permissions = role_data.permissions
+
+        new_level = role_data.level if role_data.level is not None else role.level
+        if current_user and not current_user.is_super_admin:
+            RoleService._validate_level_not_exceed_user(new_level, current_user)
 
         if role_data.level is not None:
             await RoleService._validate_level_not_duplicate(

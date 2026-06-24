@@ -26,7 +26,7 @@ async def create_role(
     role_data: RoleCreate,
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id),
-    current_user: User = Depends(require_permission(Permission.MANAGE_USERS))
+    current_user: User = Depends(require_permission(Permission.MANAGE_ORGANIZATION))
 ):
     """Create a new role for the organization"""
     return await RoleService.create_role(db, organization_id, role_data, current_user)
@@ -56,7 +56,7 @@ async def update_role(
     role_data: RoleUpdate,
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id),
-    current_user: User = Depends(require_permission(Permission.MANAGE_USERS))
+    current_user: User = Depends(require_permission(Permission.MANAGE_ORGANIZATION))
 ):
     """Update a role"""
     return await RoleService.update_role(db, role_id, organization_id, role_data, current_user)
@@ -66,7 +66,7 @@ async def delete_role(
     role_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id),
-    current_user: User = Depends(require_permission(Permission.MANAGE_USERS))
+    current_user: User = Depends(require_permission(Permission.MANAGE_ORGANIZATION))
 ):
     """Delete a role"""
     await RoleService.delete_role(db, role_id, organization_id)

@@ -164,11 +164,7 @@ async def reserve_inventory(
     **Errors**:
     - 400: Insufficient available stock
     """
-    if str(branch_id) not in [str(b) for b in current_user.assigned_branches]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this branch"
-        )
+    _ensure_branch_access(current_user, branch_id)
     
     inventory = await InventoryService.reserve_inventory(
         db=db,
@@ -204,11 +200,7 @@ async def release_reserved_inventory(
     **Errors**:
     - 400: Cannot release more than reserved
     """
-    if str(branch_id) not in [str(b) for b in current_user.assigned_branches]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this branch"
-        )
+    _ensure_branch_access(current_user, branch_id)
     
     inventory = await InventoryService.release_reserved_inventory(
         db=db,
@@ -307,6 +299,12 @@ async def transfer_stock(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to the source branch"
         )
+    # Check access to destination branch
+    if str(transfer_data.to_branch_id) not in [str(b) for b in current_user.assigned_branches]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to the destination branch"
+        )
     
     source_adj, dest_adj = await InventoryService.transfer_stock(
         db=db,
@@ -389,18 +387,24 @@ async def get_drug_batches(
     
     **Returns**: Paginated list of drug batches
     """
-    # If branch_id specified, check access
-    if branch_id and str(branch_id) not in [str(b) for b in current_user.assigned_branches]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this branch"
-        )
+    # If branch_id specified, check access; otherwise restrict to assigned branches
+    assigned = [str(b) for b in (current_user.assigned_branches or [])]
+    if branch_id:
+        if str(branch_id) not in assigned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this branch"
+            )
+        branch_ids = None
+    else:
+        branch_ids = [uuid.UUID(b) for b in assigned] if assigned else None
     
     result = await InventoryService.get_batches_paginated(
         db=db,
         drug_id=drug_id,
         pagination=pagination,
         branch_id=branch_id,
+        branch_ids=branch_ids,
         include_expired=include_expired,
         include_empty=include_empty,
         expiring_within_days=expiring_within_days
@@ -464,14 +468,29 @@ async def consume_from_batch(
     
     **Required Permission**: process_sales
     
-    **Use Case**: When processing a sale, reduce batch quantity
+    **Security**: Verifies the user has access to the batch's branch
+    **Safety**: Rejects consumption from expired batches
     
     **Returns**: Updated batch with reduced remaining_quantity
     
     **Errors**:
-    - 400: Insufficient quantity in batch
+    - 400: Insufficient quantity in batch, or batch is expired
+    - 403: No access to this batch's branch
     - 404: Batch not found
     """
+    # Load batch and verify access
+    batch = await db.get(DrugBatch, batch_id)
+    if not batch:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Batch not found"
+        )
+    if str(batch.branch_id) not in [str(b) for b in (current_user.assigned_branches or [])]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this batch's branch"
+        )
+    
     batch = await InventoryService.consume_from_batch(
         db=db,
         batch_id=batch_id,
@@ -507,17 +526,23 @@ async def get_low_stock_report(
     - Purchase order planning
     - Alert generation
     """
-    # If branch_id specified, check access
-    if branch_id and str(branch_id) not in [str(b) for b in current_user.assigned_branches]:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You don't have access to this branch"
-        )
+    # If branch_id specified, check access; otherwise restrict to assigned branches
+    assigned = [str(b) for b in (current_user.assigned_branches or [])]
+    if branch_id:
+        if str(branch_id) not in assigned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this branch"
+            )
+        branch_ids = None
+    else:
+        branch_ids = [uuid.UUID(b) for b in assigned] if assigned else None
     
     report = await InventoryService.get_low_stock_report(
         db=db,
         organization_id=current_user.organization_id,
-        branch_id=branch_id
+        branch_id=branch_id,
+        branch_ids=branch_ids,
     )
     
     return report

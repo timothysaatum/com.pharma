@@ -118,23 +118,6 @@ async def lifespan(app: FastAPI):
         logger.error(f"Database connection failed: {str(e)}")
         raise
     
-    # Warn about unimplemented 2FA if any user has it enabled
-    try:
-        from app.models.user.user_model import User
-        from sqlalchemy import select, func
-        async with engine.begin() as conn:
-            result = await conn.execute(
-                select(func.count(User.id)).where(User.two_factor_enabled == True)
-            )
-            twofa_count = result.scalar() or 0
-            if twofa_count > 0:
-                logger.warning(
-                    f"{twofa_count} user(s) have two_factor_enabled=True, but 2FA is "
-                    "not implemented. No authentication enforcement is in place for these users."
-                )
-    except Exception:
-        pass  # non-critical warning
-
     try:
         from app.utils.notifications import setup_notifications, EmailConfig, ArkeselConfig
         

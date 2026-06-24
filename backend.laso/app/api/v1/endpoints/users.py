@@ -32,6 +32,12 @@ def _ensure_manager_branch_assignment(current_user: User, assigned_branches) -> 
     manager_branch_ids = _branch_id_set(current_user.assigned_branches)
     requested_branch_ids = _branch_id_set(assigned_branches)
 
+    if not manager_branch_ids:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No branches assigned to you. Cannot manage other users.",
+        )
+
     if not requested_branch_ids:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -43,6 +49,19 @@ def _ensure_manager_branch_assignment(current_user: User, assigned_branches) -> 
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Managers can only assign users to their own branches",
         )
+
+
+def _enforce_branch_scope(current_user: User, user: User) -> None:
+    """Raise 403 if current_user is branch-scoped and doesn't share a branch with target user."""
+    if current_user.is_super_admin:
+        return
+    if current_user.assigned_branches is not None and not current_user.assigned_branches:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No branches assigned. Cannot manage other users.",
+        )
+    if current_user.assigned_branches:
+        _ensure_manager_can_manage_user(current_user, user)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -70,11 +89,6 @@ async def list_users(
     manager_branch_ids = _branch_id_set(current_user.assigned_branches)
     branch_filter_id = str(branch_id) if branch_id else None
 
-    # Simplified: If user has MANAGE_USERS but is limited to certain branches,
-    # they only see users in those branches.
-    if not current_user.is_super_admin and current_user.assigned_branches:
-         pass # Filtering logic below handles this
-
     if search:
         term = f"%{search.strip()}%"
         base_query = base_query.where(
@@ -93,7 +107,7 @@ async def list_users(
     filtered_users = list(result.scalars().all())
 
     # Apply branch filtering and manager-level restrictions
-    if not current_user.is_super_admin and current_user.assigned_branches:
+    if not current_user.is_super_admin:
         filtered_users = [
             user for user in filtered_users
             if _shares_branch(user, manager_branch_ids)
@@ -149,8 +163,7 @@ async def get_user(
     if not user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
-        _ensure_manager_can_manage_user(current_user, user)
+    _enforce_branch_scope(current_user, user)
 
     return UserResponse.model_validate(user)
 
@@ -173,7 +186,7 @@ async def create_user(
         update={"organization_id": current_user.organization_id}
     )
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
+    if not current_user.is_super_admin:
         _ensure_manager_branch_assignment(current_user, user_data.assigned_branches)
 
     user = await AuthService.create_user(db, user_data)
@@ -217,8 +230,8 @@ async def update_user(
             detail="Use /auth/me or /auth/change-password to update your own account",
         )
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
-        _ensure_manager_can_manage_user(current_user, user)
+    if not current_user.is_super_admin:
+        _enforce_branch_scope(current_user, user)
         if update_data.assigned_branches is not None:
             _ensure_manager_branch_assignment(current_user, update_data.assigned_branches)
 
@@ -295,8 +308,7 @@ async def _set_active(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot change your own active status")
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
-        _ensure_manager_can_manage_user(current_user, user)
+    _enforce_branch_scope(current_user, user)
 
     user.is_active = active
     user.updated_at = datetime.now(timezone.utc)
@@ -354,8 +366,7 @@ async def unlock_user(
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
-        _ensure_manager_can_manage_user(current_user, user)
+    _enforce_branch_scope(current_user, user)
 
     user.account_locked_until = None
     user.failed_login_attempts = 0
@@ -414,8 +425,7 @@ async def delete_user(
     if user.id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    if not current_user.is_super_admin and current_user.assigned_branches:
-        _ensure_manager_can_manage_user(current_user, user)
+    _enforce_branch_scope(current_user, user)
 
     # Revoke all sessions first
     await AS.logout_all_sessions(db, user)

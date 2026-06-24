@@ -136,9 +136,17 @@ async def list_sales(
     from sqlalchemy.orm import selectinload
     
     filters = [Sale.organization_id == organization_id]
-    
+
+    assigned = [str(b) for b in (current_user.assigned_branches or [])]
     if branch_id:
+        if str(branch_id) not in assigned:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this branch"
+            )
         filters.append(Sale.branch_id == branch_id)
+    elif assigned:
+        filters.append(Sale.branch_id.in_([uuid.UUID(b) for b in assigned]))
     
     if start_date:
         filters.append(Sale.created_at >= start_date)
@@ -318,6 +326,14 @@ async def cancel_sale(
             detail="Access denied"
         )
     
+    # Branch access check
+    assigned = [str(b) for b in (current_user.assigned_branches or [])]
+    if str(sale.branch_id) not in assigned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this branch"
+        )
+    
     if sale.status != 'draft':
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -338,7 +354,7 @@ async def cancel_sale(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Approving manager not found"
             )
-        if not (approver.is_super_admin or not approver.assigned_branches or approver.has_permission("process_sales")):
+        if not (approver.is_super_admin or approver.has_permission("process_sales")):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Cancellation approver does not have required permissions"

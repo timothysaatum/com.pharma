@@ -399,6 +399,38 @@ class InventoryService:
             inventory.mark_as_pending_sync()
             db.add(inventory)
 
+        # Upsert system adjustment batch to maintain DrugBatch parity
+        batch_res = await db.execute(
+            select(DrugBatch)
+            .where(
+                DrugBatch.branch_id == branch_id,
+                DrugBatch.drug_id == drug_id,
+                DrugBatch.batch_number.like("ADJ-%"),
+            )
+            .with_for_update()
+        )
+        sys_batch = batch_res.scalar_one_or_none()
+        if sys_batch:
+            sys_batch.remaining_quantity = quantity
+            if sys_batch.remaining_quantity > sys_batch.quantity:
+                sys_batch.quantity = sys_batch.remaining_quantity
+            sys_batch.updated_at = datetime.now(timezone.utc)
+            sys_batch.mark_as_pending_sync()
+        else:
+            sys_batch = DrugBatch(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=drug_id,
+                batch_number=f"ADJ-{datetime.now().strftime('%Y%m%d-%H%M%S')}",
+                quantity=quantity,
+                remaining_quantity=quantity,
+                expiry_date=date.today() + timedelta(days=365 * 10),
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            sys_batch.mark_as_pending_sync()
+            db.add(sys_batch)
+
         # Resolve any existing low stock alerts if quantity is now healthy
         await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, quantity)
 
@@ -490,12 +522,15 @@ class InventoryService:
         branch_id: uuid.UUID,
         drug_id: uuid.UUID,
     ) -> None:
-        inventory = await db.scalar(
-            select(BranchInventory).where(
+        result = await db.execute(
+            select(BranchInventory)
+            .where(
                 BranchInventory.branch_id == branch_id,
                 BranchInventory.drug_id == drug_id,
             )
+            .with_for_update()
         )
+        inventory = result.scalar_one_or_none()
         if not inventory:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -1039,6 +1074,12 @@ class InventoryService:
                     detail="Batch not found.",
                 )
 
+            if batch.expiry_date <= date.today():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot consume from an expired batch.",
+                )
+
             if batch.remaining_quantity < quantity:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -1120,6 +1161,7 @@ class InventoryService:
         drug_id: uuid.UUID,
         pagination: PaginationParams,
         branch_id: Optional[uuid.UUID] = None,
+        branch_ids: Optional[List[uuid.UUID]] = None,
         include_expired: bool = False,
         include_empty: bool = False,
         expiring_within_days: Optional[int] = None,
@@ -1140,6 +1182,9 @@ class InventoryService:
         if branch_id:
             query       = query.where(DrugBatch.branch_id == branch_id)
             count_query = count_query.where(DrugBatch.branch_id == branch_id)
+        elif branch_ids:
+            query       = query.where(DrugBatch.branch_id.in_(branch_ids))
+            count_query = count_query.where(DrugBatch.branch_id.in_(branch_ids))
 
         if not include_expired:
             query       = query.where(DrugBatch.expiry_date > date.today())
@@ -1177,6 +1222,7 @@ class InventoryService:
         db: AsyncSession,
         organization_id: uuid.UUID,
         branch_id: Optional[uuid.UUID] = None,
+        branch_ids: Optional[List[uuid.UUID]] = None,
     ) -> LowStockReport:
         """
         Generate a low-stock / out-of-stock report for an organisation.
@@ -1196,6 +1242,7 @@ class InventoryService:
                 BranchInventory.branch_id,
                 Branch.name.label("branch_name"),
                 BranchInventory.quantity,
+                BranchInventory.reserved_quantity,
             )
             .join(BranchInventory, Drug.id == BranchInventory.drug_id)
             .join(Branch, BranchInventory.branch_id == Branch.id)
@@ -1203,12 +1250,14 @@ class InventoryService:
                 Drug.organization_id == organization_id,
                 Drug.is_active       == True,
                 Drug.is_deleted      == False,
-                BranchInventory.quantity <= Drug.reorder_level,
+                (BranchInventory.quantity - BranchInventory.reserved_quantity) <= Drug.reorder_level,
             )
         )
 
         if branch_id:
             query = query.where(BranchInventory.branch_id == branch_id)
+        elif branch_ids:
+            query = query.where(BranchInventory.branch_id.in_(branch_ids))
 
         result = await db.execute(query)
         rows   = result.all()
@@ -1218,7 +1267,8 @@ class InventoryService:
         low_stock_count    = 0
 
         for row in rows:
-            item_status = "out_of_stock" if row.quantity == 0 else "low_stock"
+            available = row.quantity - (row.reserved_quantity or 0)
+            item_status = "out_of_stock" if available == 0 else "low_stock"
             if item_status == "out_of_stock":
                 out_of_stock_count += 1
             else:
@@ -1231,7 +1281,7 @@ class InventoryService:
                     sku=row.sku,
                     branch_id=row.branch_id,
                     branch_name=row.branch_name,
-                    quantity=row.quantity,
+                    quantity=available,
                     reorder_level=row.reorder_level,
                     reorder_quantity=row.reorder_quantity,
                     status=item_status,
@@ -1642,15 +1692,20 @@ class InventoryService:
 
         elif quantity_change < 0:
             # For deductions (damage/theft/correction), deduct FEFO
-            # Only deduct from non-expired batches to match sales service behaviour
+            # For expired write-offs, deduct from already-expired batches
             qty_to_deduct = abs(quantity_change)
+            expiry_condition = (
+                DrugBatch.expiry_date <= date.today()
+                if adjustment_type == "expired"
+                else DrugBatch.expiry_date > date.today()
+            )
             batch_res = await db.execute(
                 select(DrugBatch)
                 .where(
                     DrugBatch.branch_id == branch_id,
                     DrugBatch.drug_id == drug_id,
                     DrugBatch.remaining_quantity > 0,
-                    DrugBatch.expiry_date > date.today(),
+                    expiry_condition,
                 )
                 .order_by(DrugBatch.expiry_date.asc())
                 .with_for_update()

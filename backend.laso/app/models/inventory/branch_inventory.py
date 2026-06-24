@@ -83,6 +83,7 @@ class BranchInventory(Base, TimestampMixin, SyncTrackingMixin):
         CheckConstraint("quantity >= 0", name='check_quantity_nonnegative'),
         CheckConstraint("reserved_quantity >= 0", name='check_reserved_nonnegative'),
         CheckConstraint("reserved_quantity <= quantity", name='check_reserved_lte_quantity'),
+        CheckConstraint("selling_price IS NULL OR selling_price >= 0", name='check_selling_price_nonnegative'),
         Index('idx_inventory_branch', 'branch_id'),
         Index('idx_inventory_drug', 'drug_id'),
         Index('idx_inventory_sync', 'sync_status', 'sync_version'),

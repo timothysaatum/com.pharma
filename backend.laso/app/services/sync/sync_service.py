@@ -57,7 +57,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from dateutil.parser import isoparse
 
-from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
@@ -83,6 +82,14 @@ from app.schemas.sync_schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Server-side validation limits for push data
+# These prevent offline client data corruption / injection at sync time.
+# ---------------------------------------------------------------------------
+MAX_INVENTORY_QUANTITY: int = 1_000_000  # Sanity cap for any inventory qty
+MAX_ADJUSTMENT_CHANGE: int = 100_000     # Max qty change per adjustment record
+MAX_BATCH_QUANTITY: int = 1_000_000      # Max batch quantity
 
 # ---------------------------------------------------------------------------
 # Sync table definitions
@@ -425,17 +432,17 @@ class SyncService:
         ``sync_status = 'synced'`` in the response so server-created rows do
         not get queued back as local pending changes after pull.
         """
-        # Auth dependencies may already have used the request-scoped session to
-        # load the current user. PostgreSQL requires SET TRANSACTION ISOLATION
-        # LEVEL to be the first statement in a transaction, so take the sync
-        # snapshot with a fresh session when this one is already active.
+        # If the request session already has an active transaction (e.g. auth deps
+        # queried the DB), PostgreSQL rejects SET TRANSACTION ISOLATION LEVEL
+        # as not-first-statement.  For a read-only pull we use the existing session
+        # without isolation changes — the default isolation is sufficient for sync.
         if db.in_transaction() and SyncService._supports_repeatable_read(db):
-            async with AsyncSessionLocal() as snapshot_db:
-                return await SyncService._pull_with_snapshot(
-                    snapshot_db,
-                    request,
-                    organization_id,
-                )
+            return await SyncService._pull_with_snapshot(
+                db,
+                request,
+                organization_id,
+                skip_isolation=True,
+            )
 
         return await SyncService._pull_with_snapshot(db, request, organization_id)
 
@@ -448,6 +455,7 @@ class SyncService:
         db: AsyncSession,
         request: PullRequest,
         organization_id: uuid.UUID,
+        skip_isolation: bool = False,
     ) -> PullResponse:
         branch_id = request.branch_id
         tables = set(request.tables or SYNC_TABLES)
@@ -461,7 +469,7 @@ class SyncService:
         # Request a consistent snapshot so all table queries see the same DB state.
         # SQLite's default transaction isolation is already sufficient and it
         # does not support this PostgreSQL statement.
-        if SyncService._supports_repeatable_read(db):
+        if not skip_isolation and SyncService._supports_repeatable_read(db):
             try:
                 await db.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ"))
             except (SA_OperationalError, DBAPIError) as exc:
@@ -864,7 +872,10 @@ class SyncService:
 
                     # Verify drug existence
                     drug_exists = (await db.execute(
-                        select(Drug.id).where(Drug.id == item_safe.get("drug_id"))
+                        select(Drug.id).where(
+                            Drug.id == item_safe.get("drug_id"),
+                            Drug.organization_id == organization_id,
+                        )
                     )).scalar_one_or_none()
 
                     if drug_exists:
@@ -1071,6 +1082,24 @@ class SyncService:
                 ), conflict
             safe = _whitelist(record.data, _BATCH_WRITABLE)
             _parse_datetime_fields(safe)
+            # Validate drug exists in organization
+            drug_id = safe.get("drug_id") or existing.drug_id
+            drug_exists = await db.scalar(
+                select(Drug.id).where(
+                    Drug.id == drug_id,
+                    Drug.organization_id == organization_id,
+                )
+            )
+            if not drug_exists:
+                return PushResult(
+                    local_id=record.local_id, table_name="drug_batches", success=False,
+                    error=f"Drug {drug_id} not found in organization.",
+                ), None
+            # Server-side validation: cap batch quantities to prevent inflation
+            if "quantity" in safe:
+                safe["quantity"] = min(int(safe["quantity"]), MAX_BATCH_QUANTITY)
+            if "remaining_quantity" in safe:
+                safe["remaining_quantity"] = min(int(safe["remaining_quantity"]), MAX_BATCH_QUANTITY)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status  = "synced"
@@ -1079,6 +1108,25 @@ class SyncService:
             safe = _whitelist(record.data, _BATCH_WRITABLE)
             _parse_datetime_fields(safe)
             safe["branch_id"] = str(branch_id)
+            # Validate drug exists in organization
+            drug_id = safe.get("drug_id")
+            if drug_id:
+                drug_exists = await db.scalar(
+                    select(Drug.id).where(
+                        Drug.id == drug_id,
+                        Drug.organization_id == organization_id,
+                    )
+                )
+                if not drug_exists:
+                    return PushResult(
+                        local_id=record.local_id, table_name="drug_batches", success=False,
+                        error=f"Drug {drug_id} not found in organization.",
+                    ), None
+            # Server-side validation: cap batch quantities for new records
+            if "quantity" in safe:
+                safe["quantity"] = min(int(safe["quantity"]), MAX_BATCH_QUANTITY)
+            if "remaining_quantity" in safe:
+                safe["remaining_quantity"] = min(int(safe["remaining_quantity"]), MAX_BATCH_QUANTITY)
             existing = DrugBatch(**safe)
             existing.sync_status = "synced"
             db.add(existing)
@@ -1121,19 +1169,38 @@ class SyncService:
                 success=True,
             ), None
 
-        # Persist the adjustment record
+        # Whitelist and prepare adjustment data
         safe = _whitelist(record.data, _ADJUSTMENT_WRITABLE)
         _parse_datetime_fields(safe)
         safe["branch_id"]   = str(branch_id)
         safe["adjusted_by"] = str(pushed_by)
-        adj = StockAdjustment(**safe)
-        db.add(adj)
-        await db.flush()
 
-        # Apply quantity change to BranchInventory under a row lock
-        drug_id         = record.data.get("drug_id")
-        quantity_change = int(record.data.get("quantity_change", 0))
+        # Server-side validation: reject unrealistic quantity changes
+        quantity_change = int(safe.get("quantity_change", 0))
+        if abs(quantity_change) > MAX_ADJUSTMENT_CHANGE:
+            logger.warning(
+                "Sync: Rejected stock_adjustment %s with quantity_change=%d "
+                "(max allowed: %d)",
+                record.local_id, quantity_change, MAX_ADJUSTMENT_CHANGE,
+            )
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error=f"Quantity change {quantity_change} exceeds maximum allowed ({MAX_ADJUSTMENT_CHANGE}).",
+            ), None
 
+        drug_id = safe.get("drug_id")
+
+        # Validate inventory BEFORE persisting the adjustment record.
+        # Resolve the current inventory under a row lock so we can:
+        #   1. Reject negative-quantity outcomes before writing.
+        #   2. Server-compute previous_quantity / new_quantity for the
+        #      audit trail instead of blindly trusting client-supplied values.
+        #   3. Apply the inventory change in the same locked query.
+        previous_qty: int = 0
+        new_qty: int = 0
+        inventory_updated = False
         if drug_id and quantity_change != 0:
             inv = (await db.execute(
                 select(BranchInventory)
@@ -1145,10 +1212,9 @@ class SyncService:
             )).scalar_one_or_none()
 
             if inv:
-                new_qty = inv.quantity + quantity_change
+                previous_qty = inv.quantity
+                new_qty      = previous_qty + quantity_change
                 if new_qty < 0:
-                    # Do not clamp silently — flag as a conflict so the
-                    # client knows the device's view of stock was incorrect.
                     return PushResult(
                         local_id=record.local_id,
                         table_name="stock_adjustments",
@@ -1164,18 +1230,36 @@ class SyncService:
                 inv.quantity      = new_qty
                 inv.sync_version += 1
                 inv.mark_as_pending_sync()
+                inventory_updated = True
             elif quantity_change > 0:
-                # No inventory row yet — create one for positive adjustments
+                previous_qty = 0
+                new_qty      = quantity_change
                 inv = BranchInventory(
                     branch_id=branch_id,
                     drug_id=drug_id,
-                    quantity=quantity_change,
+                    quantity=new_qty,
                     reserved_quantity=0,
                 )
                 inv.sync_status = "synced"
                 db.add(inv)
+                inventory_updated = True
+            else:
+                # quantity_change < 0 with no inventory row: cannot deduct
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="stock_adjustments",
+                    success=False,
+                    error="Cannot deduct from non-existent inventory.",
+                ), None
 
-            await db.flush()
+        # Override client-supplied quantities with server-computed values
+        safe["previous_quantity"] = previous_qty
+        safe["new_quantity"]     = new_qty
+
+        # Create the adjustment record (now validated against real inventory)
+        adj = StockAdjustment(**safe)
+        db.add(adj)
+        await db.flush()
 
         return PushResult(
             local_id=record.local_id,
@@ -1199,6 +1283,25 @@ class SyncService:
         push inventory updates simultaneously.
         """
         drug_id  = record.data.get("drug_id")
+        if not drug_id:
+            return PushResult(
+                local_id=record.local_id, table_name="branch_inventory", success=False,
+                error="Missing drug_id.",
+            ), None
+
+        # Validate drug belongs to this organization
+        drug_exists = await db.scalar(
+            select(Drug.id).where(
+                Drug.id == drug_id,
+                Drug.organization_id == organization_id,
+            )
+        )
+        if not drug_exists:
+            return PushResult(
+                local_id=record.local_id, table_name="branch_inventory", success=False,
+                error=f"Drug {drug_id} not found in organization.",
+            ), None
+
         existing = (await db.execute(
             select(BranchInventory)
             .where(
@@ -1216,6 +1319,9 @@ class SyncService:
                 ), conflict
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
+            # Server-side validation: cap inventory quantity to prevent inflation attacks
+            if "quantity" in safe:
+                safe["quantity"] = min(int(safe["quantity"]), MAX_INVENTORY_QUANTITY)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status  = "synced"
@@ -1224,6 +1330,9 @@ class SyncService:
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
             safe["branch_id"] = str(branch_id)
+            # Server-side validation: cap inventory quantity for new records
+            if "quantity" in safe:
+                safe["quantity"] = min(int(safe["quantity"]), MAX_INVENTORY_QUANTITY)
             existing = BranchInventory(**safe)
             existing.sync_status = "synced"
             db.add(existing)

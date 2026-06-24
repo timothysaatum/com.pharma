@@ -10,6 +10,8 @@ from app.core.config import get_settings
 settings = get_settings()
 
 # Password hashing context (Argon2)
+# This is THE single source of truth for password hashing.
+# Other modules should import pwd_context from here, not redefine it.
 pwd_context = CryptContext(
     schemes=["argon2"],
     deprecated="auto",
@@ -153,6 +155,34 @@ class SecurityUtils:
         """Generate a unique session ID"""
         return str(uuid.uuid4())
 
+    # ── TOTP / MFA ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def generate_totp_secret() -> str:
+        """Generate a random base32 secret for TOTP"""
+        import pyotp
+        return pyotp.random_base32()
+
+    @staticmethod
+    def get_totp_provisioning_uri(secret: str, email: str, issuer: str = "PharmaApp") -> str:
+        """Get otpauth:// URI for QR code generation"""
+        import pyotp
+        return pyotp.TOTP(secret).provisioning_uri(email, issuer_name=issuer)
+
+    @staticmethod
+    def verify_totp(secret: str, code: str) -> bool:
+        """Verify a TOTP code against the secret"""
+        import pyotp
+        return pyotp.TOTP(secret).verify(code)
+
+    @staticmethod
+    def is_admin_user(user) -> bool:
+        """Check if a user has admin-level privileges (level >= 100 or MANAGE_ORGANIZATION)."""
+        if user.is_super_admin:
+            return True
+        from app.models.user.user_model import Permission
+        return user.has_permission(Permission.MANAGE_ORGANIZATION)
+
 
 # Convenience functions
 def hash_password(password: str) -> str:
@@ -183,3 +213,18 @@ def decode_token(token: str) -> Optional[Dict[str, Any]]:
 def hash_token(token: str) -> str:
     """Hash a token for storage"""
     return SecurityUtils.hash_token(token)
+
+
+def generate_totp_secret() -> str:
+    """Generate a random base32 secret for TOTP"""
+    return SecurityUtils.generate_totp_secret()
+
+
+def get_totp_provisioning_uri(secret: str, email: str, issuer: str = "PharmaApp") -> str:
+    """Get otpauth:// URI for QR code generation"""
+    return SecurityUtils.get_totp_provisioning_uri(secret, email, issuer)
+
+
+def verify_totp(secret: str, code: str) -> bool:
+    """Verify a TOTP code against the secret"""
+    return SecurityUtils.verify_totp(secret, code)

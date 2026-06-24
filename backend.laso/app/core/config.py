@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     FROM_NAME: str = "Pharmacy System"
 
     # -------------------------
+    # Encryption
+    # -------------------------
+    ENCRYPTION_KEY: str = ""
+
+    # -------------------------
     # Africa's Talking (SMS)
     # -------------------------
     ARKESEL_API_KEY: Optional[str] = None

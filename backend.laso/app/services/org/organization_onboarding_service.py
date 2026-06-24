@@ -9,16 +9,17 @@ Handles complete organization setup including:
 """
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, or_
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta, timezone
 import uuid
 
 from app.models.pharmacy.pharmacy_model import Organization, Branch
-from app.models.user.user_model import User
+from app.models.user.user_model import User, Role, UserRole, Permission
 from app.models.system_md.sys_models import AuditLog
 from app.schemas.branch_schemas import BranchCreate, BranchAddress
 from app.utils.iso_dates import to_iso
+from app.core.security import SecurityUtils
 
 
 class OrganizationOnboardingService:
@@ -49,18 +50,42 @@ class OrganizationOnboardingService:
         org_data: Dict[str, Any],
         admin_data: Dict[str, Any],
         branches_data: Optional[List[Dict[str, Any]]] = None,
-        created_by: Optional[uuid.UUID] = None
+        created_by: Optional[uuid.UUID] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        idempotency_key: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Complete organization onboarding process:
-        1. Create organization
-        2. Create admin user
-        3. Create branches (default or provided list)
-        4. Initialize settings
+        1. Validate password strength
+        2. Check idempotency key
+        3. Create organization
+        4. Create default roles
+        5. Create admin user and assign admin role
+        6. Create branches (default or provided list)
+        7. Initialize settings
+        8. Audit log with IP/User-Agent
         
         Returns: {organization, admin_user, branches}
         """
         try:
+            # Validate password strength early
+            is_valid, pwd_msg = SecurityUtils.validate_password_strength(admin_data["password"])
+            if not is_valid:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"Admin password: {pwd_msg}"
+                )
+            
+            # Check idempotency key if provided
+            if idempotency_key:
+                existing = await self._check_idempotency(idempotency_key)
+                if existing:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="This onboarding request has already been processed"
+                    )
+            
             # Validate organization name uniqueness
             existing_org = await self._check_organization_exists(org_data["name"])
             if existing_org:
@@ -78,11 +103,22 @@ class OrganizationOnboardingService:
             # Create organization
             organization = await self._create_organization(org_data)
             
+            # Store idempotency key if provided
+            if idempotency_key:
+                organization.settings["_onboarding_ik"] = idempotency_key
+            
+            # Create default roles and assign admin role to the admin user
+            default_roles = await self._create_default_roles(organization.id)
+            
             # Create admin user
             admin_user = await self._create_admin_user(
                 admin_data,
                 organization.id
             )
+            
+            # Assign Admin role to the admin user
+            admin_role = next(r for r in default_roles if r.name.lower() == "admin")
+            await self._assign_role_to_user(admin_user.id, admin_role.id)
             
             # Create branches
             if branches_data and len(branches_data) > 0:
@@ -124,7 +160,7 @@ class OrganizationOnboardingService:
             # Initialize organization settings
             await self._initialize_organization_settings(organization)
             
-            # Create audit log
+            # Create audit log with IP and user agent
             await self._create_audit_log(
                 organization_id=organization.id,
                 user_id=created_by if created_by is not None else None,
@@ -136,9 +172,13 @@ class OrganizationOnboardingService:
                         "name": organization.name,
                         "type": organization.type,
                         "subscription_tier": organization.subscription_tier,
-                        "branches_created": len(created_branches)
+                        "branches_created": len(created_branches),
+                        "default_roles_created": len(default_roles),
+                        "admin_role_assigned": admin_role.name
                     }
-                }
+                },
+                ip_address=ip_address,
+                user_agent=user_agent
             )
             
             # Commit transaction
@@ -199,6 +239,91 @@ class OrganizationOnboardingService:
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Email '{email}' is already registered"
             )
+    
+    async def _check_idempotency(self, idempotency_key: str) -> bool:
+        """Check if an idempotency key has already been processed"""
+        result = await self.db.execute(
+            select(Organization).where(
+                Organization.settings["_onboarding_ik"].as_string() == idempotency_key
+            )
+        )
+        return result.scalar_one_or_none() is not None
+    
+    async def _create_default_roles(self, organization_id: uuid.UUID) -> List[Role]:
+        """Create default RBAC roles for a new organization"""
+        default_roles_data = [
+            {
+                "name": "Admin",
+                "description": "Full system access",
+                "level": 100,
+                "permissions": [p.value for p in Permission]
+            },
+            {
+                "name": "Manager",
+                "description": "Operational management access",
+                "level": 50,
+                "permissions": [
+                    Permission.MANAGE_DRUGS.value,
+                    Permission.VIEW_DRUGS.value,
+                    Permission.MANAGE_SUPPLIERS.value,
+                    Permission.APPROVE_PURCHASE_ORDERS.value,
+                    Permission.MANAGE_INVENTORY.value,
+                    Permission.VIEW_INVENTORY.value,
+                    Permission.PROCESS_SALES.value,
+                    Permission.PROCESS_REFUNDS.value,
+                    Permission.VIEW_REPORTS.value,
+                    Permission.EXPORT_DATA.value,
+                    Permission.MANAGE_CUSTOMERS.value,
+                    Permission.MANAGE_PRESCRIPTIONS.value,
+                ]
+            },
+            {
+                "name": "Pharmacist",
+                "description": "Drug and prescription management",
+                "level": 30,
+                "permissions": [
+                    Permission.MANAGE_DRUGS.value,
+                    Permission.VIEW_DRUGS.value,
+                    Permission.MANAGE_INVENTORY.value,
+                    Permission.VIEW_INVENTORY.value,
+                    Permission.PROCESS_SALES.value,
+                    Permission.PROCESS_REFUNDS.value,
+                    Permission.MANAGE_PRESCRIPTIONS.value,
+                ]
+            },
+            {
+                "name": "Cashier",
+                "description": "Sales and customer management",
+                "level": 10,
+                "permissions": [
+                    Permission.VIEW_DRUGS.value,
+                    Permission.VIEW_INVENTORY.value,
+                    Permission.PROCESS_SALES.value,
+                    Permission.MANAGE_CUSTOMERS.value,
+                ]
+            },
+        ]
+        
+        created_roles = []
+        for role_def in default_roles_data:
+            role = Role(
+                organization_id=organization_id,
+                name=role_def["name"],
+                description=role_def["description"],
+                level=role_def["level"],
+                permissions=role_def["permissions"]
+            )
+            self.db.add(role)
+            created_roles.append(role)
+        
+        await self.db.flush()
+        return created_roles
+    
+    async def _assign_role_to_user(self, user_id: uuid.UUID, role_id: uuid.UUID) -> None:
+        """Assign a role to a user"""
+        user_role = UserRole(user_id=user_id, role_id=role_id)
+        self.db.add(user_role)
+        await self.db.flush()
     
     async def _create_organization(
         self,
@@ -270,17 +395,15 @@ class OrganizationOnboardingService:
         admin_data: Dict[str, Any],
         organization_id: uuid.UUID
     ) -> User:
-        """Create admin user for organization"""
+        """Create admin user for organization (RBAC roles handled separately)"""
         admin = User(
             organization_id=organization_id,
             username=admin_data["username"],
             email=admin_data["email"],
             full_name=admin_data["full_name"],
-            role="admin",
             phone=admin_data.get("phone"),
             employee_id=admin_data.get("employee_id", "ADMIN-001"),
             is_active=True,
-            two_factor_enabled=False,
             assigned_branches=[]  # Will be updated after branch creation
         )
         admin.set_password(admin_data["password"])

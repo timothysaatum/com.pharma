@@ -4,6 +4,9 @@ import type {
     TokenResponse,
     UserResponse,
     PasswordChange,
+    MfaSetupResponse,
+    MfaVerifyRequest,
+    MfaDisableRequest,
 } from "@/types";
 import { authStorage } from "@/lib/storage";
 
@@ -49,11 +52,15 @@ export const authApi = {
      * Returns: { access_token, refresh_token, expires_in, user }
      */
     async login(data: LoginRequest): Promise<TokenResponse> {
-        const result = await post<TokenResponse>("/auth/login", {
+        const body: Record<string, unknown> = {
             username: data.username,
             password: data.password,
             device_info: navigator.userAgent.slice(0, 500),
-        });
+        };
+        if (data.totp_code) {
+            body.totp_code = data.totp_code;
+        }
+        const result = await post<TokenResponse>("/auth/login", body);
         await authStorage.setTokens(result.access_token, result.refresh_token);
         return result;
     },
@@ -103,13 +110,18 @@ export const authApi = {
     /**
      * POST /auth/change-password
      * Updates the password and revokes all sessions.
-     * The backend returns 401 with detail="PASSWORD_CHANGED".
+     * The backend returns 200 with detail="PASSWORD_CHANGED".
+     * Also handles legacy 401 response for backward compatibility.
      * The caller should handle this by redirecting to /login
      * after clearing local state.
      */
     async changePassword(data: PasswordChange): Promise<void> {
         try {
-            await post("/auth/change-password", data);
+            const result = await post<{ detail: string }>("/auth/change-password", data);
+            if (result.detail === "PASSWORD_CHANGED") {
+                await authStorage.clearTokens();
+                window.dispatchEvent(new Event("auth:logout"));
+            }
         } catch (err: unknown) {
             const axiosErr = err as { response?: { status?: number; data?: { detail?: string } } };
             if (
@@ -149,5 +161,22 @@ export const authApi = {
      */
     getPermissions(signal?: AbortSignal): Promise<PermissionsResponse> {
         return get<PermissionsResponse>("/auth/permissions", { signal });
+    },
+
+    // ── MFA ───────────────────────────────────────────────────────────
+
+    /** POST /auth/mfa/setup — generates TOTP secret and provisioning URI */
+    mfaSetup(): Promise<MfaSetupResponse> {
+        return post<MfaSetupResponse>("/auth/mfa/setup");
+    },
+
+    /** POST /auth/mfa/verify — enables MFA after verifying a TOTP code */
+    mfaVerify(data: MfaVerifyRequest): Promise<UserResponse> {
+        return post<UserResponse>("/auth/mfa/verify", data);
+    },
+
+    /** POST /auth/mfa/disable — disables MFA (requires password) */
+    mfaDisable(data: MfaDisableRequest): Promise<UserResponse> {
+        return post<UserResponse>("/auth/mfa/disable", data);
     },
 };

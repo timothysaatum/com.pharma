@@ -44,6 +44,7 @@ class ReportsService:
         start_date: date,
         end_date: date,
         branch_id: Optional[uuid.UUID] = None,
+        branch_ids: Optional[List[uuid.UUID]] = None,
         contract_id: Optional[uuid.UUID] = None,
         cashier_id: Optional[uuid.UUID] = None,
         pagination: Optional[PaginationParams] = None,
@@ -101,6 +102,8 @@ class ReportsService:
 
         if branch_id:
             stmt = stmt.where(Sale.branch_id == branch_id)
+        elif branch_ids:
+            stmt = stmt.where(Sale.branch_id.in_(branch_ids))
         if contract_id:
             stmt = stmt.where(Sale.price_contract_id == contract_id)
         if cashier_id:
@@ -217,7 +220,7 @@ class ReportsService:
                 .join(Drug, BranchInventory.drug_id == Drug.id)
                 .where(
                     Drug.organization_id == organization_id,
-                    BranchInventory.quantity <= Drug.reorder_level,
+                    (BranchInventory.quantity - BranchInventory.reserved_quantity) <= Drug.reorder_level,
                 )
             )
             if branch_id:

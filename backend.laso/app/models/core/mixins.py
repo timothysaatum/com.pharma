@@ -10,30 +10,41 @@ from sqlalchemy.sql import func
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
-from passlib.context import CryptContext
 from cryptography.fernet import Fernet
 import os
 
-# Password hashing context
-pwd_context = CryptContext(
-    schemes=["argon2"],
-    deprecated="auto",
-    argon2__memory_cost=65536,
-    argon2__time_cost=3,
-    argon2__parallelism=4
-)
+from app.core.config import get_settings
+
+# Reuse password hashing context from security module to avoid duplicate CryptContext
+from app.core.security import pwd_context as _security_pwd_context
+pwd_context = _security_pwd_context
 
 # Encryption for sensitive data
-# WARNING: ENCRYPTION_KEY must be set via environment variable.
-# Never auto-generate — that would make previously encrypted data undecryptable after restart.
-_raw_key = os.environ.get("ENCRYPTION_KEY")
-if not _raw_key:
-    raise RuntimeError(
-        "ENCRYPTION_KEY environment variable is not set. "
-        "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-    )
-ENCRYPTION_KEY = _raw_key.encode() if isinstance(_raw_key, str) else _raw_key
-cipher_suite = Fernet(ENCRYPTION_KEY)
+# ENCRYPTION_KEY is loaded lazily to avoid ordering issues with Settings init
+_cipher_suite: Fernet | None = None
+
+
+def get_cipher_suite() -> Fernet:
+    global _cipher_suite
+    if _cipher_suite is not None:
+        return _cipher_suite
+    raw_key = os.environ.get("ENCRYPTION_KEY")
+    if not raw_key:
+        try:
+            raw_key = get_settings().ENCRYPTION_KEY
+        except Exception:
+            pass
+    if not raw_key:
+        raise RuntimeError(
+            "ENCRYPTION_KEY environment variable is not set. "
+            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
+        )
+    key_bytes = raw_key.encode() if isinstance(raw_key, str) else raw_key
+    _cipher_suite = Fernet(key_bytes)
+    return _cipher_suite
+
+
+cipher_suite = get_cipher_suite()
 
 
 @declarative_mixin

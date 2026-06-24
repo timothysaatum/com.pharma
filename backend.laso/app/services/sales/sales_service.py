@@ -375,21 +375,9 @@ class SalesService:
                             ),
                         )
 
-                    # Cross-check: FEFO batch total covers the requested quantity
-                    total_batch_qty = sum(
-                        b.remaining_quantity
-                        for b in fefo_batches.get(item.drug_id, [])
-                    )
-                    if total_batch_qty < item.quantity:
-                        raise HTTPException(
-                            status_code=status.HTTP_400_BAD_REQUEST,
-                            detail=(
-                                f"Insufficient non-expired batch stock for "
-                                f"'{drug.name}'. Valid batch total: "
-                                f"{total_batch_qty}, Requested: {item.quantity}."
-                            ),
-                        )
-
+                    # Batch availability is checked under FOR UPDATE in step 15.
+                    # The aggregate reservation lock above guarantees no oversell
+                    # at the inventory level; the FEFO deductor handles per-batch.
                     inventory.reserved_quantity += item.quantity
                     inventory.mark_as_pending_sync()
                     reservations.append((inventory, item.quantity))
@@ -913,6 +901,14 @@ class SalesService:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Sale not found.",
+                )
+
+            # Branch access check
+            assigned = [str(b) for b in (user.assigned_branches or [])]
+            if str(sale.branch_id) not in assigned:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this sale's branch",
                 )
 
             if sale.status != "completed":

@@ -31,16 +31,18 @@ export const apiClient = axios.create({
 
 // ── Token refresh state ───────────────────────────────────
 let isRefreshing = false;
+let refreshPromise: Promise<void> | null = null;
 let pendingQueue: Array<{
     resolve: (token: string) => void;
     reject: (err: unknown) => void;
 }> = [];
 
 function flushQueue(token: string | null, error: unknown = null) {
-    pendingQueue.forEach(({ resolve, reject }) =>
+    const queue = pendingQueue.slice();
+    pendingQueue = [];
+    queue.forEach(({ resolve, reject }) =>
         token ? resolve(token) : reject(error)
     );
-    pendingQueue = [];
 }
 
 // ── Request interceptor: attach access token ─────────────
@@ -92,35 +94,44 @@ apiClient.interceptors.response.use(
         original._retry = true;
         isRefreshing = true;
 
+        // Use a shared promise so concurrent failures don't each trigger a refresh
+        if (!refreshPromise) {
+            refreshPromise = (async () => {
+                const refreshToken = await authStorage.getRefreshToken();
+                if (!refreshToken) throw new Error("No refresh token");
+
+                const { data } = await axios.post(
+                    `${BASE_URL}/api/v1/auth/refresh`,
+                    { refresh_token: refreshToken },
+                    { headers: { "Content-Type": "application/json" }, timeout: 15_000 }
+                );
+
+                const newAccessToken: string = data.access_token;
+                await authStorage.setTokens(newAccessToken, data.refresh_token);
+                flushQueue(newAccessToken);
+            })();
+        }
+
         try {
-            const refreshToken = await authStorage.getRefreshToken();
-            if (!refreshToken) throw new Error("No refresh token");
-
-            // Call refresh directly to avoid interceptor loop
-            const { data } = await axios.post(
-                `${BASE_URL}/api/v1/auth/refresh`,
-                { refresh_token: refreshToken },
-                { headers: { "Content-Type": "application/json" } }
-            );
-
-            const newAccessToken: string = data.access_token;
-            await authStorage.setTokens(newAccessToken, data.refresh_token);
-
-            flushQueue(newAccessToken);
-            original.headers!.Authorization = `Bearer ${newAccessToken}`;
+            await refreshPromise;
+            const storedToken = await authStorage.getAccessToken();
+            if (storedToken) {
+                original.headers!.Authorization = `Bearer ${storedToken}`;
+            }
             return apiClient(original);
         } catch (refreshError) {
+            refreshPromise = null;
             if (isOfflineError(refreshError)) {
                 flushQueue(null, refreshError);
                 return Promise.reject(refreshError);
             }
             flushQueue(null, refreshError);
             await authStorage.clearTokens();
-            // Broadcast logout event so App.tsx can redirect
             window.dispatchEvent(new Event("auth:logout"));
             return Promise.reject(refreshError);
         } finally {
             isRefreshing = false;
+            refreshPromise = null;
         }
     }
 );
