@@ -1,0 +1,51 @@
+services:
+  pharma-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: pharma_db
+      POSTGRES_USER: pharma
+      POSTGRES_PASSWORD: pharma_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pharma -d pharma_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  pharma-redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  pharma-api:
+    build:
+      context: ./backend.laso
+    restart: unless-stopped
+    depends_on:
+      pharma-db:
+        condition: service_healthy
+      pharma-redis:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://pharma:pharma_pass@pharma-db:5432/pharma_db
+      REDIS_URL: redis://pharma-redis:6379/0
+      SECRET_KEY: ${SECRET_KEY}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      CORS_ORIGINS: '["https://pharma.example.com"]'
+      FRONTEND_URL: https://pharma.example.com
+    ports:
+      - "8000:8000"
+
+volumes:
+  pgdata:

@@ -526,11 +526,11 @@ async def get_organization_stats(
     days_until_expiry = None
     
     if organization.subscription_expires_at:
-        if organization.subscription_expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        if organization.subscription_expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
             subscription_status = "expired"
             days_until_expiry = 0
         else:
-            delta = organization.subscription_expires_at.replace(tzinfo=timezone.utc) - datetime.now(timezone.utc)
+            delta = organization.subscription_expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)
             days_until_expiry = delta.days
             
             if days_until_expiry <= 7:

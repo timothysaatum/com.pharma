@@ -45,9 +45,9 @@ interface AuthState {
 //     (Org exists but the admin skipped branch setup — prompt to add one.)
 // ─────────────────────────────────────────────────────────────────────────────
 function deriveSetupState(user: User): SetupState {
-    // Super admins are platform operators — always ready.
+    // Super admins are platform operators — they must onboard an org first.
     if (user.is_super_admin) {
-        return "ready";
+        return "needs_onboard";
     }
 
     // Use effective permissions (includes hierarchy inheritance)

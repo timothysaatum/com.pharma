@@ -194,7 +194,7 @@ class OrganizationOnboardingRequest(BaseSchema):
             }
         }
     }
-
+ 
 
 class OrganizationOnboardingResponse(BaseSchema):
     """Response after successful organization onboarding"""

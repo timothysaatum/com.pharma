@@ -325,7 +325,7 @@ async def check_subscription_expiry(
             detail="Organization not found",
         )
 
-    if org.subscription_expires_at and org.subscription_expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+    if org.subscription_expires_at and org.subscription_expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Organization subscription has expired. Please renew to continue.",
