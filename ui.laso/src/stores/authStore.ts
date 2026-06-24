@@ -50,9 +50,14 @@ function deriveSetupState(user: User): SetupState {
         return "needs_onboard";
     }
 
-    // Use effective permissions (includes hierarchy inheritance)
-    const effectivePerms = user.effective_permissions?.effective_permissions
-        ?? user.roles.flatMap(r => r.permissions);
+    // Use effective permissions (includes hierarchy inheritance).
+    // The login endpoint doesn't compute _effective_permissions, so
+    // effectivePerms may be an empty default object rather than undefined.
+    // Fall back to role-level permissions when the computed field is empty.
+    const computed = user.effective_permissions?.effective_permissions;
+    const effectivePerms = (computed && computed.length > 0)
+        ? computed
+        : user.roles.flatMap(r => r.permissions);
 
     const hasOrgManagePerm =
         effectivePerms.includes("manage_organization") ||
@@ -60,7 +65,7 @@ function deriveSetupState(user: User): SetupState {
         effectivePerms.includes("*");
 
     if (hasOrgManagePerm && (user.assigned_branches?.length ?? 0) === 0) {
-        return "ready";
+        return "needs_branch";
     }
 
     if ((user.assigned_branches?.length ?? 0) > 0) {
