@@ -4,7 +4,6 @@ API endpoints for branch/location management
 """
 import logging
 from fastapi import APIRouter, Depends, HTTPException, status, Query
-from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 import uuid
@@ -43,46 +42,20 @@ async def create_branch(
     
     **Note**: Only admins can create branches
     """
-    try:
-        # Ensure organization_id matches current user's organization
-        if branch_data.organization_id != current_user.organization_id:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cannot create branch for different organization"
-            )
-        
-        branch = await BranchService.create_branch(
-            db=db,
-            branch_data=branch_data,
-            created_by_user_id=current_user.id
-        )
-        
-        return branch
-        
-    except HTTPException:
-        # Re-raise HTTPExceptions as-is
-        raise
-    except ValidationError as e:
-        # Handle Pydantic validation errors
-        logger.error(f"Validation error creating branch: {e.errors()}")
+    # Ensure organization_id matches current user's organization
+    if branch_data.organization_id != current_user.organization_id:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=e.errors()
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cannot create branch for different organization"
         )
-    except ValueError as e:
-        # Handle ValueError from field validators
-        logger.error(f"ValueError creating branch: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
-    except Exception as e:
-        # Log and handle unexpected errors
-        logger.error(f"Unexpected error creating branch: {type(e).__name__}: {str(e)}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred while creating the branch"
-        )
+    
+    branch = await BranchService.create_branch(
+        db=db,
+        branch_data=branch_data,
+        created_by_user_id=current_user.id
+    )
+    
+    return branch
 
 
 @router.get("", response_model=PaginatedResponse[BranchListItem])

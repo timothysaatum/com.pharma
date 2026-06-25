@@ -2,10 +2,13 @@ import { User } from "@/types";
 
 function userHasPermission(user: User, permission: string): boolean {
     if (user.is_super_admin) return true;
-    // Use server-computed effective permissions (includes hierarchy inheritance)
-    if (user.effective_permissions?.effective_permissions) {
-        const perms = user.effective_permissions.effective_permissions;
-        return perms.includes(permission) || perms.includes("*");
+    // Use server-computed effective permissions (includes hierarchy inheritance).
+    // The login endpoint doesn't compute _effective_permissions, so it returns
+    // an empty default array [] — check length to distinguish "not computed" from
+    // "computed but empty", and fall back to checking direct role permissions.
+    const effective = user.effective_permissions?.effective_permissions;
+    if (effective && effective.length > 0) {
+        return effective.includes(permission) || effective.includes("*");
     }
     // Fallback: check assigned roles directly
     return user.roles.some(role =>

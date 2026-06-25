@@ -8,11 +8,17 @@ from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from pydantic import ValidationError
 from sqlalchemy import text
+from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.config import get_settings
 from app.db.session import engine
 from app.api.v1 import router as v1_router
 from app.middleware.rate_limit import RateLimitMiddleware
+from app.utils.exceptions import (
+    build_error_response,
+    data_error_detail,
+    integrity_error_detail,
+)
 
 
 # ============================================================================
@@ -361,6 +367,52 @@ async def value_error_exception_handler(request: Request, exc: ValueError):
     )
 
 
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(request: Request, exc: IntegrityError):
+    """
+    Handle database integrity violations (unique constraints, FK violations)
+    with user-friendly messages instead of raw SQLAlchemy tracebacks.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    detail = integrity_error_detail(exc)
+
+    logger.warning(
+        f"[{request_id}] IntegrityError on {request.method} {request.url.path}: {detail}"
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content=build_error_response(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=detail,
+            request_id=request_id,
+        ),
+    )
+
+
+@app.exception_handler(DataError)
+async def data_error_handler(request: Request, exc: DataError):
+    """
+    Handle database data errors (invalid data type, out of range, etc.)
+    with user-friendly messages.
+    """
+    request_id = getattr(request.state, "request_id", "unknown")
+    detail = data_error_detail(exc)
+
+    logger.warning(
+        f"[{request_id}] DataError on {request.method} {request.url.path}: {detail}"
+    )
+
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content=build_error_response(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=detail,
+            request_id=request_id,
+        ),
+    )
+
+
 @app.exception_handler(Exception)
 async def general_exception_handler(request: Request, exc: Exception):
     """
@@ -373,17 +425,18 @@ async def general_exception_handler(request: Request, exc: Exception):
         exc_info=True,
     )
     
-    error_response = {
-        "detail": "Internal server error" if settings.ENVIRONMENT == "production" else str(exc),
-        "request_id": request_id,
-    }
-    
-    if settings.ENVIRONMENT != "production":
-        error_response["type"] = type(exc).__name__
+    env = settings.ENVIRONMENT
+    detail = "Internal server error" if env == "production" else str(exc)
+    content = build_error_response(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        detail=detail,
+        request_id=request_id,
+        extra={"type": type(exc).__name__} if env != "production" else None,
+    )
     
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        content=error_response,
+        content=content,
     )
 
 

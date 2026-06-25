@@ -10,6 +10,7 @@ Handles complete organization setup including:
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, or_
+from sqlalchemy.exc import DataError, IntegrityError
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -202,6 +203,9 @@ class OrganizationOnboardingService:
             }
             
         except HTTPException:
+            await self.db.rollback()
+            raise
+        except (IntegrityError, DataError):
             await self.db.rollback()
             raise
         except Exception as e:

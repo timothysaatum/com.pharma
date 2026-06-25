@@ -5,6 +5,7 @@ Business logic for branch/location management
 from fastapi import HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, or_, and_
+from sqlalchemy.exc import DataError, IntegrityError
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone, date, timedelta
 import uuid
@@ -165,6 +166,9 @@ class BranchService:
             
             return branch
             
+        except (IntegrityError, DataError):
+            await db.rollback()
+            raise
         except Exception as e:
             await db.rollback()
             import logging
@@ -333,6 +337,9 @@ class BranchService:
             await db.commit()
             await db.refresh(branch)
             return branch
+        except (IntegrityError, DataError):
+            await db.rollback()
+            raise
         except Exception as e:
             await db.rollback()
             import logging
