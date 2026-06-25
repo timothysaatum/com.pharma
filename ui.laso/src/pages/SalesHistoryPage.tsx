@@ -940,7 +940,9 @@ export default function SalesHistoryPage() {
                         return local.items.reduce((sum, s) => sum + Number(s.total_amount || 0), 0);
                     }
                 } catch (e) {
-                    console.error("Failed to fetch sales summary:", e);
+                    if ((e as any)?.code !== "ERR_CANCELED") {
+                        console.error("Failed to fetch sales summary:", e);
+                    }
                     return null;
                 }
             })() : Promise.resolve(grandTotal);
