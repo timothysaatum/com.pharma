@@ -9,7 +9,8 @@ Handles complete organization setup including:
 """
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_
+from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import DataError, IntegrityError
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ import uuid
 from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.models.user.user_model import User, Role, UserRole, Permission
 from app.models.system_md.sys_models import AuditLog
-from app.schemas.branch_schemas import BranchCreate, BranchAddress
+from app.schemas.branch_schemas import BranchCreate
 from app.utils.iso_dates import to_iso
 from app.core.security import SecurityUtils
 
