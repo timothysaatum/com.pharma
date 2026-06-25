@@ -381,7 +381,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                             <strong>Security recommendation:</strong> Enable multi-factor authentication (MFA) for maximum account protection.
                         </span>
                         <button
-                            onClick={() => navigate("/settings?tab=security")}
+                            onClick={() => navigate("/settings/security")}
                             className="font-semibold text-amber-700 hover:text-amber-900 underline underline-offset-2 whitespace-nowrap"
                         >
                             Set up now

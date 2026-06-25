@@ -10,10 +10,11 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { GitBranch, Building2, ChevronRight, Shield } from "lucide-react";
+import { GitBranch, Building2, ChevronRight, Shield, ShieldCheck } from "lucide-react";
 import { BranchesTab } from "@/components/settings/BranchesTab";
 import { OrganizationTab } from "@/components/settings/OrganizationTab";
 import { RolesTab } from "@/components/settings/RolesTab";
+import { SecurityTab } from "@/components/settings/SecurityTab";
 import { parseSettingsTab, type SettingsTabId } from "@/lib/routes";
 
 interface Tab {
@@ -41,6 +42,12 @@ const TABS: Tab[] = [
         icon: Shield,
         label: "Roles",
         description: "Permissions & access",
+    },
+    {
+        id: "security",
+        icon: ShieldCheck,
+        label: "Security",
+        description: "MFA & authentication",
     },
 ];
 
@@ -109,10 +116,11 @@ export default function SettingsPage() {
                 </nav>
 
                 {/* Tab content */}
-                <div className="flex-1 min-h-0 overflow-hidden">
+                <div className="flex-1 min-h-0 overflow-y-auto">
                     {activeTab === "organization" && <OrganizationTab />}
                     {activeTab === "branches" && <BranchesTab />}
                     {activeTab === "roles" && <RolesTab />}
+                    {activeTab === "security" && <SecurityTab />}
                 </div>
             </div>
         </div>

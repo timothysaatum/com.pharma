@@ -1,5 +1,5 @@
 
-export const SETTINGS_TABS = ["organization", "branches", "roles"] as const;
+export const SETTINGS_TABS = ["organization", "branches", "roles", "security"] as const;
 export type SettingsTabId = (typeof SETTINGS_TABS)[number];
 
 export const ADMIN_TABS = ["drugs", "inventory", "purchases", "contracts", "prescriptions"] as const;
