@@ -54,18 +54,26 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 /**
  * Guards routes that require admin or super_admin role.
  * Assumes the user is already authenticated (used inside RequireAuth).
+ *
+ * Allows: super admins, and any user with role level >= 20 (admin/manager).
+ * The login endpoint doesn't compute max_role_level (defaults to 0),
+ * so we fall back to the max level from the user's assigned roles.
  */
 function RequireAdmin({ children }: { children: React.ReactNode }) {
   const { user } = useAuthStore();
   if (!user) return <Navigate to="/login" replace />;
 
-  if (!user.is_super_admin && user.assigned_branches.length > 0) {
-    // Branch-assigned user trying to access admin pages.
-    // We allow them if they have management roles (handled by the page itself)
-    // but the Home redirect should be stable.
-    return <Navigate to={getHomePath(user)} replace />;
-  }
-  return <>{children}</>;
+  // Super admin always has access
+  if (user.is_super_admin) return <>{children}</>;
+
+  // Check role level — login endpoint doesn't compute this, so
+  // effective_permissions.max_role_level will be 0 (falsy); fall back to roles.
+  const effectiveLevel = user.effective_permissions?.max_role_level;
+  const maxLevel = effectiveLevel || Math.max(...user.roles.map(r => r.level), 0);
+
+  if (maxLevel >= 20) return <>{children}</>;
+
+  return <Navigate to={getHomePath(user)} replace />;
 }
 
 /**

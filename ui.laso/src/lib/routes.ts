@@ -15,8 +15,10 @@ export function getHomePath(user: User | null): string {
     if (user.assigned_branches.length === 0) return "/admin";
 
     // Use hierarchical role level: roles at level >= 20 are management
-    const maxLevel = user.effective_permissions?.max_role_level
-        ?? Math.max(...user.roles.map(r => r.level), 0);
+    // Login endpoint returns max_role_level=0 (default), so fall back to
+    // computing from assigned roles when the effective value is falsy (0).
+    const effectiveLevel = user.effective_permissions?.max_role_level;
+    const maxLevel = effectiveLevel || Math.max(...user.roles.map(r => r.level), 0);
 
     if (maxLevel >= 20) {
         return "/admin";
