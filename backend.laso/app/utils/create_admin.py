@@ -21,24 +21,15 @@ from app.models.user.user_model import User
 
 
 async def create_initial_admin():
-    """Create initial admin user and organization"""
+    """Create or promote admin user to super admin"""
     
     async with AsyncSessionLocal() as db:
         try:
-            # Check if any users exist
-            result = await db.execute(select(User))
-            existing_user = result.first()
-            
-            if existing_user:
-                print("Admin user already exists. Skipping creation.")
-                return
-            
             # Check if organization exists
             result = await db.execute(select(Organization))
             org = result.scalars().first()
             
             if not org:
-                # Create a default organization
                 print("Creating default organization...")
                 org = Organization(
                     id=uuid.uuid4(),
@@ -54,6 +45,22 @@ async def create_initial_admin():
                 print(f"Organization created: {org.name} (ID: {org.id})")
             else:
                 print(f"Using existing organization: {org.name} (ID: {org.id})")
+            
+            # Check if admin user exists
+            result = await db.execute(
+                select(User).where(User.username == "admin")
+            )
+            user = result.scalars().first()
+            
+            if user:
+                print(f"Admin user '{user.username}' found. Promoting to super admin...")
+                user.is_super_admin = True
+                user.is_active = True
+                user.failed_login_attempts = 0
+                user.account_locked_until = None
+                await db.commit()
+                print(f"User '{user.username}' is now a super admin.")
+                return
             
             # Create admin user with a cryptographically random password
             alphabet = string.ascii_letters + string.digits + "!@#$%^&*"
