@@ -184,7 +184,13 @@ class OrganizationOnboardingService:
             # Commit transaction
             await self.db.commit()
             await self.db.refresh(organization)
-            await self.db.refresh(admin_user)
+            # Re-fetch admin_user with roles eagerly loaded for serialization
+            result = await self.db.execute(
+                select(User)
+                .options(selectinload(User.roles))
+                .where(User.id == admin_user.id)
+            )
+            admin_user = result.scalar_one()
             for branch in created_branches:
                 await self.db.refresh(branch)
             
