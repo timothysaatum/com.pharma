@@ -47,6 +47,9 @@ const DEFAULT_SYNC_TABLES = [
     "purchase_orders",
 ];
 
+/** Maximum push attempts before an item is dead-lettered (excluded from sync queue). */
+const MAX_PUSH_ATTEMPTS = 10;
+
 // Re-export SyncStatus so existing callers that import it from this module
 // do not need to update their import paths.
 export type { SyncStatus } from "@/types";
@@ -164,7 +167,7 @@ class SyncEngine {
         const batchSize = 100;
 
         while (hasMore) {
-            const queue = await getPendingQueue(batchSize);
+            const queue = await getPendingQueue(batchSize, MAX_PUSH_ATTEMPTS);
             if (queue.length === 0) {
                 hasMore = false;
                 break;
@@ -222,11 +225,22 @@ class SyncEngine {
                 await this.loadPersistedConflicts();
             }
 
-            // Failed → increment attempt counter, will retry next cycle
+            // Failed → increment attempt counter; items exceeding MAX_PUSH_ATTEMPTS
+            // are dead-lettered (excluded by getPendingQueue's attempts < MAX_PUSH_ATTEMPTS)
+            let deadLettered = 0;
             for (const item of response.failed) {
                 if (item.error) {
-                    await markQueueError(item.table_name, item.local_id, item.error);
+                    const attempts = await markQueueError(item.table_name, item.local_id, item.error);
+                    if (attempts >= MAX_PUSH_ATTEMPTS) {
+                        deadLettered++;
+                    }
                 }
+            }
+            if (deadLettered > 0) {
+                console.warn(
+                    `[SyncEngine] ${deadLettered} item(s) exceeded max retries ` +
+                    `(${MAX_PUSH_ATTEMPTS}) and will be skipped until re-edited`
+                );
             }
 
             if (response.total_conflicts > 0 || response.total_failed > 0) {

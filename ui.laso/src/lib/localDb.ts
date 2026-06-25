@@ -551,11 +551,11 @@ export async function enqueue(
   );
 }
 
-export async function getPendingQueue(limit = 500): Promise<QueuedRecord[]> {
+export async function getPendingQueue(limit = 500, maxAttempts = 10): Promise<QueuedRecord[]> {
   const db = await getDb();
   return db.select<QueuedRecord[]>(
-    "SELECT * FROM sync_queue WHERE conflict_json IS NULL ORDER BY id ASC LIMIT $1",
-    [limit]
+    "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $2 ORDER BY id ASC LIMIT $1",
+    [limit, maxAttempts]
   );
 }
 
@@ -571,7 +571,7 @@ export async function markQueueError(
   tableName: string,
   recordId: string,
   error: string
-): Promise<void> {
+): Promise<number> {
   const db = await getDb();
   await db.execute(
     `UPDATE sync_queue
@@ -579,6 +579,11 @@ export async function markQueueError(
      WHERE table_name = $3 AND record_id = $4`,
     [new Date().toISOString(), error, tableName, recordId]
   );
+  const rows = await db.select<{ attempts: number }[]>(
+    "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
+    [tableName, recordId]
+  );
+  return rows[0]?.attempts ?? 0;
 }
 
 export async function markQueueConflict(
