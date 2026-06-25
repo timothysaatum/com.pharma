@@ -235,8 +235,8 @@ export default function ReportsPage() {
       setFilterLoading(true);
       try {
         const [branchRes, contractRes] = await Promise.all([
-          branchApi.list({ page: 1, page_size: 200 }),
-          contractsApi.list({ page: 1, page_size: 200 }),
+          branchApi.list({ page: 1, page_size: 100 }),
+          contractsApi.list({ page: 1, page_size: 100 }),
         ]);
         if (!cancelled) {
           setBranches((branchRes as any).items?.map((b: any) => ({ id: b.id, name: b.name })) ?? []);

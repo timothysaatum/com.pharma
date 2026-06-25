@@ -108,6 +108,7 @@ async def list_sales(
     price_contract_id: Optional[uuid.UUID] = Query(None, description="Filter by price contract"),
     contract_type: Optional[str] = Query(None, pattern="^(insurance|corporate|staff|senior_citizen|standard|wholesale|promotional)$"),
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     organization_id: uuid.UUID = Depends(get_organization_id)
 ):
     """

@@ -200,28 +200,9 @@ for origin in settings.CORS_ORIGINS:
     if origin not in cors_origins:
         cors_origins.append(origin)
 
-# CORS Middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-if settings.RATE_LIMIT_ENABLED:
-    app.add_middleware(RateLimitMiddleware)
-
-# ============================================================================
-# CUSTOM MIDDLEWARE
-# ============================================================================
-
+# Custom middleware added first (will be inner in the stack)
 @app.middleware("http")
 async def add_request_id_middleware(request: Request, call_next):
-    """
-    Add request ID to all requests for tracing and logging.
-    """
     import uuid
     request_id = str(uuid.uuid4())
     request.state.request_id = request_id
@@ -233,9 +214,6 @@ async def add_request_id_middleware(request: Request, call_next):
 
 @app.middleware("http")
 async def log_requests_middleware(request: Request, call_next):
-    """
-    Log all HTTP requests and responses.
-    """
     import time
     start_time = time.time()
     
@@ -251,6 +229,20 @@ async def log_requests_middleware(request: Request, call_next):
     
     response.headers["X-Process-Time"] = str(process_time)
     return response
+
+
+if settings.RATE_LIMIT_ENABLED:
+    app.add_middleware(RateLimitMiddleware)
+
+# CORS added last so it becomes the outermost middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ============================================================================

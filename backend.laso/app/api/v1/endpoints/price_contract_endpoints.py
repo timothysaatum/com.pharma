@@ -106,7 +106,7 @@ async def list_contracts(
     
     # Pagination
     page: int = Query(1, ge=1, description="Page number"),
-    page_size: int = Query(50, ge=1, le=100, description="Items per page"),
+    page_size: int = Query(50, ge=1, le=500, description="Items per page"),
     
     # Dependencies
     db: AsyncSession = Depends(get_db),
