@@ -27,7 +27,7 @@ async def create_initial_admin():
         try:
             # Check if any users exist
             result = await db.execute(select(User))
-            existing_user = result.scalar_one_or_none()
+            existing_user = result.first()
             
             if existing_user:
                 print("Admin user already exists. Skipping creation.")
@@ -35,7 +35,7 @@ async def create_initial_admin():
             
             # Check if organization exists
             result = await db.execute(select(Organization))
-            org = result.scalar_one_or_none()
+            org = result.scalars().first()
             
             if not org:
                 # Create a default organization
