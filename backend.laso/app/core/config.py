@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_REQUESTS: int = 100
     RATE_LIMIT_WINDOW_SECONDS: int = 60
+    TRUST_PROXY_HEADERS: bool = False
     
     # Session Management
     MAX_SESSIONS_PER_USER: int = 5

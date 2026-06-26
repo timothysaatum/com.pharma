@@ -10,6 +10,7 @@ import { localRead } from "@/lib/localRead";
 import { cacheBranchScopedDrugs } from "@/lib/localDb";
 import { isBackendReachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
+import { canUser } from "@/hooks/usePermissions";
 import { useDebounce } from "@/hooks/useDebounce";
 import { useCategoryTree } from "@/hooks/useCategories";
 import { DrugForm } from "@/components/drugs/DrugForm";
@@ -66,7 +67,10 @@ const DRUG_TYPE_COLORS: Record<string, string> = {
 
 export default function DrugListPage() {
     const { user, activeBranchId } = useAuthStore();
-    const canEdit = user?.is_super_admin || (user?.assigned_branches?.length ?? 0) === 0;
+    const canEdit = !!user && (
+        (user?.assigned_branches?.length ?? 0) === 0 ||
+        canUser(user, "manage_drugs")
+    );
 
     // FIX: tree gives hierarchy in the filter dropdown — shared cache with DrugForm
     const { tree: categoryTree, invalidate: invalidateCategories } = useCategoryTree();

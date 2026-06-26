@@ -4,6 +4,7 @@ import { isOfflineError, parseApiError } from "@/api/client";
 import { prescriptionsApi, type PrescriptionSearchItem } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
+import { useAuthStore } from "@/stores/authStore";
 import type { CartItem } from "@/hooks/useCart";
 import type { Prescription, PrescriptionMedication } from "@/types";
 
@@ -74,6 +75,7 @@ export function PrescriptionSelector({
     onSetPrescriptionId,
     onSetPrescriptionVerified,
 }: PrescriptionSelectorProps) {
+    const { user } = useAuthStore();
     const [prescriptions, setPrescriptions] = useState<PrescriptionSearchItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);

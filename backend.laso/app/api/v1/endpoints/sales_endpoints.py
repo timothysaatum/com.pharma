@@ -4,6 +4,7 @@ FastAPI endpoints for sales transactions, refunds, and reporting
 """
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
@@ -105,6 +106,7 @@ async def list_sales(
     payment_method: Optional[str] = Query(None),
     customer_id: Optional[uuid.UUID] = Query(None),
     cashier_id: Optional[uuid.UUID] = Query(None),
+    search: Optional[str] = Query(None, max_length=100),
     price_contract_id: Optional[uuid.UUID] = Query(None, description="Filter by price contract"),
     contract_type: Optional[str] = Query(None, pattern="^(insurance|corporate|staff|senior_citizen|standard|wholesale|promotional)$"),
     db: AsyncSession = Depends(get_db),
@@ -133,21 +135,24 @@ async def list_sales(
     GET /sales?branch_id=xxx&start_date=2026-02-01T00:00:00Z&status=completed&contract_type=insurance
     ```
     """
-    from sqlalchemy import select, and_
-    from sqlalchemy.orm import selectinload
+    from sqlalchemy import and_, false, or_, select
     
     filters = [Sale.organization_id == organization_id]
 
     assigned = [str(b) for b in (current_user.assigned_branches or [])]
     if branch_id:
-        if str(branch_id) not in assigned:
+        if not current_user.is_super_admin and str(branch_id) not in assigned:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have access to this branch"
             )
         filters.append(Sale.branch_id == branch_id)
+    elif current_user.is_super_admin:
+        pass
     elif assigned:
         filters.append(Sale.branch_id.in_([uuid.UUID(b) for b in assigned]))
+    else:
+        filters.append(false())
     
     if start_date:
         filters.append(Sale.created_at >= start_date)
@@ -172,6 +177,15 @@ async def list_sales(
     
     if price_contract_id:
         filters.append(Sale.price_contract_id == price_contract_id)
+
+    if search:
+        term = f"%{search.strip()}%"
+        filters.append(
+            or_(
+                Sale.sale_number.ilike(term),
+                Sale.customer_name.ilike(term),
+            )
+        )
     
     from app.models.pricing.pricing_model import PriceContract
 
@@ -236,6 +250,14 @@ async def get_sale(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied"
         )
+
+    if not current_user.is_super_admin and not current_user.has_branch_access(
+        sale.branch_id
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this sale's branch",
+        )
     
     return await build_sale_with_details(db, sale)
 
@@ -247,7 +269,7 @@ async def get_sale(
 @router.post(
     "/{sale_id}/refund",
     response_model=RefundSaleResponse,
-    dependencies=[Depends(require_permission("process_sales"))]
+    dependencies=[Depends(require_permission("process_refunds"))]
 )
 async def refund_sale(
     sale_id: uuid.UUID,
@@ -329,7 +351,7 @@ async def cancel_sale(
     
     # Branch access check
     assigned = [str(b) for b in (current_user.assigned_branches or [])]
-    if str(sale.branch_id) not in assigned:
+    if str(sale.branch_id) not in assigned and not current_user.is_super_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this branch"
@@ -342,7 +364,9 @@ async def cancel_sale(
         )
     
     # Validate manager approval
-    if cancel_data.manager_approval_user_id != current_user.id:
+    if cancel_data.manager_approval_user_id == current_user.id:
+        approver = current_user
+    else:
         result = await db.execute(
             select(UserModel).where(
                 UserModel.id == cancel_data.manager_approval_user_id,
@@ -355,11 +379,15 @@ async def cancel_sale(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Approving manager not found"
             )
-        if not (approver.is_super_admin or approver.has_permission("process_sales")):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Cancellation approver does not have required permissions"
-            )
+
+    if not (
+        approver.is_super_admin
+        or approver.has_permission("process_refunds")
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Cancellation approver does not have required permissions"
+        )
     
     sale.status = 'cancelled'
     sale.cancelled_at = datetime.now(timezone.utc)

@@ -48,7 +48,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, date
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from sqlalchemy import and_, or_, select, text
@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from dateutil.parser import isoparse
 
+from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
@@ -253,12 +254,30 @@ def _parse_datetime_fields(data: Dict[str, Any]) -> None:
                     pass
 
 
+def _uuid_or_none(value: Any) -> uuid.UUID | None:
+    """Normalize optional FK payload values before UUID-column comparisons."""
+    if value is None:
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return uuid.UUID(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 async def _validate_and_fix_sale_fks(
     db: AsyncSession,
     safe_data: Dict[str, Any],
     organization_id: uuid.UUID,
     record_id: str,
     branch_id: uuid.UUID,
+    pushed_by: uuid.UUID,
 ) -> List[str]:
     """
     Validate all foreign keys for a sale record and clear/fix invalid ones.
@@ -287,7 +306,8 @@ async def _validate_and_fix_sale_fks(
     # price_contract_id (nullable, ondelete='SET NULL')
     # This is checked in BOTH organization scope AND globally since it might
     # have been created in a different sync session
-    price_contract_id = safe_data.get("price_contract_id")
+    price_contract_id = _uuid_or_none(safe_data.get("price_contract_id"))
+    safe_data["price_contract_id"] = price_contract_id
     if price_contract_id is not None:
         # First check: is it in this organization?
         result = await db.execute(
@@ -324,7 +344,8 @@ async def _validate_and_fix_sale_fks(
             fixes.append(f"price_contract_id={price_contract_id}")
 
     # customer_id (nullable, ondelete='SET NULL')
-    customer_id = safe_data.get("customer_id")
+    customer_id = _uuid_or_none(safe_data.get("customer_id"))
+    safe_data["customer_id"] = customer_id
     if customer_id is not None:
         result = await db.execute(
             select(Customer.id).where(
@@ -341,7 +362,8 @@ async def _validate_and_fix_sale_fks(
             fixes.append(f"customer_id={customer_id}")
 
     # prescription_id (nullable, ondelete='SET NULL')
-    prescription_id = safe_data.get("prescription_id")
+    prescription_id = _uuid_or_none(safe_data.get("prescription_id"))
+    safe_data["prescription_id"] = prescription_id
     if prescription_id is not None:
         # Prescriptions might not be synced; treat as optional
         # In production, you may want to validate this more strictly
@@ -351,7 +373,8 @@ async def _validate_and_fix_sale_fks(
         )
 
     # pharmacist_id (nullable, ondelete='RESTRICT')
-    pharmacist_id = safe_data.get("pharmacist_id")
+    pharmacist_id = _uuid_or_none(safe_data.get("pharmacist_id"))
+    safe_data["pharmacist_id"] = pharmacist_id
     if pharmacist_id is not None:
         result = await db.execute(
             select(User.id).where(
@@ -372,14 +395,10 @@ async def _validate_and_fix_sale_fks(
     # ============================================================================
     
     # cashier_id (nullable=False, ondelete='RESTRICT')
-    cashier_id = safe_data.get("cashier_id")
-    if cashier_id is None:
-        logger.error(
-            "Sync: Missing required cashier_id for sale %s in org %s; sync failed",
-            record_id, organization_id,
-        )
-        raise ValueError(f"Sale {record_id} missing required cashier_id")
-    
+    # Offline sales can outlive the original local user cache. If the payload's
+    # cashier is missing/stale, attribute the synced sale to the authenticated
+    # user performing the push so the sale is not permanently blocked.
+    cashier_id = _uuid_or_none(safe_data.get("cashier_id"))
     result = await db.execute(
         select(User.id).where(
             User.id == cashier_id,
@@ -387,15 +406,31 @@ async def _validate_and_fix_sale_fks(
         )
     )
     if result.scalar_one_or_none() is None:
-        logger.error(
-            "Sync: Cashier user %s not found in org %s for sale %s; sync failed. "
-            "This usually means the user was deleted or sync is out of order.",
-            cashier_id, organization_id, record_id,
+        fallback_result = await db.execute(
+            select(User.id).where(
+                User.id == pushed_by,
+                User.organization_id == organization_id,
+            )
         )
-        raise ValueError(
-            f"Cashier {cashier_id} not found in organization {organization_id}. "
-            "User may have been deleted or sync order is incorrect."
+        if fallback_result.scalar_one_or_none() is None:
+            logger.error(
+                "Sync: Cashier user %s not found in org %s for sale %s, and "
+                "syncing user %s is not a valid fallback.",
+                cashier_id, organization_id, record_id, pushed_by,
+            )
+            raise ValueError(
+                f"Cashier {cashier_id} not found in organization {organization_id}. "
+                "User may have been deleted or sync order is incorrect."
+            )
+
+        logger.warning(
+            "Sync: Reassigned cashier for offline sale %s from %s to syncing user %s.",
+            record_id, cashier_id, pushed_by,
         )
+        safe_data["cashier_id"] = str(pushed_by)
+        fixes.append(f"cashier_id={cashier_id}->{pushed_by}")
+    else:
+        safe_data["cashier_id"] = cashier_id
     
     # branch_id (always set by sync service, validates just to be safe)
     if str(safe_data.get("branch_id")) != str(branch_id):
@@ -434,15 +469,15 @@ class SyncService:
         """
         # If the request session already has an active transaction (e.g. auth deps
         # queried the DB), PostgreSQL rejects SET TRANSACTION ISOLATION LEVEL
-        # as not-first-statement.  For a read-only pull we use the existing session
-        # without isolation changes — the default isolation is sufficient for sync.
+        # as not-first-statement.  Open a fresh read session so the sync snapshot
+        # can still choose its isolation level before issuing any query.
         if db.in_transaction() and SyncService._supports_repeatable_read(db):
-            return await SyncService._pull_with_snapshot(
-                db,
-                request,
-                organization_id,
-                skip_isolation=True,
-            )
+            async with AsyncSessionLocal() as snapshot_db:
+                return await SyncService._pull_with_snapshot(
+                    snapshot_db,
+                    request,
+                    organization_id,
+                )
 
         return await SyncService._pull_with_snapshot(db, request, organization_id)
 
@@ -653,13 +688,14 @@ class SyncService:
         table_priority = {
             "price_contracts": 0,
             "customers": 1,
-            "drugs": 2,
-            "drug_categories": 3,
-            "branch_inventory": 4,
-            "drug_batches": 5,
-            "stock_adjustments": 6,
-            "purchase_orders": 7,
-            "sales": 8,
+            "prescriptions": 2,
+            "drugs": 3,
+            "drug_categories": 4,
+            "branch_inventory": 5,
+            "drug_batches": 6,
+            "stock_adjustments": 7,
+            "purchase_orders": 8,
+            "sales": 9,
         }
 
         sorted_records = sorted(
@@ -782,6 +818,7 @@ class SyncService:
         existing = (await db.execute(
             select(Sale).where(
                 Sale.organization_id == organization_id,
+                Sale.branch_id == branch_id,
                 or_(
                     Sale.id          == record.local_id,
                     Sale.sale_number == record.data.get("sale_number"),
@@ -799,6 +836,7 @@ class SyncService:
 
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
         _parse_datetime_fields(safe_data)
+        safe_data["id"] = record.local_id
         safe_data["organization_id"] = str(organization_id)
         safe_data["branch_id"]       = str(branch_id)
 
@@ -825,7 +863,7 @@ class SyncService:
         fk_fixes: List[str] = []
         try:
             fixes = await _validate_and_fix_sale_fks(
-                db, safe_data, organization_id, record.local_id, branch_id
+                db, safe_data, organization_id, record.local_id, branch_id, pushed_by
             )
             fk_fixes.extend(fixes)
             if fk_fixes:
@@ -1070,7 +1108,10 @@ class SyncService:
         """Create or update a DrugBatch with server-wins conflict resolution."""
         existing = (await db.execute(
             select(DrugBatch)
-            .where(DrugBatch.id == record.local_id)
+            .where(
+                DrugBatch.id == record.local_id,
+                DrugBatch.branch_id == branch_id,
+            )
             .with_for_update()
         )).scalar_one_or_none()
 
@@ -1082,6 +1123,7 @@ class SyncService:
                 ), conflict
             safe = _whitelist(record.data, _BATCH_WRITABLE)
             _parse_datetime_fields(safe)
+            safe.pop("id", None)
             # Validate drug exists in organization
             drug_id = safe.get("drug_id") or existing.drug_id
             drug_exists = await db.scalar(
@@ -1107,6 +1149,7 @@ class SyncService:
         else:
             safe = _whitelist(record.data, _BATCH_WRITABLE)
             _parse_datetime_fields(safe)
+            safe["id"] = record.local_id
             safe["branch_id"] = str(branch_id)
             # Validate drug exists in organization
             drug_id = safe.get("drug_id")
@@ -1158,7 +1201,10 @@ class SyncService:
         hides the discrepancy and corrupts the audit trail.
         """
         existing = (await db.execute(
-            select(StockAdjustment).where(StockAdjustment.id == record.local_id)
+            select(StockAdjustment).where(
+                StockAdjustment.id == record.local_id,
+                StockAdjustment.branch_id == branch_id,
+            )
         )).scalar_one_or_none()
 
         if existing:
@@ -1172,6 +1218,7 @@ class SyncService:
         # Whitelist and prepare adjustment data
         safe = _whitelist(record.data, _ADJUSTMENT_WRITABLE)
         _parse_datetime_fields(safe)
+        safe["id"] = record.local_id
         safe["branch_id"]   = str(branch_id)
         safe["adjusted_by"] = str(pushed_by)
 
@@ -1191,6 +1238,26 @@ class SyncService:
             ), None
 
         drug_id = safe.get("drug_id")
+        if not drug_id:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error="Missing drug_id.",
+            ), None
+        drug_exists = await db.scalar(
+            select(Drug.id).where(
+                Drug.id == drug_id,
+                Drug.organization_id == organization_id,
+            )
+        )
+        if not drug_exists:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error=f"Drug {drug_id} not found in organization.",
+            ), None
 
         # Validate inventory BEFORE persisting the adjustment record.
         # Resolve the current inventory under a row lock so we can:
@@ -1200,7 +1267,6 @@ class SyncService:
         #   3. Apply the inventory change in the same locked query.
         previous_qty: int = 0
         new_qty: int = 0
-        inventory_updated = False
         if drug_id and quantity_change != 0:
             inv = (await db.execute(
                 select(BranchInventory)
@@ -1230,7 +1296,6 @@ class SyncService:
                 inv.quantity      = new_qty
                 inv.sync_version += 1
                 inv.mark_as_pending_sync()
-                inventory_updated = True
             elif quantity_change > 0:
                 previous_qty = 0
                 new_qty      = quantity_change
@@ -1242,7 +1307,6 @@ class SyncService:
                 )
                 inv.sync_status = "synced"
                 db.add(inv)
-                inventory_updated = True
             else:
                 # quantity_change < 0 with no inventory row: cannot deduct
                 return PushResult(
@@ -1319,6 +1383,8 @@ class SyncService:
                 ), conflict
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
+            safe.pop("id", None)
+            safe.pop("drug_id", None)
             # Server-side validation: cap inventory quantity to prevent inflation attacks
             if "quantity" in safe:
                 safe["quantity"] = min(int(safe["quantity"]), MAX_INVENTORY_QUANTITY)
@@ -1329,6 +1395,7 @@ class SyncService:
         else:
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
+            safe["id"] = record.local_id
             safe["branch_id"] = str(branch_id)
             # Server-side validation: cap inventory quantity for new records
             if "quantity" in safe:
@@ -1358,6 +1425,7 @@ class SyncService:
             select(PurchaseOrder).where(
                 PurchaseOrder.id              == record.local_id,
                 PurchaseOrder.organization_id == organization_id,
+                PurchaseOrder.branch_id       == branch_id,
             )
         )).scalar_one_or_none()
 
@@ -1369,12 +1437,15 @@ class SyncService:
                 ), conflict
             safe = _whitelist(record.data, _PO_WRITABLE)
             _parse_datetime_fields(safe)
+            safe.pop("id", None)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status = "synced"
+            existing.sync_version += 1
         else:
             safe = _whitelist(record.data, _PO_WRITABLE)
             _parse_datetime_fields(safe)
+            safe["id"] = record.local_id
             safe["organization_id"] = str(organization_id)
             safe["branch_id"]       = str(branch_id)
             safe["ordered_by"]      = str(pushed_by)
@@ -1407,7 +1478,10 @@ class SyncService:
         """
         # Idempotency check
         existing = (await db.execute(
-            select(Customer).where(Customer.id == record.local_id)
+            select(Customer).where(
+                Customer.id == record.local_id,
+                Customer.organization_id == organization_id,
+            )
         )).scalar_one_or_none()
 
         if existing:
@@ -1450,6 +1524,7 @@ class SyncService:
 
         safe = _whitelist(record.data, _CUSTOMER_WRITABLE)
         _parse_datetime_fields(safe)
+        safe["id"] = record.local_id
         safe["organization_id"] = str(organization_id)
         customer = Customer(**safe)
         customer.sync_status = "synced"
@@ -1472,11 +1547,9 @@ class SyncService:
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
         """Push a prescription created offline."""
-        from app.models.precriptions.prescription_model import Prescription
-        from app.api.v1.endpoints.prescription_endpoints import PrescriptionResponse
-
         existing = (await db.execute(
             select(Prescription).where(
+                Prescription.organization_id == organization_id,
                 or_(
                     Prescription.id == record.local_id,
                     Prescription.prescription_number == record.data.get("prescription_number")
@@ -1494,7 +1567,23 @@ class SyncService:
 
         safe = _whitelist(record.data, _PRESCRIPTION_WRITABLE)
         _parse_datetime_fields(safe)
+        safe["id"] = record.local_id
         safe["organization_id"] = str(organization_id)
+
+        customer_id = safe.get("customer_id")
+        customer_exists = await db.scalar(
+            select(Customer.id).where(
+                Customer.id == customer_id,
+                Customer.organization_id == organization_id,
+            )
+        )
+        if not customer_exists:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="prescriptions",
+                success=False,
+                error=f"Customer {customer_id} not found in organization.",
+            ), None
 
         # Ensure medications is correctly handled (it's JSONB in DB)
         if "medications" in safe and isinstance(safe["medications"], str):

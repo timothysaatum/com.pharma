@@ -102,7 +102,7 @@ class ResetService:
         user.account_locked_until = None
 
         from app.services.auth.auth_service import AuthService
-        await AuthService.logout_all_sessions(db, user)
+        await AuthService._revoke_all_sessions(db, user)
 
         await db.commit()
 

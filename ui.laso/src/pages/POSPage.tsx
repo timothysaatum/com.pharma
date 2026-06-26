@@ -128,7 +128,16 @@ export default function POSPage() {
         setIsSubmitting(true);
         setCheckoutError(null);
 
-        const payload = cart.buildSaleCreate(activeBranchId);
+        let payload = cart.buildSaleCreate(activeBranchId);
+        const selectedContract = cart.state.contract;
+        const requiresOnlineContractVerification = Boolean(
+            selectedContract &&
+            (
+                selectedContract.requires_verification ||
+                selectedContract.requires_approval ||
+                selectedContract.type === "insurance"
+            )
+        );
         
         // ─── Pre-flight check: Validate prescription refills if used ───────────────
         if (payload.prescription_id) {
@@ -322,9 +331,28 @@ export default function POSPage() {
 
             if (!navigator.onLine) {
                 // ── Offline path ─────────────────────────────────────────────
+                if (requiresOnlineContractVerification) {
+                    throw new Error("This contract requires online verification before checkout.");
+                }
                 result = await recordOfflineSale();
             } else {
                 // ── Online path ──────────────────────────────────────────────
+                const eligibility = await contractsApi.verifyEligibility({
+                    contract_id: payload.price_contract_id,
+                    customer_id: payload.customer_id ?? null,
+                    drug_ids: payload.items.map((item) => item.drug_id),
+                    branch_id: activeBranchId,
+                    sale_amount: cart.totals.total,
+                });
+                if (!eligibility.eligible) {
+                    throw new Error(eligibility.message);
+                }
+                if (eligibility.verification_token) {
+                    payload = {
+                        ...payload,
+                        contract_verification_token: eligibility.verification_token,
+                    };
+                }
                 result = await salesApi.processSale(payload);
             }
 
@@ -338,6 +366,10 @@ export default function POSPage() {
                 (!navigator.onLine || isOffline || !backendWasReachable);
 
             if (shouldRecordOffline) {
+                if (requiresOnlineContractVerification) {
+                    setCheckoutError("This contract requires online verification before checkout.");
+                    return;
+                }
                 const result = await recordOfflineSale();
                 setSuccessResult(result);
                 appEvents.emit("inventory:changed");

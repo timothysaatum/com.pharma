@@ -76,6 +76,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 8) await migrate_v8(db);
       if (user_version < 9) await migrate_v9(db);
       if (user_version < 10) await migrate_v10(db);
+      if (user_version < 11) await migrate_v11(db);
       await ensureBranchInventorySchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
@@ -162,6 +163,14 @@ async function migrate_v1(db: Database): Promise<void> {
       applicable_branch_ids     TEXT NOT NULL DEFAULT '[]',
       effective_from            TEXT NOT NULL,
       effective_to              TEXT,
+      requires_verification     INTEGER NOT NULL DEFAULT 0,
+      requires_approval         INTEGER NOT NULL DEFAULT 0,
+      daily_usage_limit         INTEGER,
+      per_customer_usage_limit  INTEGER,
+      insurance_provider_id     TEXT,
+      requires_preauthorization INTEGER NOT NULL DEFAULT 0,
+      minimum_purchase_amount   REAL,
+      maximum_purchase_amount   REAL,
       status                    TEXT NOT NULL DEFAULT 'active',
       is_active                 INTEGER NOT NULL DEFAULT 1,
       copay_amount              REAL,
@@ -468,6 +477,22 @@ async function migrate_v10(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 10");
 }
 
+async function migrate_v11(db: Database): Promise<void> {
+  const addCol = async (col: string) => {
+    try { await db.execute(`ALTER TABLE price_contracts ADD COLUMN ${col}`); }
+    catch { }
+  };
+  await addCol("requires_verification     INTEGER NOT NULL DEFAULT 0");
+  await addCol("requires_approval         INTEGER NOT NULL DEFAULT 0");
+  await addCol("daily_usage_limit         INTEGER");
+  await addCol("per_customer_usage_limit  INTEGER");
+  await addCol("insurance_provider_id     TEXT");
+  await addCol("requires_preauthorization INTEGER NOT NULL DEFAULT 0");
+  await addCol("minimum_purchase_amount   REAL");
+  await addCol("maximum_purchase_amount   REAL");
+  await db.execute("PRAGMA user_version = 11");
+}
+
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
@@ -519,13 +544,92 @@ export interface QueuedRecord {
   payload_json: string;
   created_offline_at: string;
   attempts: number;
+  last_attempt_at: string | null;
   error: string | null;
   conflict_json?: string | null;
+}
+
+export interface QueueScope {
+  organizationId?: string | null;
+  branchId?: string | null;
 }
 
 export interface QueuedConflict extends QueuedRecord {
   conflict: PushConflict;
   local_data: Record<string, unknown>;
+}
+
+export interface QueuedFailure extends QueuedRecord {
+  is_blocked: boolean;
+  local_data: Record<string, unknown>;
+}
+
+const BRANCH_SCOPED_QUEUE_TABLES = new Set([
+  "branch_inventory",
+  "drug_batches",
+  "stock_adjustments",
+  "sales",
+  "purchase_orders",
+]);
+
+const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
+  "customers",
+  "prescriptions",
+  "drugs",
+  "drug_categories",
+  "price_contracts",
+]);
+
+function hasQueueScope(scope?: QueueScope): boolean {
+  return Boolean(scope?.organizationId || scope?.branchId);
+}
+
+function asScopeString(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+function parseQueuePayload(row: QueuedRecord): Record<string, unknown> | null {
+  try {
+    const parsed = JSON.parse(row.payload_json);
+    return parsed && typeof parsed === "object"
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function isQueuedRecordInScope(row: QueuedRecord, scope?: QueueScope): boolean {
+  if (!hasQueueScope(scope)) return true;
+
+  const payload = parseQueuePayload(row);
+  if (!payload) return false;
+
+  const branchId = asScopeString(payload.branch_id);
+  const organizationId = asScopeString(payload.organization_id);
+
+  if (BRANCH_SCOPED_QUEUE_TABLES.has(row.table_name)) {
+    return Boolean(scope?.branchId && branchId === scope.branchId);
+  }
+
+  if (ORGANIZATION_SCOPED_QUEUE_TABLES.has(row.table_name)) {
+    return Boolean(scope?.organizationId && organizationId === scope.organizationId);
+  }
+
+  if (branchId) {
+    return Boolean(scope?.branchId && branchId === scope.branchId);
+  }
+
+  if (organizationId) {
+    return Boolean(scope?.organizationId && organizationId === scope.organizationId);
+  }
+
+  return false;
+}
+
+function filterQueueByScope<T extends QueuedRecord>(rows: T[], scope?: QueueScope): T[] {
+  if (!hasQueueScope(scope)) return rows;
+  return rows.filter((row) => isQueuedRecordInScope(row, scope));
 }
 
 export async function enqueue(
@@ -551,12 +655,24 @@ export async function enqueue(
   );
 }
 
-export async function getPendingQueue(limit = 500, maxAttempts = 10): Promise<QueuedRecord[]> {
+export async function getPendingQueue(
+  limit = 500,
+  maxAttempts = 10,
+  scope?: QueueScope
+): Promise<QueuedRecord[]> {
   const db = await getDb();
-  return db.select<QueuedRecord[]>(
-    "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $2 ORDER BY id ASC LIMIT $1",
-    [limit, maxAttempts]
+  if (!hasQueueScope(scope)) {
+    return db.select<QueuedRecord[]>(
+      "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $2 ORDER BY id ASC LIMIT $1",
+      [limit, maxAttempts]
+    );
+  }
+
+  const rows = await db.select<QueuedRecord[]>(
+    "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $1 ORDER BY id ASC",
+    [maxAttempts]
   );
+  return filterQueueByScope(rows ?? [], scope).slice(0, limit);
 }
 
 export async function dequeue(tableName: string, recordId: string): Promise<void> {
@@ -618,13 +734,13 @@ export async function clearQueueConflict(
   );
 }
 
-export async function getPendingConflicts(): Promise<QueuedConflict[]> {
+export async function getPendingConflicts(scope?: QueueScope): Promise<QueuedConflict[]> {
   const db = await getDb();
   const rows = await db.select<QueuedRecord[] & { conflict_json: string }[]>(
     "SELECT * FROM sync_queue WHERE conflict_json IS NOT NULL ORDER BY id ASC"
   );
 
-  return (rows ?? []).map((row) => {
+  return filterQueueByScope(rows ?? [], scope).map((row) => {
     let conflict: PushConflict = {
       local_id: row.record_id,
       table_name: row.table_name,
@@ -644,8 +760,79 @@ export async function getPendingConflicts(): Promise<QueuedConflict[]> {
   });
 }
 
-export async function getPendingCount(): Promise<number> {
+export async function getPendingFailures(
+  maxAttempts = 10,
+  scope?: QueueScope
+): Promise<QueuedFailure[]> {
   const db = await getDb();
+  const rows = await db.select<QueuedRecord[]>(
+    `SELECT *
+     FROM sync_queue
+     WHERE conflict_json IS NULL
+       AND error IS NOT NULL
+     ORDER BY
+       CASE WHEN attempts >= $1 THEN 0 ELSE 1 END,
+       last_attempt_at DESC,
+       id ASC`,
+    [maxAttempts]
+  );
+
+  return filterQueueByScope(rows ?? [], scope).map((row) => {
+    let localData: Record<string, unknown> = {};
+    try {
+      localData = JSON.parse(row.payload_json);
+    } catch { }
+    return {
+      ...row,
+      is_blocked: row.attempts >= maxAttempts,
+      local_data: localData,
+    };
+  });
+}
+
+export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
+  const db = await getDb();
+  if (hasQueueScope(scope)) {
+    const rows = await db.select<QueuedRecord[]>(
+      `SELECT *
+       FROM sync_queue
+       WHERE conflict_json IS NULL
+         AND error IS NOT NULL
+       ORDER BY id ASC`
+    );
+    const scopedRows = filterQueueByScope(rows ?? [], scope);
+    for (const row of scopedRows) {
+      await db.execute(
+        `UPDATE sync_queue
+         SET attempts = 0,
+             last_attempt_at = NULL,
+             error = NULL
+         WHERE id = $1`,
+        [row.id]
+      );
+    }
+    return;
+  }
+
+  await db.execute(
+    `UPDATE sync_queue
+     SET attempts = 0,
+         last_attempt_at = NULL,
+         error = NULL
+     WHERE conflict_json IS NULL
+       AND error IS NOT NULL`
+  );
+}
+
+export async function getPendingCount(scope?: QueueScope): Promise<number> {
+  const db = await getDb();
+  if (hasQueueScope(scope)) {
+    const rows = await db.select<QueuedRecord[]>(
+      "SELECT * FROM sync_queue ORDER BY id ASC"
+    );
+    return filterQueueByScope(rows ?? [], scope).length;
+  }
+
   const rows = await db.select<{ count: number }[]>(
     "SELECT COUNT(*) as count FROM sync_queue"
   );

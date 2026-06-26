@@ -357,7 +357,11 @@ async def create_drug_batch(
             detail="You don't have access to this branch"
         )
     
-    batch = await InventoryService.create_batch(db=db, batch_data=batch_data)
+    batch = await InventoryService.create_batch(
+        db=db,
+        batch_data=batch_data,
+        created_by=current_user.id,
+    )
     return batch
 
 

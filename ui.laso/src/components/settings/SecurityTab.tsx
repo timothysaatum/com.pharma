@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { ShieldCheck, Smartphone, Key, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { ShieldCheck, Smartphone, Key, CheckCircle2, AlertCircle, QrCode } from "lucide-react";
 import { toast } from "sonner";
 import { authApi } from "@/api/auth";
 import { useAuthStore } from "@/stores/authStore";
@@ -11,6 +11,7 @@ export function SecurityTab() {
     const [isLoading, setIsLoading] = useState(false);
     const [secret, setSecret] = useState<string | null>(null);
     const [provisioningUri, setProvisioningUri] = useState<string | null>(null);
+    const [qrCodeDataUri, setQrCodeDataUri] = useState<string | null>(null);
     const [totpCode, setTotpCode] = useState("");
     const [password, setPassword] = useState("");
 
@@ -22,6 +23,7 @@ export function SecurityTab() {
             const data = await authApi.mfaSetup();
             setSecret(data.secret);
             setProvisioningUri(data.provisioning_uri);
+            setQrCodeDataUri(data.qr_code_data_uri);
         } catch (err) {
             toast.error(parseApiError(err));
         } finally {
@@ -41,6 +43,7 @@ export function SecurityTab() {
             setUser(updatedUser);
             setSecret(null);
             setProvisioningUri(null);
+            setQrCodeDataUri(null);
             setTotpCode("");
             toast.success("MFA enabled successfully.");
         } catch (err) {
@@ -128,6 +131,35 @@ export function SecurityTab() {
                     </form>
                 ) : secret ? (
                     <div className="p-6 space-y-5">
+                        {qrCodeDataUri && (
+                            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
+                                <div className="flex items-center gap-2 mb-3">
+                                    <QrCode className="w-4 h-4 text-brand-600" />
+                                    <label className="block text-xs font-bold text-ink-muted uppercase tracking-wider">
+                                        Scan QR Code
+                                    </label>
+                                </div>
+                                <div className="flex flex-col sm:flex-row gap-4">
+                                    <div className="w-48 h-48 rounded-xl border border-slate-200 bg-white p-3 flex items-center justify-center">
+                                        <img
+                                            src={qrCodeDataUri}
+                                            alt="Authenticator app QR code"
+                                            className="w-full h-full object-contain"
+                                        />
+                                    </div>
+                                    <div className="flex-1 text-sm text-ink-muted">
+                                        <p>
+                                            Scan this code with Google Authenticator, Microsoft Authenticator,
+                                            1Password, Authy, or another TOTP-compatible app.
+                                        </p>
+                                        <p className="mt-2">
+                                            If scanning is unavailable, manually enter the secret key below.
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
                         <div className="p-4 bg-slate-50 rounded-xl border border-slate-200">
                             <label className="block text-xs font-bold text-ink-muted uppercase tracking-wider mb-2">
                                 Secret Key
@@ -181,7 +213,15 @@ export function SecurityTab() {
                                     <Key className="w-4 h-4" />
                                     Verify & Enable
                                 </Button>
-                                <Button type="button" variant="ghost" onClick={() => { setSecret(null); setProvisioningUri(null); }}>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    onClick={() => {
+                                        setSecret(null);
+                                        setProvisioningUri(null);
+                                        setQrCodeDataUri(null);
+                                    }}
+                                >
                                     Cancel
                                 </Button>
                             </div>

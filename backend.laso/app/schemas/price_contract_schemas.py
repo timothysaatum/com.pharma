@@ -62,15 +62,14 @@ class PriceContractBase(BaseSchema):
     
     discount_type: str = Field(
         default='percentage',
-        pattern="^(percentage|fixed_amount|tiered|custom)$",
+        pattern="^(percentage|fixed_amount|custom)$",
         description="Type of discount calculation"
     )
     
     discount_percentage: Decimal = Field(
         default=Decimal('0.00'),
         ge=0.0,
-        le=100.0,
-        description="Discount percentage: 5.00, 10.00, 15.00, 20.00"
+        description="Percentage discount, or fixed amount when discount_type is fixed_amount"
     )
     
     # ============================================
@@ -278,6 +277,12 @@ class PriceContractCreate(PriceContractBase):
         # 1. Validate date range
         if self.effective_to and self.effective_to < self.effective_from:
             raise ValueError("effective_to must be on or after effective_from")
+
+        if (
+            self.discount_type == 'percentage'
+            and self.discount_percentage > Decimal('100.00')
+        ):
+            raise ValueError("Percentage discount cannot exceed 100%")
         
         # 2. Validate insurance contracts
         if self.contract_type == 'insurance':
@@ -333,12 +338,18 @@ class PriceContractCreate(PriceContractBase):
             if not self.minimum_purchase_amount:
                 raise ValueError("Wholesale contracts must specify minimum_purchase_amount")
             
-            if self.discount_percentage > Decimal('30.00'):
+            if (
+                self.discount_type == 'percentage'
+                and self.discount_percentage > Decimal('30.00')
+            ):
                 raise ValueError("Wholesale discount cannot exceed 30% without special approval")
         
         # 9. Validate senior citizen contracts
         if self.contract_type == 'senior_citizen':
-            if self.discount_percentage > Decimal('15.00'):
+            if (
+                self.discount_type == 'percentage'
+                and self.discount_percentage > Decimal('15.00')
+            ):
                 raise ValueError("Senior citizen discount typically should not exceed 15%")
             
             if self.requires_verification:
@@ -362,7 +373,6 @@ class PriceContractUpdate(BaseSchema):
     discount_percentage: Optional[Decimal] = Field(
         None,
         ge=0.0,
-        le=100.0
     )
     
     # Applicability
@@ -917,6 +927,11 @@ class ContractEligibilityResponse(BaseSchema):
     requires_verification: bool
     requires_approval: bool
     requires_preauthorization: bool
+    verification_token: Optional[str] = Field(
+        None,
+        description="Short-lived token to submit with a sale when verification or approval is required"
+    )
+    verification_expires_at: Optional[datetime] = None
     
     # Insurance details (if applicable)
     insurance_details: Optional[Dict[str, Any]] = None

@@ -3,6 +3,7 @@ import os
 from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 from alembic import context
 
 # Add project root to path
@@ -28,16 +29,21 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 
+def get_migration_url() -> str:
+    """Return a synchronous URL suitable for Alembic's sync engine."""
+    url = make_url(settings.ALEMBIC_DB_URL or settings.DATABASE_URL)
+    driver_map = {
+        "postgresql+asyncpg": "postgresql+psycopg2",
+        "sqlite+aiosqlite": "sqlite",
+    }
+    if url.drivername in driver_map:
+        url = url.set(drivername=driver_map[url.drivername])
+    return url.render_as_string(hide_password=False)
+
+
 def get_dialect_name():
-    """Get the database dialect name from the URL"""
-    url = settings.ALEMBIC_DB_URL or settings.DATABASE_URL
-    if url.startswith('postgresql://') or url.startswith('postgresql+psycopg'):
-        return 'postgresql'
-    elif url.startswith('sqlite://'):
-        return 'sqlite'
-    elif url.startswith('mysql://') or url.startswith('mysql+pymysql'):
-        return 'mysql'
-    return 'sqlite'  # Default to SQLite
+    """Get the database dialect name from the migration URL."""
+    return make_url(get_migration_url()).get_backend_name()
 
 
 def render_item(type_, object_, autogen_context):
@@ -74,7 +80,7 @@ def process_revision_directives(context, revision, directives):
 
 def run_migrations_offline() -> None:
     '''Run migrations in 'offline' mode'''
-    url = settings.ALEMBIC_DB_URL
+    url = get_migration_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -93,7 +99,7 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     '''Run migrations in 'online' mode'''
-    url = settings.ALEMBIC_DB_URL
+    url = get_migration_url()
     
     configuration = {
         "sqlalchemy.url": url,

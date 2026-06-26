@@ -301,9 +301,13 @@ async def setup_mfa(
     The user should scan the QR code with an authenticator app, then call
     ``/auth/mfa/verify`` with a code to enable MFA.
     """
-    secret, uri = await AuthService.setup_mfa(current_user)
+    secret, uri, qr_code_data_uri = await AuthService.setup_mfa(current_user)
     await db.commit()
-    return MfaSetupResponse(secret=secret, provisioning_uri=uri)
+    return MfaSetupResponse(
+        secret=secret,
+        provisioning_uri=uri,
+        qr_code_data_uri=qr_code_data_uri,
+    )
 
 
 @router.post("/mfa/verify", response_model=UserResponse)

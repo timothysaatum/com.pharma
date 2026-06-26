@@ -7,6 +7,7 @@ import { motion } from "framer-motion";
 import { X, Package, AlertCircle, ChevronDown, ShieldAlert, FolderPlus } from "lucide-react";
 import { drugApi } from "@/api/drugs";
 import { useAuthStore } from "@/stores/authStore";
+import { canUser } from "@/hooks/usePermissions";
 import { useCategoryTree } from "@/hooks/useCategories";
 import { parseApiError } from "@/api/client";
 import { DrugCategoryModal } from "@/components/drugs/DrugCategoryModal";
@@ -109,7 +110,10 @@ function renderCategoryOptions(
 export function DrugForm({ drug, onSuccess, onCancel }: DrugFormProps) {
     const { user } = useAuthStore();
     const isEdit = !!drug;
-    const canEdit = user?.is_super_admin || (user?.assigned_branches.length ?? 0) === 0 || user?.roles.some(r => r.permissions.includes("manage_drugs") || r.permissions.includes("*"));
+    const canEdit = !!user && (
+        (user?.assigned_branches.length ?? 0) === 0 ||
+        canUser(user, "manage_drugs")
+    );
 
     // FIX: use tree instead of flat list so hierarchy is visible in the picker
     const { tree: categoryTree, invalidate: invalidateCategories } = useCategoryTree();

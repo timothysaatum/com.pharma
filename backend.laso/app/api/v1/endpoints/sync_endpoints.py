@@ -27,6 +27,11 @@ from app.services.sync.sync_service import SyncService
 router = APIRouter(prefix="/sync", tags=["Offline Sync"])
 
 
+def _user_can_sync_branch(current_user: User, branch_id) -> bool:
+    assigned = {str(value) for value in (current_user.assigned_branches or [])}
+    return str(branch_id) in assigned
+
+
 @router.post(
     "/pull",
     response_model=PullResponse,
@@ -55,7 +60,7 @@ async def pull(
     db: AsyncSession = Depends(get_db),
 ) -> PullResponse:
     # Verify the user has access to the requested branch
-    if str(request.branch_id) not in (current_user.assigned_branches or []):
+    if not _user_can_sync_branch(current_user, request.branch_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this branch.",
@@ -99,23 +104,18 @@ async def push(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PushResponse:
-    if str(request.branch_id) not in (current_user.assigned_branches or []):
+    if not _user_can_sync_branch(current_user, request.branch_id):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this branch.",
         )
 
-    response = await SyncService.push(
+    return await SyncService.push(
         db=db,
         request=request,
         organization_id=current_user.organization_id,
         pushed_by=current_user.id,
     )
-
-    # Commit all accepted records in one transaction
-    await db.commit()
-
-    return response
 
 
 @router.get(

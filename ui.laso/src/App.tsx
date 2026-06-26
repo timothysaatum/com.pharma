@@ -1,24 +1,25 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
 import { syncEngine } from "@/lib/syncEngine";
 import { AppShell } from "@/components/layout/AppShell";
 import { UpdateManager } from "@/components/layout/UpdateManager";
-import OnboardingPage from "@/pages/OnboardingPage";
-import LoginPage from "@/pages/LoginPage";
-import SetupRequiredPage from "@/pages/SetupRequiredPage";
-import POSPage from "@/pages/POSPage";
-import CustomersPage from "@/pages/CustomersPage";
-import SalesHistoryPage from "@/pages/SalesHistoryPage";
-import PrescriptionsPage from "@/pages/PrescriptionsPage";
-import SettingsPage from "@/pages/SettingsPage";
-import UsersPage from "@/pages/UsersPage";
-import ReportsPage from "@/pages/ReportsPage";
-import AdminPage from "@/pages/AdminPage";
-import AuditLogPage from "@/pages/AuditLogPage";
 import { getHomePath } from "@/lib/routes";
+
+const OnboardingPage = lazy(() => import("@/pages/OnboardingPage"));
+const LoginPage = lazy(() => import("@/pages/LoginPage"));
+const SetupRequiredPage = lazy(() => import("@/pages/SetupRequiredPage"));
+const POSPage = lazy(() => import("@/pages/POSPage"));
+const CustomersPage = lazy(() => import("@/pages/CustomersPage"));
+const SalesHistoryPage = lazy(() => import("@/pages/SalesHistoryPage"));
+const PrescriptionsPage = lazy(() => import("@/pages/PrescriptionsPage"));
+const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
+const UsersPage = lazy(() => import("@/pages/UsersPage"));
+const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
+const AdminPage = lazy(() => import("@/pages/AdminPage"));
+const AuditLogPage = lazy(() => import("@/pages/AuditLogPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -225,7 +226,14 @@ function AppRoutes() {
 
   return (
     <SyncGate>
-      <Routes>
+      <Suspense
+        fallback={
+          <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+            <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+          </div>
+        }
+      >
+        <Routes>
         {/* ── Public / setup ── */}
 
         <Route
@@ -371,7 +379,8 @@ function AppRoutes() {
           element={<Navigate to={isReady ? getHomePath(user) : "/login"} replace />}
         />
         <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+        </Routes>
+      </Suspense>
     </SyncGate>
   );
 }

@@ -21,7 +21,7 @@ import { syncApi } from "@/api/sync";
 import {
     getDb,
     getLastSyncAt, setLastSyncAt,
-    getPendingQueue, getPendingConflicts,
+    getPendingQueue, getPendingConflicts, getPendingFailures, resetPendingFailures,
     dequeue, markQueueError, markQueueConflict, clearQueueConflict,
     getPendingCount,
 } from "@/lib/localDb";
@@ -33,7 +33,7 @@ import type {
     PushResponse,
     SyncStatus,
 } from "@/types";
-import type { QueuedConflict } from "@/lib/localDb";
+import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
 const DEFAULT_SYNC_TABLES = [
     "drugs",
@@ -70,6 +70,7 @@ type StatusListener = (
 
 class SyncEngine {
     private branchId: string | null = null;
+    private organizationId: string | null = null;
     private intervalId: ReturnType<typeof setInterval> | null = null;
     private listeners: StatusListener[] = [];
     private _status: SyncStatus = "idle";
@@ -83,21 +84,40 @@ class SyncEngine {
 
     // Pending conflict records that need manual resolution
     pendingConflicts: QueuedConflict[] = [];
+    pendingFailures: QueuedFailure[] = [];
 
     // ── Lifecycle ────────────────────────────────────────────────────
 
-    /** Call once after login with the active branch. */
-    start(branchId: string, intervalMs = 30_000): void {
-        if (this.branchId === branchId && this.intervalId) {
+    /** Call once after login with the active branch and organization. */
+    start(
+        branchId: string,
+        organizationIdOrIntervalMs?: string | number | null,
+        intervalMs = 30_000
+    ): void {
+        const organizationId =
+            typeof organizationIdOrIntervalMs === "number"
+                ? null
+                : organizationIdOrIntervalMs ?? null;
+        const effectiveIntervalMs =
+            typeof organizationIdOrIntervalMs === "number"
+                ? organizationIdOrIntervalMs
+                : intervalMs;
+
+        if (
+            this.branchId === branchId
+            && this.organizationId === organizationId
+            && this.intervalId
+        ) {
             return;
         }
         this.stop();
         this.branchId = branchId;
+        this.organizationId = organizationId;
 
         window.addEventListener("online", this._onOnline);
         window.addEventListener("offline", this._onOffline);
 
-        void this.loadPersistedConflicts();
+        void this.loadPersistedQueueState();
 
         if (navigator.onLine) {
             this.sync();
@@ -109,7 +129,7 @@ class SyncEngine {
             if (navigator.onLine && !this._isSyncing) {
                 this.sync();
             }
-        }, intervalMs);
+        }, effectiveIntervalMs);
     }
 
     /** Call on logout or branch switch. */
@@ -121,13 +141,39 @@ class SyncEngine {
         window.removeEventListener("online", this._onOnline);
         window.removeEventListener("offline", this._onOffline);
         this.branchId = null;
-        this.setStatus("idle");
+        this.organizationId = null;
+        this.pendingConflicts = [];
+        this.pendingFailures = [];
+        this._status = "idle";
+        this.notify(0, null);
     }
 
     /** Subscribe to sync status changes. Returns an unsubscribe function. */
     subscribe(fn: StatusListener): () => void {
+        let active = true;
+        const branchId = this.branchId;
+        const organizationId = this.organizationId;
+        const scope = this.queueScope();
         this.listeners.push(fn);
-        return () => { this.listeners = this.listeners.filter((l) => l !== fn); };
+        if (!this.hasActiveQueueScope()) {
+            fn(this._status, 0, null);
+            return () => {
+                active = false;
+                this.listeners = this.listeners.filter((l) => l !== fn);
+            };
+        }
+        void getPendingCount(scope).then((count) => {
+            getLastSyncAt(undefined, branchId ?? undefined).then((last) => {
+                if (active && this.listeners.includes(fn)) {
+                    if (branchId !== this.branchId || organizationId !== this.organizationId) return;
+                    fn(this._status, count, last);
+                }
+            });
+        });
+        return () => {
+            active = false;
+            this.listeners = this.listeners.filter((l) => l !== fn);
+        };
     }
 
     get status(): SyncStatus { return this._status; }
@@ -140,12 +186,17 @@ class SyncEngine {
         this.setStatus("syncing");
 
         try {
-            const pushTimestamp = await this.push();
-            await this.pull(pushTimestamp ?? undefined);
+            const pushResult = await this.push();
+            await this.pull(pushResult.nextPullTimestamp ?? undefined);
+            await this.loadPersistedQueueState();
 
-            const pending = await getPendingCount();
+            const pending = await getPendingCount(this.queueScope());
             this.notify(pending);
-            this.setStatus("idle");
+            this.setStatus(
+                pushResult.hadFailures || this.pendingFailures.length > 0
+                    ? "error"
+                    : "idle"
+            );
         } catch (err) {
             console.error("[SyncEngine] Sync failed:", err);
             this.logError(err, "Sync failed");
@@ -159,15 +210,23 @@ class SyncEngine {
         }
     }
 
+    async retryFailed(): Promise<void> {
+        if (!this.branchId || this._isSyncing) return;
+        await resetPendingFailures(this.queueScope());
+        await this.loadPersistedQueueState();
+        await this.sync();
+    }
+
     // ── PUSH ─────────────────────────────────────────────────────────
 
-    private async push(): Promise<string | null> {
+    private async push(): Promise<{ nextPullTimestamp: string | null; hadFailures: boolean }> {
         let lastPullTimestamp: string | null = null;
+        let hadFailures = false;
         let hasMore = true;
         const batchSize = 100;
 
         while (hasMore) {
-            const queue = await getPendingQueue(batchSize, MAX_PUSH_ATTEMPTS);
+            const queue = await getPendingQueue(batchSize, MAX_PUSH_ATTEMPTS, this.queueScope());
             if (queue.length === 0) {
                 hasMore = false;
                 break;
@@ -222,18 +281,18 @@ class SyncEngine {
             }
 
             if (response.total_conflicts > 0) {
-                await this.loadPersistedConflicts();
+                await this.loadPersistedQueueState();
             }
 
             // Failed → increment attempt counter; items exceeding MAX_PUSH_ATTEMPTS
             // are dead-lettered (excluded by getPendingQueue's attempts < MAX_PUSH_ATTEMPTS)
             let deadLettered = 0;
             for (const item of response.failed) {
-                if (item.error) {
-                    const attempts = await markQueueError(item.table_name, item.local_id, item.error);
-                    if (attempts >= MAX_PUSH_ATTEMPTS) {
-                        deadLettered++;
-                    }
+                hadFailures = true;
+                const error = item.error?.trim() || "Server rejected the record without an error message.";
+                const attempts = await markQueueError(item.table_name, item.local_id, error);
+                if (attempts >= MAX_PUSH_ATTEMPTS) {
+                    deadLettered++;
                 }
             }
             if (deadLettered > 0) {
@@ -244,6 +303,7 @@ class SyncEngine {
             }
 
             if (response.total_conflicts > 0 || response.total_failed > 0) {
+                await this.loadPersistedQueueState();
                 console.warn(
                     `[SyncEngine] Push: ${response.total_accepted} accepted, ` +
                     `${response.total_conflicts} conflicts, ${response.total_failed} failed`
@@ -256,7 +316,7 @@ class SyncEngine {
             }
         }
 
-        return lastPullTimestamp;
+        return { nextPullTimestamp: lastPullTimestamp, hadFailures };
     }
 
     // ── PULL ─────────────────────────────────────────────────────────
@@ -361,6 +421,9 @@ class SyncEngine {
                         if (c === "total_amount") return 0;
                         if (c === "insurance_verified") return 0;
                         if (c === "requires_prescription") return 0;
+                        if (c === "requires_verification") return 0;
+                        if (c === "requires_approval") return 0;
+                        if (c === "requires_preauthorization") return 0;
                         if (c === "receipt_printed") return 0;
                         if (c === "receipt_emailed") return 0;
                         if (c === "status") return "completed";
@@ -420,6 +483,10 @@ class SyncEngine {
                 "discount_percentage", "applies_to_prescription_only",
                 "applies_to_otc", "applies_to_all_branches",
                 "applicable_branch_ids", "effective_from", "effective_to",
+                "requires_verification", "requires_approval",
+                "daily_usage_limit", "per_customer_usage_limit",
+                "insurance_provider_id", "requires_preauthorization",
+                "minimum_purchase_amount", "maximum_purchase_amount",
                 "status", "is_active", "copay_amount", "copay_percentage",
                 "is_deleted", "sync_status", "sync_version",
                 "synced_at", "updated_at", "created_at",
@@ -533,10 +600,18 @@ class SyncEngine {
         }
     }
 
-    private async loadPersistedConflicts(): Promise<void> {
-        this.pendingConflicts = await getPendingConflicts();
+    private async loadPersistedQueueState(): Promise<void> {
+        if (!this.hasActiveQueueScope()) {
+            this.pendingConflicts = [];
+            this.pendingFailures = [];
+            this.notify(0, null);
+            return;
+        }
+        const scope = this.queueScope();
+        this.pendingConflicts = await getPendingConflicts(scope);
+        this.pendingFailures = await getPendingFailures(MAX_PUSH_ATTEMPTS, scope);
         this.notify(
-            await getPendingCount(),
+            await getPendingCount(scope),
             await getLastSyncAt(undefined, this.branchId ?? undefined)
         );
     }
@@ -570,7 +645,7 @@ class SyncEngine {
             await clearQueueConflict(conflict.table_name, conflict.record_id);
         }
 
-        await this.loadPersistedConflicts();
+        await this.loadPersistedQueueState();
         if (navigator.onLine && !this._isSyncing) {
             this.sync();
         }
@@ -604,9 +679,31 @@ class SyncEngine {
 
     private setStatus(s: SyncStatus): void {
         this._status = s;
-        getPendingCount().then((count) => {
-            getLastSyncAt(undefined, this.branchId ?? undefined).then((last) => this.notify(count, last));
+        if (!this.hasActiveQueueScope()) {
+            this.notify(0, null);
+            return;
+        }
+
+        const branchId = this.branchId;
+        const organizationId = this.organizationId;
+        const scope = this.queueScope();
+        getPendingCount(scope).then((count) => {
+            getLastSyncAt(undefined, branchId ?? undefined).then((last) => {
+                if (branchId !== this.branchId || organizationId !== this.organizationId) return;
+                this.notify(count, last);
+            });
         });
+    }
+
+    private hasActiveQueueScope(): boolean {
+        return Boolean(this.organizationId || this.branchId);
+    }
+
+    private queueScope(): QueueScope {
+        return {
+            organizationId: this.organizationId ?? undefined,
+            branchId: this.branchId ?? undefined,
+        };
     }
 
     private notify(pendingCount = 0, lastSync: string | null = null): void {

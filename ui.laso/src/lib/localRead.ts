@@ -786,20 +786,26 @@ export const localRead = {
       type: row.contract_type as any,
       discount_percentage: row.discount_percentage,
       is_default: toBoolean(row.is_default_contract),
-      requires_verification: false,
-      requires_approval: false,
+      requires_verification: toBoolean(row.requires_verification),
+      requires_approval: toBoolean(row.requires_approval),
       display: row.contract_name,
-      warning: null,
+      warning: toBoolean(row.requires_approval)
+        ? "Manager approval required"
+        : toBoolean(row.requires_verification)
+          ? "Verify insurance card"
+          : toBoolean(row.requires_preauthorization)
+            ? "Pre-authorization required"
+            : null,
       copay_amount: row.copay_amount === null ? null : Number(row.copay_amount),
       copay_percentage: row.copay_percentage === null ? null : Number(row.copay_percentage),
-      requires_preauthorization: false,
-      insurance_provider_id: null,
-      daily_usage_limit: null,
-      per_customer_usage_limit: null,
+      requires_preauthorization: toBoolean(row.requires_preauthorization),
+      insurance_provider_id: row.insurance_provider_id,
+      daily_usage_limit: row.daily_usage_limit === null ? null : Number(row.daily_usage_limit),
+      per_customer_usage_limit: row.per_customer_usage_limit === null ? null : Number(row.per_customer_usage_limit),
       applies_to_prescription_only: toBoolean(row.applies_to_prescription_only),
       applies_to_otc: toBoolean(row.applies_to_otc),
-      minimum_purchase_amount: null,
-      maximum_purchase_amount: null,
+      minimum_purchase_amount: row.minimum_purchase_amount === null ? null : Number(row.minimum_purchase_amount),
+      maximum_purchase_amount: row.maximum_purchase_amount === null ? null : Number(row.maximum_purchase_amount),
     }));
   },
 

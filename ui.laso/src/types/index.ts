@@ -173,6 +173,7 @@ export type UserResponse = User;
 export interface MfaSetupResponse {
     secret: string;
     provisioning_uri: string;
+    qr_code_data_uri: string;
 }
 
 export interface MfaVerifyRequest {
@@ -805,7 +806,8 @@ export type ContractType =
     | "staff"
     | "senior_citizen"
     | "standard"
-    | "wholesale";
+    | "wholesale"
+    | "promotional";
 
 export type ContractStatus = "draft" | "active" | "suspended" | "expired" | "cancelled";
 export type DiscountType = "percentage" | "fixed_amount" | "custom";
@@ -833,10 +835,14 @@ export interface PriceContract extends TimestampFields, SyncFields, SoftDeleteFi
     effective_from: string;
     effective_to: string | null;
     requires_verification: boolean;
+    requires_approval: boolean;
+    daily_usage_limit: number | null;
+    per_customer_usage_limit: number | null;
     allowed_user_roles: string[];
     insurance_provider_id: string | null;
     copay_amount: number | null;
     copay_percentage: number | null;
+    requires_preauthorization: boolean;
     status: ContractStatus;
     is_active: boolean;
     total_transactions: number;

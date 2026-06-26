@@ -193,6 +193,25 @@ class PriceContract(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         nullable=False,
         comment="Require verification (e.g., insurance card scan) before applying"
     )
+
+    requires_approval: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="Require manager approval before applying during checkout"
+    )
+
+    daily_usage_limit: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Maximum number of completed sales that may use this contract per day"
+    )
+
+    per_customer_usage_limit: Mapped[Optional[int]] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Maximum completed sales a single customer may process with this contract"
+    )
         
     allowed_user_roles: Mapped[List[str]] = mapped_column(
         ARRAY(String),
@@ -218,6 +237,13 @@ class PriceContract(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     copay_percentage: Mapped[Optional[float]] = mapped_column(
         Numeric(5, 2),
         comment="Percentage of price patient must pay"
+    )
+
+    requires_preauthorization: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+        comment="Require a pre-authorization number before applying this contract"
     )
     
     # ==================== AUTHORIZATION & AUDIT ====================
@@ -292,7 +318,7 @@ class PriceContract(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     
     __table_args__ = (
         CheckConstraint(
-            "contract_type IN ('insurance', 'corporate', 'staff', 'senior_citizen', 'standard', 'wholesale')",
+            "contract_type IN ('insurance', 'corporate', 'staff', 'senior_citizen', 'standard', 'wholesale', 'promotional')",
             name='check_contract_type'
         ),
         CheckConstraint(
@@ -300,7 +326,7 @@ class PriceContract(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
             name='check_discount_type'
         ),
         CheckConstraint(
-            "discount_percentage >= 0 AND discount_percentage <= 100",
+            "discount_percentage >= 0 AND (discount_type != 'percentage' OR discount_percentage <= 100)",
             name='check_discount_percentage_range'
         ),
         CheckConstraint(
@@ -310,6 +336,14 @@ class PriceContract(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         CheckConstraint(
             "effective_to IS NULL OR effective_to >= effective_from",
             name='check_contract_dates'
+        ),
+        CheckConstraint(
+            "daily_usage_limit IS NULL OR daily_usage_limit > 0",
+            name='check_contract_daily_usage_limit'
+        ),
+        CheckConstraint(
+            "per_customer_usage_limit IS NULL OR per_customer_usage_limit > 0",
+            name='check_contract_customer_usage_limit'
         ),
         
         # Indexes for performance

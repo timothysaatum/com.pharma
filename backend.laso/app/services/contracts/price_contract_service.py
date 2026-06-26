@@ -26,7 +26,7 @@ Design principles
   the creator user has been deleted.
 """
 from __future__ import annotations
-
+from decimal import Decimal
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
@@ -36,6 +36,7 @@ from sqlalchemy import and_, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.inventory.inventory_model import Drug
 from app.models.pharmacy.pharmacy_model import Branch
 from app.models.pricing.pricing_model import (
     InsuranceProvider,
@@ -48,6 +49,10 @@ from app.schemas.price_contract_schemas import (
     PriceContractCreate,
     PriceContractFilters,
     PriceContractUpdate,
+    VerifyContractEligibilityRequest,
+)
+from app.services.contracts.contract_verification_tokens import (
+    create_contract_verification_token,
 )
 
 # ---------------------------------------------------------------------------
@@ -191,10 +196,14 @@ class PriceContractService:
             effective_from=contract_data.effective_from,
             effective_to=contract_data.effective_to,
             requires_verification=contract_data.requires_verification,
+            requires_approval=contract_data.requires_approval,
+            daily_usage_limit=contract_data.daily_usage_limit,
+            per_customer_usage_limit=contract_data.per_customer_usage_limit,
             allowed_user_roles=contract_data.allowed_user_roles,
             insurance_provider_id=contract_data.insurance_provider_id,
             copay_amount=contract_data.copay_amount,
             copay_percentage=contract_data.copay_percentage,
+            requires_preauthorization=contract_data.requires_preauthorization,
             status=contract_data.status,
             is_active=contract_data.is_active,
             created_by=user.id,
@@ -265,6 +274,23 @@ class PriceContractService:
                         ),
                     )
                 )
+            if filters.requires_verification is not None:
+                query = query.where(
+                    PriceContract.requires_verification == filters.requires_verification
+                )
+            if filters.requires_approval is not None:
+                query = query.where(
+                    PriceContract.requires_approval == filters.requires_approval
+                )
+            if filters.min_usage_count is not None:
+                query = query.where(
+                    PriceContract.total_transactions >= filters.min_usage_count
+                )
+            if filters.used_in_last_days is not None:
+                cutoff = datetime.now(timezone.utc) - timedelta(
+                    days=filters.used_in_last_days
+                )
+                query = query.where(PriceContract.last_used_at >= cutoff)
             if filters.created_by:
                 query = query.where(PriceContract.created_by == filters.created_by)
 
@@ -416,12 +442,16 @@ class PriceContractService:
             "effective_from":           contract.effective_from.isoformat(),
             "effective_to":             contract.effective_to.isoformat() if contract.effective_to else None,
             "requires_verification":    contract.requires_verification,
+            "requires_approval":        contract.requires_approval,
+            "daily_usage_limit":        contract.daily_usage_limit,
+            "per_customer_usage_limit": contract.per_customer_usage_limit,
             "allowed_user_roles":       contract.allowed_user_roles,
             "insurance_provider_id":    str(contract.insurance_provider_id) if contract.insurance_provider_id else None,
             "insurance_provider_name":  contract.insurance_provider.name if contract.insurance_provider else None,
             "insurance_provider_code":  contract.insurance_provider.code if contract.insurance_provider else None,
             "copay_amount":             contract.copay_amount,
             "copay_percentage":         contract.copay_percentage,
+            "requires_preauthorization": contract.requires_preauthorization,
             "status":                   contract.status,
             "is_active":                contract.is_active,
             "total_transactions":       contract.total_transactions,
@@ -509,6 +539,16 @@ class PriceContractService:
                     "Cannot modify pricing fields for a contract with existing "
                     "transactions. Create a new contract version instead."
                 ),
+            )
+
+        if (
+            "discount_percentage" in update_dict
+            and contract.discount_type == "percentage"
+            and update_dict["discount_percentage"] > 100
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Percentage discount cannot exceed 100%.",
             )
 
         # -- Date validation: resolve from against the new value if changing --
@@ -819,6 +859,267 @@ class PriceContractService:
         ]
 
     @staticmethod
+    async def verify_contract_eligibility(
+        db: AsyncSession,
+        request: VerifyContractEligibilityRequest,
+        user: User,
+    ) -> Dict:
+        """
+        Validate whether a contract can be used for a POS sale.
+
+        When the contract needs verification or approval, this returns a
+        short-lived token tied to the exact sale context. ``process_sale``
+        validates the token again before applying the contract.
+        """
+        today = date.today()
+        contract = (await db.execute(
+            select(PriceContract)
+            .options(selectinload(PriceContract.insurance_provider))
+            .where(
+                PriceContract.id == request.contract_id,
+                PriceContract.organization_id == user.organization_id,
+                PriceContract.is_deleted == False,
+                PriceContract.is_active == True,
+                PriceContract.status == "active",
+            )
+        )).scalar_one_or_none()
+        if not contract:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Price contract not found or not active.",
+            )
+
+        branch = (await db.execute(
+            select(Branch).where(
+                Branch.id == request.branch_id,
+                Branch.organization_id == user.organization_id,
+                Branch.is_deleted == False,
+                Branch.is_active == True,
+            )
+        )).scalar_one_or_none()
+        branch_eligible = branch is not None and (
+            contract.applies_to_all_branches
+            or str(request.branch_id) in [str(bid) for bid in (contract.applicable_branch_ids or [])]
+        )
+        branch_message = None if branch_eligible else "Contract is not valid at this branch."
+
+        date_eligible = contract.is_valid_for_date(today)
+        date_message = None
+        if not date_eligible:
+            date_message = (
+                f"Contract is valid from {contract.effective_from}"
+                if today < contract.effective_from
+                else f"Contract expired on {contract.effective_to}"
+            )
+
+        customer_required = contract.contract_type in ("insurance", "corporate", "wholesale")
+        customer_eligible = bool(request.customer_id) if customer_required else True
+        customer_message = (
+            f"{contract.contract_type.capitalize()} contracts require a registered customer."
+            if not customer_eligible
+            else None
+        )
+
+        amount_eligible = True
+        amount_message = None
+        if request.sale_amount is not None:
+            sale_amount = Decimal(str(request.sale_amount))
+            if (
+                contract.minimum_purchase_amount is not None
+                and sale_amount < Decimal(str(contract.minimum_purchase_amount))
+            ):
+                amount_eligible = False
+                amount_message = (
+                    f"Minimum purchase of {contract.minimum_purchase_amount} is required."
+                )
+            if (
+                contract.maximum_purchase_amount is not None
+                and sale_amount > Decimal(str(contract.maximum_purchase_amount))
+            ):
+                amount_eligible = False
+                amount_message = (
+                    f"Purchase total exceeds contract maximum of {contract.maximum_purchase_amount}."
+                )
+
+        user_role_eligible = True
+        user_role_message = None
+        if not user.is_super_admin and contract.allowed_user_roles:
+            user_role_ids = {str(role.id) for role in (user.roles or [])}
+            user_role_eligible = any(
+                role_id in contract.allowed_user_roles for role_id in user_role_ids
+            )
+            if not user_role_eligible:
+                user_role_message = "Your role is not permitted to apply this contract."
+
+        approval_eligible = True
+        if contract.requires_approval and not (
+            user.is_super_admin or user.has_permission("manage_pricing")
+        ):
+            approval_eligible = False
+            user_role_eligible = False
+            user_role_message = "Manager approval is required for this contract."
+
+        limit_eligible = True
+        if contract.daily_usage_limit:
+            start_of_day = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+            end_of_day = start_of_day + timedelta(days=1)
+            daily_count = (await db.execute(
+                select(func.count())
+                .select_from(Sale)
+                .where(
+                    Sale.price_contract_id == contract.id,
+                    Sale.organization_id == user.organization_id,
+                    Sale.status.in_(["completed", "refunded"]),
+                    Sale.created_at >= start_of_day,
+                    Sale.created_at < end_of_day,
+                )
+            )).scalar() or 0
+            if daily_count >= contract.daily_usage_limit:
+                limit_eligible = False
+                amount_eligible = False
+                amount_message = (
+                    f"Daily usage limit reached for '{contract.contract_name}'."
+                )
+
+        if contract.per_customer_usage_limit:
+            if not request.customer_id:
+                limit_eligible = False
+                customer_eligible = False
+                customer_message = (
+                    "A registered customer is required for contracts with per-customer limits."
+                )
+            else:
+                customer_count = (await db.execute(
+                    select(func.count())
+                    .select_from(Sale)
+                    .where(
+                        Sale.price_contract_id == contract.id,
+                        Sale.organization_id == user.organization_id,
+                        Sale.customer_id == request.customer_id,
+                        Sale.status.in_(["completed", "refunded"]),
+                    )
+                )).scalar() or 0
+                if customer_count >= contract.per_customer_usage_limit:
+                    limit_eligible = False
+                    customer_eligible = False
+                    customer_message = (
+                        f"Customer usage limit reached for '{contract.contract_name}'."
+                    )
+
+        eligible_drugs: List[Dict] = []
+        ineligible_drugs: List[Dict] = []
+        if request.drug_ids:
+            drugs = {
+                drug.id: drug
+                for drug in (await db.execute(
+                    select(Drug).where(
+                        Drug.id.in_(request.drug_ids),
+                        Drug.organization_id == user.organization_id,
+                        Drug.is_deleted == False,
+                        Drug.is_active == True,
+                    )
+                )).scalars().all()
+            }
+            for drug_id in request.drug_ids:
+                drug = drugs.get(drug_id)
+                if not drug:
+                    ineligible_drugs.append(
+                        {"drug_id": str(drug_id), "reason": "Drug not found or inactive."}
+                    )
+                    continue
+                drug_type = "prescription" if drug.requires_prescription else "otc"
+                if contract.is_applicable_to_drug(drug.id, drug_type, drug.category_id):
+                    eligible_drugs.append({"drug_id": str(drug.id), "name": drug.name})
+                else:
+                    ineligible_drugs.append(
+                        {"drug_id": str(drug.id), "name": drug.name, "reason": "Contract does not apply to this drug."}
+                    )
+
+        requires_token = (
+            contract.requires_verification
+            or contract.contract_type == "insurance"
+            or contract.requires_approval
+        )
+        token_eligible = True
+        token_message = None
+        if requires_token and not request.drug_ids:
+            token_eligible = False
+            token_message = "Drug IDs are required to issue a contract verification token."
+
+        eligible = all(
+            [
+                branch_eligible,
+                date_eligible,
+                customer_eligible,
+                amount_eligible,
+                user_role_eligible,
+                approval_eligible,
+                limit_eligible,
+                token_eligible,
+                not ineligible_drugs,
+            ]
+        )
+
+        verification_token = None
+        verification_expires_at = None
+        if eligible and requires_token:
+            verification_token, verification_expires_at = create_contract_verification_token(
+                organization_id=user.organization_id,
+                contract_id=contract.id,
+                branch_id=request.branch_id,
+                customer_id=request.customer_id,
+                drug_ids=request.drug_ids,
+                user_id=user.id,
+            )
+
+        message = (
+            "Contract is eligible for this sale."
+            if eligible
+            else token_message
+            or customer_message
+            or branch_message
+            or date_message
+            or amount_message
+            or user_role_message
+            or "Contract is not eligible for this sale."
+        )
+
+        return {
+            "eligible": eligible,
+            "message": message,
+            "contract_name": contract.contract_name,
+            "discount_percentage": Decimal(str(contract.discount_percentage)),
+            "customer_eligible": customer_eligible,
+            "customer_message": customer_message,
+            "branch_eligible": branch_eligible,
+            "branch_message": branch_message,
+            "date_eligible": date_eligible,
+            "date_message": date_message,
+            "amount_eligible": amount_eligible,
+            "amount_message": amount_message,
+            "user_role_eligible": user_role_eligible,
+            "user_role_message": user_role_message,
+            "eligible_drugs": eligible_drugs,
+            "ineligible_drugs": ineligible_drugs,
+            "requires_verification": contract.requires_verification,
+            "requires_approval": contract.requires_approval,
+            "requires_preauthorization": contract.requires_preauthorization,
+            "insurance_details": (
+                {
+                    "provider_id": str(contract.insurance_provider_id),
+                    "provider_name": contract.insurance_provider.name
+                    if contract.insurance_provider else None,
+                }
+                if contract.contract_type == "insurance"
+                else None
+            ),
+            "copay_amount": contract.copay_amount,
+            "copay_percentage": contract.copay_percentage,
+            "verification_token": verification_token,
+            "verification_expires_at": verification_expires_at,
+        }
+
+    @staticmethod
     def _format_contract_for_pos(contract: PriceContract) -> Dict:
         """Format a contract for the POS selection dropdown."""
         if contract.is_default_contract:
@@ -836,6 +1137,33 @@ class PriceContractService:
             "discount_percentage":  float(contract.discount_percentage),
             "is_default":           contract.is_default_contract,
             "requires_verification": contract.requires_verification,
+            "requires_approval":     contract.requires_approval,
+            "requires_preauthorization": contract.requires_preauthorization,
+            "daily_usage_limit":     contract.daily_usage_limit,
+            "per_customer_usage_limit": contract.per_customer_usage_limit,
+            "copay_amount":          float(contract.copay_amount) if contract.copay_amount is not None else None,
+            "copay_percentage":      float(contract.copay_percentage) if contract.copay_percentage is not None else None,
+            "insurance_provider_id": str(contract.insurance_provider_id) if contract.insurance_provider_id else None,
+            "applies_to_prescription_only": contract.applies_to_prescription_only,
+            "applies_to_otc":        contract.applies_to_otc,
+            "minimum_purchase_amount": (
+                float(contract.minimum_purchase_amount)
+                if contract.minimum_purchase_amount is not None
+                else None
+            ),
+            "maximum_purchase_amount": (
+                float(contract.maximum_purchase_amount)
+                if contract.maximum_purchase_amount is not None
+                else None
+            ),
             "display":              display,
-            "warning":              "Verify insurance card" if contract.requires_verification else None,
+            "warning": (
+                "Manager approval required"
+                if contract.requires_approval
+                else "Verify insurance card"
+                if contract.requires_verification
+                else "Pre-authorization required"
+                if contract.requires_preauthorization
+                else None
+            ),
         }

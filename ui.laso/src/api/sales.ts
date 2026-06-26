@@ -188,6 +188,7 @@ export const salesApi = {
             payment_method?: string;
             customer_id?: string;
             cashier_id?: string;
+            search?: string;
         } = {},
         signal?: AbortSignal
     ): Promise<PaginatedResponse<Sale>> => {

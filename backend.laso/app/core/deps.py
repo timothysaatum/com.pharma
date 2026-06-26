@@ -10,7 +10,9 @@ import uuid
 from app.db.dependencies import get_db
 from app.core.security import decode_token
 from app.models.user.user_model import User, UserSession
+from app.core.config import get_settings
 
+settings = get_settings()
 
 # HTTP Bearer token scheme
 security = HTTPBearer(auto_error=False)
@@ -205,6 +207,18 @@ def require_any_permission(*permissions: str):
     return permission_checker
 
 
+async def require_super_admin(
+    current_user: User = Depends(get_current_user),
+) -> User:
+    """Require a platform-level super administrator."""
+    if not current_user.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Platform super administrator access required",
+        )
+    return current_user
+
+
 async def get_current_user_optional(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
     db: AsyncSession = Depends(get_db)
@@ -283,14 +297,14 @@ def get_client_ip(request: Request) -> str:
     Handles proxy headers
     """
     # Check for forwarded IP (when behind proxy)
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    
-    # Check for real IP header
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
     
     # Fall back to direct client
     return request.client.host if request.client else "unknown"

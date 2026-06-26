@@ -416,6 +416,13 @@ class SaleItem(Base, TimestampMixin):
         nullable=False,
         comment="Number of units sold"
     )
+
+    refunded_quantity: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Cumulative units refunded from this sale line"
+    )
     
     unit_price: Mapped[float] = mapped_column(
         Numeric(10, 2),
@@ -483,6 +490,10 @@ class SaleItem(Base, TimestampMixin):
     # ==================== RELATIONSHIPS ====================
     
     sale: Mapped["Sale"] = relationship(back_populates="items")
+    batch_allocations: Mapped[List["SaleItemBatchAllocation"]] = relationship(
+        back_populates="sale_item",
+        cascade="all, delete-orphan",
+    )
     
     # ==================== METHODS ====================
     
@@ -524,6 +535,8 @@ class SaleItem(Base, TimestampMixin):
     
     __table_args__ = (
         CheckConstraint("quantity > 0", name='check_sale_item_quantity'),
+        CheckConstraint("refunded_quantity >= 0", name='check_sale_item_refunded_quantity'),
+        CheckConstraint("refunded_quantity <= quantity", name='check_sale_item_refunded_not_exceed_quantity'),
         CheckConstraint("unit_price >= 0", name='check_sale_item_unit_price'),
         CheckConstraint("subtotal >= 0", name='check_sale_item_subtotal'),
         CheckConstraint("discount_amount >= 0", name='check_sale_item_discount'),
@@ -536,6 +549,91 @@ class SaleItem(Base, TimestampMixin):
         Index('idx_sale_item_drug', 'drug_id'),
         Index('idx_sale_item_date', 'created_at'),
         Index('idx_sale_item_batch', 'batch_id'),
+    )
+
+
+class SaleItemBatchAllocation(Base, TimestampMixin):
+    """
+    Exact batch allocation for a sale line.
+
+    ``SaleItem.batch_id`` remains as a backwards-compatible primary-batch
+    pointer. This table records the full FEFO split when a single sale line is
+    fulfilled from more than one batch.
+    """
+    __tablename__ = 'sale_item_batch_allocations'
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    sale_item_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('sale_items.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('branches.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    drug_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('drugs.id', ondelete='CASCADE'),
+        nullable=False,
+        index=True
+    )
+
+    batch_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('drug_batches.id', ondelete='SET NULL'),
+        nullable=True,
+        index=True
+    )
+
+    batch_number: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        comment="Batch number snapshot at sale time"
+    )
+
+    batch_expiry_date: Mapped[Optional[date]] = mapped_column(Date)
+
+    quantity: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Quantity fulfilled from this batch"
+    )
+
+    refunded_quantity: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        nullable=False,
+        comment="Cumulative units refunded from this batch allocation"
+    )
+
+    unit_cost_at_sale: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+    unit_price_at_sale: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+
+    sale_item: Mapped["SaleItem"] = relationship(back_populates="batch_allocations")
+
+    __table_args__ = (
+        CheckConstraint("quantity > 0", name='check_sale_item_batch_alloc_qty'),
+        CheckConstraint(
+            "refunded_quantity >= 0",
+            name='check_sale_item_batch_alloc_refunded_qty',
+        ),
+        CheckConstraint(
+            "refunded_quantity <= quantity",
+            name='check_sale_item_batch_alloc_refunded_not_exceed',
+        ),
+        Index('idx_sale_item_batch_alloc_item', 'sale_item_id'),
+        Index('idx_sale_item_batch_alloc_batch', 'batch_id'),
+        Index('idx_sale_item_batch_alloc_branch_drug', 'branch_id', 'drug_id'),
     )
 
 

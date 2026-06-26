@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import Dict, List, Optional
 import uuid
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer.customer_model import Customer
@@ -79,11 +79,9 @@ async def generate_sale_number(db: AsyncSession, branch_code: str) -> str:
     Format : {BRANCH_CODE}-{YYYYMMDD}-{SEQUENCE:04d}
     Example: BR001-20260321-0001
 
-    The sequence resets each day per branch.  The counter is derived from a
-    COUNT query on existing sale numbers with the same prefix — this is safe
-    under concurrent load because ``process_sale`` holds a savepoint and the
-    ``sale_number`` column has a UNIQUE constraint, so a duplicate will cause
-    a constraint error that triggers a retry rather than silent corruption.
+    The sequence resets each day per branch. The next value is derived from
+    the latest sale number for the branch/date prefix instead of counting rows,
+    which keeps generation fast as sales history grows.
 
     Args:
         db:          Async SQLAlchemy session.
@@ -98,12 +96,21 @@ async def generate_sale_number(db: AsyncSession, branch_code: str) -> str:
     prefix    = f"{branch_code}-{today_str}"
 
     result = await db.execute(
-        select(func.count(Sale.id)).where(
-            Sale.sale_number.like(f"{prefix}%")
-        )
+        select(Sale.sale_number)
+        .where(Sale.sale_number.like(f"{prefix}-%"))
+        .order_by(Sale.sale_number.desc())
+        .limit(1)
     )
-    count = result.scalar() or 0
-    return f"{prefix}-{str(count + 1).zfill(4)}"
+    latest_sale_number = result.scalar_one_or_none()
+
+    next_sequence = 1
+    if latest_sale_number:
+        try:
+            next_sequence = int(latest_sale_number.rsplit("-", 1)[1]) + 1
+        except (IndexError, ValueError):
+            next_sequence = 1
+
+    return f"{prefix}-{next_sequence:04d}"
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +155,8 @@ async def build_sale_with_details(
         customer_full_name,
         customer_phone,
         customer_email,
-        customer_loyalty_points,
         customer_loyalty_tier,
-    ) = (None, None, None, None, None)
+    ) = (None, None, None, None)
 
     if sale.customer_id:
         cust_res = await db.execute(
@@ -164,31 +170,18 @@ async def build_sale_with_details(
             )
             customer_phone          = customer.phone
             customer_email          = customer.email
-            customer_loyalty_points = customer.loyalty_points
             customer_loyalty_tier   = customer.loyalty_tier
 
     items_res = await db.execute(
-        select(SaleItem).where(SaleItem.sale_id == sale.id)
+        select(SaleItem, Drug, DrugBatch.batch_number)
+        .join(Drug, Drug.id == SaleItem.drug_id)
+        .outerjoin(DrugBatch, DrugBatch.id == SaleItem.batch_id)
+        .where(SaleItem.sale_id == sale.id)
     )
-    items = items_res.scalars().all()
+    item_rows = items_res.all()
 
     items_with_details: List[SaleItemWithDetails] = []
-    for item in items:
-        drug_res = await db.execute(
-            select(Drug).where(Drug.id == item.drug_id)
-        )
-        drug = drug_res.scalar_one()
-
-        # Resolve the human-readable batch_number for display purposes
-        batch_number: Optional[str] = None
-        if item.batch_id:
-            bn_res = await db.execute(
-                select(DrugBatch.batch_number).where(
-                    DrugBatch.id == item.batch_id
-                )
-            )
-            batch_number = bn_res.scalar_one_or_none()
-
+    for item, drug, batch_number in item_rows:
         item_dict = {
             k: v
             for k, v in item.__dict__.items()

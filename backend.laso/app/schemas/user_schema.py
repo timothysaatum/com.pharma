@@ -212,9 +212,10 @@ class RefreshTokenRequest(BaseSchema):
 # ── MFA / TOTP ─────────────────────────────────────────────────────────
 
 class MfaSetupResponse(BaseSchema):
-    """Returned when setting up MFA — contains the secret and provisioning URI."""
+    """Returned when setting up MFA — contains QR and manual setup details."""
     secret: str = Field(..., description="Base32 TOTP secret")
     provisioning_uri: str = Field(..., description="otpauth:// URI for QR code")
+    qr_code_data_uri: str = Field(..., description="PNG data URL for scanning the TOTP QR code")
 
 
 class MfaVerifyRequest(BaseSchema):
@@ -225,4 +226,3 @@ class MfaVerifyRequest(BaseSchema):
 class MfaDisableRequest(BaseSchema):
     """Disable MFA — requires current password for security."""
     password: str = Field(..., min_length=8)
-

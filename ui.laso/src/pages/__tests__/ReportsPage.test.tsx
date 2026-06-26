@@ -34,6 +34,18 @@ vi.mock('@/api/reports', () => ({
   }
 }));
 
+vi.mock('@/api/branches', () => ({
+  branchApi: {
+    list: () => Promise.resolve({ items: [] }),
+  },
+}));
+
+vi.mock('@/api/contracts', () => ({
+  contractsApi: {
+    list: () => Promise.resolve({ contracts: [] }),
+  },
+}));
+
 import ReportsPage from '../ReportsPage';
 
 const queryClient = new QueryClient();

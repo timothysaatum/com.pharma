@@ -50,6 +50,7 @@ from app.models.pharmacy.pharmacy_model import Branch
 from app.models.sales.sales_model import PurchaseOrder, PurchaseOrderItem, Supplier
 from app.models.system_md.sys_models import AuditLog
 from app.models.user.user_model import User
+from app.services.inventory.inventory_service import InventoryService
 from app.schemas.purchase_order_schemas import (
     PurchaseOrderCreate,
     PurchaseOrderItemCreate,
@@ -654,23 +655,22 @@ class PurchaseOrderService:
                     )
 
                 # ── 2. Create DrugBatch ──────────────────────────────────────
-                db.add(
-                    DrugBatch(
-                        id=uuid.uuid4(),
-                        branch_id=po.branch_id,
-                        drug_id=po_item.drug_id,
-                        batch_number=item_receive.batch_number,
-                        quantity=item_receive.quantity_received,
-                        remaining_quantity=item_receive.quantity_received,
-                        manufacturing_date=item_receive.manufacturing_date,
-                        expiry_date=item_receive.expiry_date,
-                        cost_price=po_item.unit_cost,
-                        supplier=po.supplier.name,
-                        purchase_order_id=po.id,
-                        created_at=_now(),
-                        updated_at=_now(),
-                    )
+                batch = DrugBatch(
+                    id=uuid.uuid4(),
+                    branch_id=po.branch_id,
+                    drug_id=po_item.drug_id,
+                    batch_number=item_receive.batch_number,
+                    quantity=item_receive.quantity_received,
+                    remaining_quantity=item_receive.quantity_received,
+                    manufacturing_date=item_receive.manufacturing_date,
+                    expiry_date=item_receive.expiry_date,
+                    cost_price=po_item.unit_cost,
+                    supplier=po.supplier.name,
+                    purchase_order_id=po.id,
+                    created_at=_now(),
+                    updated_at=_now(),
                 )
+                db.add(batch)
                 batches_created += 1
 
                 # ── 3. Upsert BranchInventory (race-safe) ──────────────────
@@ -728,23 +728,47 @@ class PurchaseOrderService:
                 inventory_updated += 1
 
                 # ── 4. StockAdjustment audit row ─────────────────────────────
-                db.add(
-                    StockAdjustment(
-                        id=uuid.uuid4(),
-                        branch_id=po.branch_id,
-                        drug_id=po_item.drug_id,
-                        adjustment_type="purchase_receipt",
-                        quantity_change=item_receive.quantity_received,
-                        previous_quantity=previous_quantity,
-                        new_quantity=previous_quantity + item_receive.quantity_received,
-                        reason=(
-                            f"Goods received from PO {po.po_number}, "
-                            f"batch {item_receive.batch_number}"
-                        ),
-                        adjusted_by=user.id,
-                        created_at=_now(),
-                        updated_at=_now(),
-                    )
+                adjustment = StockAdjustment(
+                    id=uuid.uuid4(),
+                    branch_id=po.branch_id,
+                    drug_id=po_item.drug_id,
+                    adjustment_type="purchase_receipt",
+                    quantity_change=item_receive.quantity_received,
+                    previous_quantity=previous_quantity,
+                    new_quantity=previous_quantity + item_receive.quantity_received,
+                    reason=(
+                        f"Goods received from PO {po.po_number}, "
+                        f"batch {item_receive.batch_number}"
+                    ),
+                    adjusted_by=user.id,
+                    created_at=_now(),
+                    updated_at=_now(),
+                )
+                db.add(adjustment)
+                await db.flush()
+
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    organization_id=po.organization_id,
+                    branch_id=po.branch_id,
+                    drug_id=po_item.drug_id,
+                    movement_type="purchase_receipt",
+                    quantity_change=item_receive.quantity_received,
+                    quantity_before=previous_quantity,
+                    quantity_after=previous_quantity + item_receive.quantity_received,
+                    batch_id=batch.id,
+                    batch_quantity_before=0,
+                    batch_quantity_after=batch.remaining_quantity,
+                    unit_cost=Decimal(str(po_item.unit_cost)),
+                    source_type="purchase_order",
+                    source_id=po.id,
+                    source_line_id=po_item.id,
+                    reference_number=po.po_number,
+                    reason=(
+                        f"Goods received from PO {po.po_number}, "
+                        f"batch {item_receive.batch_number}"
+                    ),
+                    created_by=user.id,
                 )
 
                 # ── 5. Update Drug weighted-average cost ─────────────────────

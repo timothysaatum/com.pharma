@@ -13,7 +13,8 @@ from app.schemas.user_schema import (
 from app.core.security import (
     hash_password, verify_password, create_access_token,
     create_refresh_token, decode_token, hash_token, SecurityUtils,
-    generate_totp_secret, get_totp_provisioning_uri, verify_totp,
+    generate_totp_secret, get_totp_provisioning_uri, get_totp_qr_code_data_uri,
+    verify_totp,
 )
 from app.core.config import get_settings
 from app.services.audit_service import AuditService
@@ -161,8 +162,6 @@ class AuthService:
                 )
                 was_locked = True
             
-            await db.commit()
-
             # Audit: failed login attempt
             await AuditService.log(
                 db, user.organization_id,
@@ -177,6 +176,7 @@ class AuthService:
                     "locked": was_locked,
                 },
             )
+            await db.commit()
             
             raise auth_error
         
@@ -189,6 +189,11 @@ class AuthService:
         
         # Check MFA / TOTP before committing any state changes
         if user.two_factor_enabled:
+            if not user.two_factor_secret:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="MFA is not configured correctly for this account. Contact your administrator.",
+                )
             if not login_data.totp_code:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
@@ -196,6 +201,19 @@ class AuthService:
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             if not verify_totp(user.two_factor_secret, login_data.totp_code):
+                now = datetime.now(timezone.utc)
+                window = timedelta(minutes=settings.LOGIN_ATTEMPT_WINDOW_MINUTES)
+                if user.last_login and (now - user.last_login) > window:
+                    user.failed_login_attempts = 0
+
+                user.failed_login_attempts += 1
+                was_locked = False
+                if user.failed_login_attempts >= settings.MAX_LOGIN_ATTEMPTS:
+                    user.account_locked_until = now + timedelta(
+                        minutes=settings.ACCOUNT_LOCKOUT_DURATION_MINUTES
+                    )
+                    was_locked = True
+
                 await AuditService.log(
                     db, user.organization_id,
                     action="mfa_failed",
@@ -204,8 +222,13 @@ class AuthService:
                     entity_id=user.id,
                     ip_address=ip_address,
                     user_agent=user_agent,
-                    context_metadata={"method": "totp"},
+                    context_metadata={
+                        "method": "totp",
+                        "attempt": user.failed_login_attempts,
+                        "locked": was_locked,
+                    },
                 )
+                await db.commit()
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Invalid verification code",
@@ -234,7 +257,7 @@ class AuthService:
             ip_address=ip_address,
             user_agent=user_agent,
             expires_at=datetime.now(timezone.utc) + timedelta(
-                minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+                days=settings.REFRESH_TOKEN_EXPIRE_DAYS
             ),
             is_revoked=False,
             created_at=datetime.now(timezone.utc),
@@ -246,9 +269,6 @@ class AuthService:
         
         # Clean up old sessions after adding the new one so the count is accurate
         await AuthService._cleanup_old_sessions(db, user.id)
-        
-        await db.commit()
-        await db.refresh(user)
 
         # Audit: successful login
         await AuditService.log(
@@ -261,6 +281,9 @@ class AuthService:
             user_agent=user_agent,
             context_metadata={"method": "password"},
         )
+
+        await db.commit()
+        await db.refresh(user)
         
         return user, access_token, refresh_token
     
@@ -299,17 +322,25 @@ class AuthService:
                 detail="Invalid refresh token",
             )
         
-        user_id = uuid.UUID(payload.get("sub"))
+        try:
+            user_id = uuid.UUID(payload.get("sub", ""))
+        except (TypeError, ValueError, AttributeError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
         
         # Verify session exists and is not expired
         token_hash_value = hash_token(refresh_token)
         result = await db.execute(
-            select(UserSession).where(
+            select(UserSession)
+            .where(
                 UserSession.user_id == user_id,
                 UserSession.refresh_token_hash == token_hash_value,
                 UserSession.is_revoked == False,
-                UserSession.expires_at > datetime.now(timezone.utc)
+                UserSession.expires_at > datetime.now(timezone.utc),
             )
+            .with_for_update()
         )
         session = result.scalar_one_or_none()
         
@@ -358,7 +389,7 @@ class AuthService:
             ip_address=ip_address,
             user_agent=user_agent,
             expires_at=datetime.now(timezone.utc) + timedelta(
-                minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
+                days=settings.REFRESH_TOKEN_EXPIRE_DAYS
             ),
             is_revoked=False,
             created_at=datetime.now(timezone.utc),
@@ -551,17 +582,18 @@ class AuthService:
     # ── MFA / TOTP ──────────────────────────────────────────────────────
 
     @staticmethod
-    async def setup_mfa(user: User) -> tuple[str, str]:
+    async def setup_mfa(user: User) -> tuple[str, str, str]:
         """Generate a TOTP secret and provisioning URI for the user.
 
         Does NOT enable MFA yet — the user must verify with a code first.
-        Returns (secret, provisioning_uri).
+        Returns (secret, provisioning_uri, qr_code_data_uri).
         """
         secret = generate_totp_secret()
         uri = get_totp_provisioning_uri(secret, user.email)
+        qr_code_data_uri = get_totp_qr_code_data_uri(uri)
         user.two_factor_secret = secret
         user.two_factor_enabled = False  # not active until verified
-        return secret, uri
+        return secret, uri, qr_code_data_uri
 
     @staticmethod
     async def verify_and_enable_mfa(db: AsyncSession, user: User, totp_code: str) -> None:

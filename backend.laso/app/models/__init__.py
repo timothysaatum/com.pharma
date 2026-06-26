@@ -20,6 +20,7 @@ from app.models.inventory.branch_inventory import (
     DrugBatch,
     StockAdjustment
 )
+from app.models.inventory.ledger import InventoryMovement
 
 # 6. Customers
 from app.models.customer.customer_model import Customer
@@ -31,6 +32,7 @@ from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import (
     Sale,
     SaleItem,
+    SaleItemBatchAllocation,
     Supplier,
     PurchaseOrder,
     PurchaseOrderItem
@@ -66,6 +68,7 @@ __all__ = [
     'BranchInventory',
     'DrugBatch',
     'StockAdjustment',
+    'InventoryMovement',
     
     # Customers
     'Customer',
@@ -76,6 +79,7 @@ __all__ = [
     # Sales
     'Sale',
     'SaleItem',
+    'SaleItemBatchAllocation',
     'Supplier',
     'PurchaseOrder',
     'PurchaseOrderItem',

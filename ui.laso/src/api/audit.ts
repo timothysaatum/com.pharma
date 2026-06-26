@@ -9,10 +9,10 @@ export interface AuditLogEntry {
     action: string;
     entity_type?: string | null;
     entity_id?: string | null;
-    changes?: Record<string, any> | null;
+    changes?: Record<string, unknown> | null;
     ip_address?: string | null;
     user_agent?: string | null;
-    context_metadata?: Record<string, any> | null;
+    context_metadata?: Record<string, unknown> | null;
     created_at: string;
 }
 
@@ -23,6 +23,9 @@ export const auditApi = {
         user_id?: string;
         action?: string;
         entity_type?: string;
+        search?: string;
+        start_date?: string;
+        end_date?: string;
     } = {}): Promise<PaginatedResponse<AuditLogEntry>> {
         const qs = new URLSearchParams();
         Object.entries(params).forEach(([k, v]) => {

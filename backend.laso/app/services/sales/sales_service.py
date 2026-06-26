@@ -23,6 +23,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+import logging
 from typing import Dict, List, Optional, Tuple
 import uuid
 
@@ -40,9 +41,9 @@ from app.models.inventory.branch_inventory import (
 from app.models.inventory.inventory_model import Drug
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.precriptions.prescription_model import Prescription
-from app.models.sales.sales_model import Sale, SaleItem
+from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
-from app.models.user.user_model import User
+from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
@@ -51,6 +52,114 @@ from app.schemas.sales_schemas import (
     SaleCreate,
     SaleItemCreate,
 )
+
+logger = logging.getLogger(__name__)
+
+
+def _coerce_uuid(value) -> Optional[uuid.UUID]:
+    if value in (None, ""):
+        return None
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _coerce_positive_int(value) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _prescription_drug_limits(
+    prescription: Prescription,
+) -> Dict[uuid.UUID, Optional[int]]:
+    """
+    Extract prescribed drug quantities from the prescription JSON payload.
+
+    Quantity is optional because historical records may only store the drug.
+    When present, it is enforced as the maximum dispense quantity for the sale.
+    """
+    limits: Dict[uuid.UUID, Optional[int]] = {}
+    quantity_keys = (
+        "quantity",
+        "qty",
+        "dispense_quantity",
+        "dispenseQuantity",
+        "quantity_prescribed",
+        "quantityPrescribed",
+    )
+
+    for medication in prescription.medications or []:
+        if not isinstance(medication, dict):
+            continue
+        drug_id = _coerce_uuid(
+            medication.get("drug_id")
+            or medication.get("drugId")
+            or medication.get("id")
+        )
+        if not drug_id:
+            continue
+
+        quantity = None
+        for key in quantity_keys:
+            quantity = _coerce_positive_int(medication.get(key))
+            if quantity is not None:
+                break
+
+        existing = limits.get(drug_id)
+        if existing is None or quantity is None:
+            limits[drug_id] = quantity
+        else:
+            limits[drug_id] = max(existing, quantity)
+
+    return limits
+
+
+def _validate_prescription_sale_items(
+    *,
+    sale_items: List[SaleItemCreate],
+    drugs: Dict[uuid.UUID, Drug],
+    prescription: Optional[Prescription],
+) -> None:
+    rx_limits = _prescription_drug_limits(prescription) if prescription else {}
+
+    for item in sale_items:
+        drug = drugs[item.drug_id]
+        if not drug.requires_prescription:
+            continue
+
+        if not prescription:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"'{drug.name}' requires a valid prescription. "
+                    "Provide a prescription_id or remove this item."
+                ),
+            )
+
+        if item.drug_id not in rx_limits:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Prescription {prescription.prescription_number} does not "
+                    f"include '{drug.name}'."
+                ),
+            )
+
+        allowed_quantity = rx_limits[item.drug_id]
+        if allowed_quantity is not None and item.quantity > allowed_quantity:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Requested quantity for '{drug.name}' exceeds the "
+                    f"prescribed quantity ({allowed_quantity})."
+                ),
+            )
 
 # Sub-module imports
 from app.services.sales.validators.sale_validators import (
@@ -135,12 +244,14 @@ class SalesService:
                 )
 
             branch_res = await db.execute(
-                select(Branch).where(
+                select(Branch)
+                .where(
                     Branch.id == sale_data.branch_id,
                     Branch.organization_id == user.organization_id,
                     Branch.is_deleted == False,
                     Branch.is_active == True,
                 )
+                .with_for_update()
             )
             branch = branch_res.scalar_one_or_none()
             if not branch:
@@ -280,27 +391,28 @@ class SalesService:
             # ------------------------------------------------------------------
             # 6. Prescription gate — every Rx-only drug must have a valid Rx
             # ------------------------------------------------------------------
-            for item in sale_data.items:
-                drug = drugs[item.drug_id]
-                if drug.requires_prescription and not prescription:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"'{drug.name}' requires a valid prescription. "
-                            "Provide a prescription_id or remove this item."
-                        ),
-                    )
+            _validate_prescription_sale_items(
+                sale_items=sale_data.items,
+                drugs=drugs,
+                prescription=prescription,
+            )
 
             # ------------------------------------------------------------------
             # 7. Contract — load, validate, fetch per-drug overrides
             # ------------------------------------------------------------------
-            contract, contract_items = await load_and_validate_contract(
+            contract, contract_items, verification_confirmed = await load_and_validate_contract(
                 db=db,
                 contract_id=sale_data.price_contract_id,
                 branch_id=sale_data.branch_id,
                 drug_ids=drug_ids,
                 user=user,
                 insurance_verified=getattr(sale_data, "insurance_verified", False),
+                contract_verification_token=getattr(
+                    sale_data, "contract_verification_token", None
+                ),
+                insurance_preauth_number=getattr(
+                    sale_data, "insurance_preauth_number", None
+                ),
                 customer_id=sale_data.customer_id,
             )
 
@@ -316,16 +428,26 @@ class SalesService:
                 drug_ids=drug_ids,
             )
 
-            branch_price_rows = await db.execute(
-                select(BranchInventory.drug_id, BranchInventory.selling_price).where(
+            inventory_res = await db.execute(
+                select(BranchInventory)
+                .where(
                     BranchInventory.branch_id == sale_data.branch_id,
                     BranchInventory.drug_id.in_(drug_ids),
                 )
+                .with_for_update()
             )
+            inventories: Dict[uuid.UUID, BranchInventory] = {
+                inventory.drug_id: inventory
+                for inventory in inventory_res.scalars().all()
+            }
             branch_prices: Dict[uuid.UUID, Decimal] = {
-                row.drug_id: Decimal(str(row.selling_price))
-                for row in branch_price_rows
-                if row.selling_price is not None
+                drug_id: Decimal(str(inventory.selling_price))
+                for drug_id, inventory in inventories.items()
+                if inventory.selling_price is not None
+            }
+            batch_available_by_drug: Dict[uuid.UUID, int] = {
+                drug_id: sum(batch.remaining_quantity for batch in batches)
+                for drug_id, batches in fefo_batches.items()
             }
 
             resolved_prices: Dict[uuid.UUID, Decimal] = {
@@ -344,16 +466,7 @@ class SalesService:
             try:
                 for item in sale_data.items:
                     drug = drugs[item.drug_id]
-
-                    inv_res = await db.execute(
-                        select(BranchInventory)
-                        .where(
-                            BranchInventory.branch_id == sale_data.branch_id,
-                            BranchInventory.drug_id   == item.drug_id,
-                        )
-                        .with_for_update()
-                    )
-                    inventory = inv_res.scalar_one_or_none()
+                    inventory = inventories.get(item.drug_id)
 
                     if not inventory:
                         raise HTTPException(
@@ -375,9 +488,17 @@ class SalesService:
                             ),
                         )
 
-                    # Batch availability is checked under FOR UPDATE in step 15.
-                    # The aggregate reservation lock above guarantees no oversell
-                    # at the inventory level; the FEFO deductor handles per-batch.
+                    batch_available = batch_available_by_drug.get(item.drug_id, 0)
+                    if batch_available < item.quantity:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=(
+                                f"Insufficient non-expired batch stock for "
+                                f"'{drug.name}'. Available in batches: "
+                                f"{batch_available}, Requested: {item.quantity}."
+                            ),
+                        )
+
                     inventory.reserved_quantity += item.quantity
                     inventory.mark_as_pending_sync()
                     reservations.append((inventory, item.quantity))
@@ -449,11 +570,50 @@ class SalesService:
                 if contract.contract_type in ("insurance", "corporate") and patient_copay_amount is not None
                 else total_amount
             )
-            amount_paid = _d(
-                sale_data.amount_paid
-                if sale_data.amount_paid is not None
-                else amount_due
-            )
+            if sale_data.payment_method == "split":
+                if not sale_data.split_payment_details:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="split_payment_details are required for split payments.",
+                    )
+                split_total = _r2(
+                    sum(
+                        (_d(amount) for amount in sale_data.split_payment_details.values()),
+                        Decimal("0"),
+                    )
+                )
+                if split_total != amount_due:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Split payment total ({split_total}) must equal "
+                            f"amount due ({amount_due})."
+                        ),
+                    )
+                if (
+                    sale_data.amount_paid is not None
+                    and _r2(_d(sale_data.amount_paid)) != split_total
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            "amount_paid must match split_payment_details total "
+                            "for split payments."
+                        ),
+                    )
+                amount_paid = split_total
+            else:
+                if sale_data.split_payment_details:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="split_payment_details are only allowed when payment_method is 'split'.",
+                    )
+                amount_paid = _d(
+                    sale_data.amount_paid
+                    if sale_data.amount_paid is not None
+                    else amount_due
+                )
+
             if amount_paid < amount_due:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -502,14 +662,18 @@ class SalesService:
                 insurance_covered_amount=(
                     float(insurance_covered_amount) if insurance_covered_amount is not None else None
                 ),
-                insurance_verified=getattr(sale_data, "insurance_verified", False),
+                insurance_verified=(
+                    verification_confirmed and contract.contract_type == "insurance"
+                ),
                 insurance_verified_at=(
                     datetime.now(timezone.utc)
-                    if getattr(sale_data, "insurance_verified", False)
+                    if verification_confirmed and contract.contract_type == "insurance"
                     else None
                 ),
                 insurance_verified_by=(
-                    user.id if getattr(sale_data, "insurance_verified", False) else None
+                    user.id
+                    if verification_confirmed and contract.contract_type == "insurance"
+                    else None
                 ),
                 # Prescription snapshot
                 prescription_id=sale_data.prescription_id,
@@ -554,6 +718,7 @@ class SalesService:
                     drug_sku=item_drug.sku,
                     # batch_id populated in step 15 after FEFO deduction
                     quantity=item_data.quantity,
+                    refunded_quantity=0,
                     unit_price=float(pricing["unit_price"]),
                     subtotal=float(pricing["item_subtotal"]),
                     discount_percentage=float(pricing["discount_percentage"]),
@@ -585,6 +750,9 @@ class SalesService:
                 item_drug     = drugs[sale_item.drug_id]
                 qty_to_deduct = sale_item.quantity
                 primary_batch_id: Optional[uuid.UUID] = None
+                inventory = inventories[sale_item.drug_id]
+                previous_qty = inventory.quantity
+                running_inventory_qty = previous_qty
 
                 locked_res = await db.execute(
                     select(DrugBatch)
@@ -614,6 +782,7 @@ class SalesService:
                         break
 
                     take = min(batch.remaining_quantity, qty_to_deduct)
+                    previous_batch_qty = batch.remaining_quantity
 
                     if primary_batch_id is None:
                         primary_batch_id = batch.id
@@ -623,6 +792,52 @@ class SalesService:
                     batch.mark_as_pending_sync()
                     qty_to_deduct  -= take
                     batches_updated += 1
+
+                    db.add(
+                        SaleItemBatchAllocation(
+                            id=uuid.uuid4(),
+                            sale_item_id=sale_item.id,
+                            branch_id=sale_data.branch_id,
+                            drug_id=sale_item.drug_id,
+                            batch_id=batch.id,
+                            batch_number=batch.batch_number,
+                            batch_expiry_date=batch.expiry_date,
+                            quantity=take,
+                            refunded_quantity=0,
+                            unit_cost_at_sale=batch.cost_price,
+                            unit_price_at_sale=sale_item.unit_price,
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+
+                    movement_before = running_inventory_qty
+                    running_inventory_qty -= take
+                    await InventoryService._record_inventory_movement(
+                        db=db,
+                        organization_id=user.organization_id,
+                        branch_id=sale_data.branch_id,
+                        drug_id=sale_item.drug_id,
+                        movement_type="sale",
+                        quantity_change=-take,
+                        quantity_before=movement_before,
+                        quantity_after=running_inventory_qty,
+                        batch_id=batch.id,
+                        batch_quantity_before=previous_batch_qty,
+                        batch_quantity_after=batch.remaining_quantity,
+                        unit_cost=(
+                            Decimal(str(batch.cost_price))
+                            if batch.cost_price is not None
+                            else None
+                        ),
+                        unit_price=Decimal(str(sale_item.unit_price)),
+                        source_type="sale",
+                        source_id=sale.id,
+                        source_line_id=sale_item.id,
+                        reference_number=sale_number,
+                        reason=f"Sale {sale_number}",
+                        created_by=user.id,
+                    )
 
                 # Guard: concurrent depletion between reservation and deduction
                 if qty_to_deduct > 0:
@@ -637,17 +852,7 @@ class SalesService:
                 sale_item.batch_id = primary_batch_id  # tag with primary batch
 
                 # Deduct from aggregate inventory and release the reservation
-                inv_res = await db.execute(
-                    select(BranchInventory)
-                    .where(
-                        BranchInventory.branch_id == sale_data.branch_id,
-                        BranchInventory.drug_id   == sale_item.drug_id,
-                    )
-                    .with_for_update()
-                )
-                inventory     = inv_res.scalar_one()
-                previous_qty  = inventory.quantity
-                inventory.quantity          -= sale_item.quantity
+                inventory.quantity           = running_inventory_qty
                 inventory.reserved_quantity -= sale_item.quantity  # release
                 inventory.updated_at         = datetime.now(timezone.utc)
                 inventory.mark_as_pending_sync()
@@ -808,33 +1013,46 @@ class SalesService:
                 customer.updated_at = datetime.now(timezone.utc)
                 customer.mark_as_pending_sync()
 
+            contract.total_transactions = (contract.total_transactions or 0) + 1
+            contract.total_discount_given = float(
+                _r2(_d(contract.total_discount_given or 0) + total_discount)
+            )
+            contract.last_used_at = datetime.now(timezone.utc)
+            contract.updated_at = datetime.now(timezone.utc)
+            contract.mark_as_pending_sync()
+
         # ----------------------------------------------------------------------
         # 19. Commit — outside the savepoint context
         # ----------------------------------------------------------------------
         await db.commit()
 
         # ----------------------------------------------------------------------
-        # 20. Audit log — flush only, never commit
+        # 20. Audit log — persisted separately so it cannot roll back the sale
         # ----------------------------------------------------------------------
-        await create_audit_log(
-            db=db,
-            action="process_sale",
-            entity_type="Sale",
-            entity_id=sale.id,
-            user_id=user.id,
-            organization_id=sale.organization_id,
-            changes={
-                "sale_number":              sale_number,
-                "customer_id":              str(sale.customer_id) if sale.customer_id else None,
-                "total_amount":             float(total_amount),
-                "discount_amount":          float(total_discount),
-                "items_count":              len(created_items),
-                "payment_method":           sale.payment_method,
-                "prescription_id":          str(sale.prescription_id) if sale.prescription_id else None,
-                "loyalty_points_awarded":   points_earned,
-                "batches_deducted":         batches_updated,
-            },
-        )
+        try:
+            await create_audit_log(
+                db=db,
+                action="process_sale",
+                entity_type="Sale",
+                entity_id=sale.id,
+                user_id=user.id,
+                organization_id=sale.organization_id,
+                changes={
+                    "sale_number":              sale_number,
+                    "customer_id":              str(sale.customer_id) if sale.customer_id else None,
+                    "total_amount":             float(total_amount),
+                    "discount_amount":          float(total_discount),
+                    "items_count":              len(created_items),
+                    "payment_method":           sale.payment_method,
+                    "prescription_id":          str(sale.prescription_id) if sale.prescription_id else None,
+                    "loyalty_points_awarded":   points_earned,
+                    "batches_deducted":         batches_updated,
+                },
+            )
+            await db.commit()
+        except Exception:
+            logger.exception("Failed to write process_sale audit log for sale %s", sale.id)
+            await db.rollback()
 
         # ----------------------------------------------------------------------
         # 21. Build and return response
@@ -877,7 +1095,7 @@ class SalesService:
          1  Permission check.
          2  Load Sale (with items) FOR UPDATE; validate it is refundable.
          3  Validate refund items and quantities against the original sale.
-         4  Update Sale.status → 'refunded'.
+         4  Update cumulative refund state.
          5  Restore BranchInventory + DrugBatch under FOR UPDATE locks.
          6  Write StockAdjustment (type='return').
          7  Reverse loyalty points; recalculate tier downward.
@@ -885,6 +1103,12 @@ class SalesService:
          9  Append AuditLog (flush only).
         10  Return RefundSaleResponse.
         """
+
+        if not user.has_permission(Permission.PROCESS_REFUNDS):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You do not have permission to process refunds.",
+            )
 
         async with db.begin_nested():
             sale_res = await db.execute(
@@ -905,7 +1129,7 @@ class SalesService:
 
             # Branch access check
             assigned = [str(b) for b in (user.assigned_branches or [])]
-            if str(sale.branch_id) not in assigned:
+            if str(sale.branch_id) not in assigned and not user.is_super_admin:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="You don't have access to this sale's branch",
@@ -920,18 +1144,24 @@ class SalesService:
                     ),
                 )
 
-            refund_amount = _d(refund_data.refund_amount)
-            if refund_amount > _d(sale.total_amount):
+            refund_amount = _r2(_d(refund_data.refund_amount))
+            existing_refund_amount = _r2(_d(sale.refund_amount or 0))
+            sale_total = _r2(_d(sale.total_amount))
+            new_refund_total = _r2(existing_refund_amount + refund_amount)
+            if new_refund_total > sale_total:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Refund amount ({refund_amount}) cannot exceed "
-                        f"sale total ({sale.total_amount})."
+                        f"Refund total ({new_refund_total}) cannot exceed "
+                        f"sale total ({sale_total}). Already refunded: "
+                        f"{existing_refund_amount}."
                     ),
                 )
 
             # Manager approval check
-            if refund_data.manager_approval_user_id != user.id:
+            if refund_data.manager_approval_user_id == user.id:
+                approver = user
+            else:
                 approver_res = await db.execute(
                     select(User).where(
                         User.id == refund_data.manager_approval_user_id,
@@ -944,11 +1174,15 @@ class SalesService:
                         status_code=status.HTTP_404_NOT_FOUND,
                         detail="Approving manager not found.",
                     )
-                if not (approver.is_super_admin or approver.has_permission("process_sales")):
-                    raise HTTPException(
-                        status_code=status.HTTP_403_FORBIDDEN,
-                        detail="Approving manager does not have required permissions.",
-                    )
+
+            if not (
+                approver.is_super_admin
+                or approver.has_permission(Permission.PROCESS_REFUNDS)
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Approving manager does not have required permissions.",
+                )
 
             sale_item_map: Dict[uuid.UUID, SaleItem] = {
                 item.id: item for item in sale.items
@@ -961,9 +1195,44 @@ class SalesService:
                     detail=f"Refund items not found in the original sale: {invalid}",
                 )
 
-            # Update sale record
-            sale.status        = "refunded"
-            sale.refund_amount = float(refund_amount)
+            for refund_item in refund_data.items_to_refund:
+                sale_item = sale_item_map[refund_item.sale_item_id]
+                already_refunded = int(sale_item.refunded_quantity or 0)
+                remaining_quantity = sale_item.quantity - already_refunded
+                if refund_item.quantity > remaining_quantity:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Cannot refund {refund_item.quantity} units of "
+                            f"'{sale_item.drug_name}'. Remaining refundable "
+                            f"quantity: {remaining_quantity}."
+                        ),
+                    )
+
+            expected_refund = _r2(
+                sum(
+                    (
+                        _d(sale_item_map[item.sale_item_id].total_price)
+                        * Decimal(item.quantity)
+                        / Decimal(sale_item_map[item.sale_item_id].quantity)
+                    )
+                    for item in refund_data.items_to_refund
+                )
+            )
+            if _r2(refund_amount) != expected_refund:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Refund amount must equal the selected item value "
+                        f"({expected_refund})."
+                    ),
+                )
+
+            # Update sale record. Partial refunds keep the sale refundable.
+            is_full_refund = new_refund_total == sale_total
+            sale.status        = "refunded" if is_full_refund else "completed"
+            sale.payment_status = "refunded" if is_full_refund else "partial"
+            sale.refund_amount = float(new_refund_total)
             sale.refunded_at   = datetime.now(timezone.utc)
             sale.notes         = (
                 f"Refunded: {refund_data.reason}\n\n{sale.notes or ''}".strip()
@@ -976,16 +1245,62 @@ class SalesService:
 
             for refund_item in refund_data.items_to_refund:
                 sale_item = sale_item_map[refund_item.sale_item_id]
+                sale_item.refunded_quantity = int(
+                    sale_item.refunded_quantity or 0
+                ) + refund_item.quantity
+                sale_item.updated_at = datetime.now(timezone.utc)
 
-                if refund_item.quantity > sale_item.quantity:
+                allocations_res = await db.execute(
+                    select(SaleItemBatchAllocation)
+                    .where(SaleItemBatchAllocation.sale_item_id == sale_item.id)
+                    .order_by(SaleItemBatchAllocation.created_at.asc())
+                    .with_for_update()
+                )
+                allocations = list(allocations_res.scalars().all())
+
+                restore_targets = []
+                qty_to_allocate = refund_item.quantity
+                for allocation in allocations:
+                    if qty_to_allocate <= 0:
+                        break
+                    allocation_remaining = (
+                        allocation.quantity - int(allocation.refunded_quantity or 0)
+                    )
+                    if allocation_remaining <= 0:
+                        continue
+                    consume_qty = min(allocation_remaining, qty_to_allocate)
+                    allocation.refunded_quantity = int(
+                        allocation.refunded_quantity or 0
+                    ) + consume_qty
+                    allocation.updated_at = datetime.now(timezone.utc)
+                    restore_targets.append(
+                        {
+                            "batch_id": allocation.batch_id,
+                            "batch_number": allocation.batch_number,
+                            "batch_expiry_date": allocation.batch_expiry_date,
+                            "quantity": consume_qty,
+                        }
+                    )
+                    qty_to_allocate -= consume_qty
+
+                if allocations and qty_to_allocate > 0:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Cannot refund {refund_item.quantity} units of "
-                            f"'{sale_item.drug_name}'. "
-                            f"Only {sale_item.quantity} were sold."
-                        ),
+                        detail="Refund quantity exceeds remaining sale batch allocations.",
                     )
+
+                if not allocations:
+                    restore_targets = [
+                        {
+                            "batch_id": sale_item.batch_id,
+                            "batch_number": None,
+                            "batch_expiry_date": None,
+                            "quantity": refund_item.quantity,
+                        }
+                    ]
+
+                if not refund_item.restock:
+                    continue
 
                 # Restore BranchInventory
                 inv_res = await db.execute(
@@ -998,27 +1313,94 @@ class SalesService:
                 )
                 inventory          = inv_res.scalar_one()
                 previous_qty       = inventory.quantity
-                inventory.quantity += refund_item.quantity
-                inventory.updated_at = datetime.now(timezone.utc)
-                inventory.mark_as_pending_sync()
+                running_inventory_qty = previous_qty
                 inventory_restored += 1
 
-                # Restore to the original batch
-                if sale_item.batch_id:
-                    batch_res = await db.execute(
-                        select(DrugBatch)
-                        .where(
-                            DrugBatch.id        == sale_item.batch_id,
-                            DrugBatch.branch_id == sale.branch_id,
+                qty_to_restore = refund_item.quantity
+                for target in restore_targets:
+                    if qty_to_restore <= 0:
+                        break
+
+                    restore_qty = min(int(target["quantity"]), qty_to_restore)
+                    batch = None
+                    if target["batch_id"]:
+                        batch_res = await db.execute(
+                            select(DrugBatch)
+                            .where(
+                                DrugBatch.id == target["batch_id"],
+                                DrugBatch.branch_id == sale.branch_id,
+                            )
+                            .with_for_update()
                         )
-                        .with_for_update()
+                        batch = batch_res.scalar_one_or_none()
+
+                    if batch is None:
+                        batch = DrugBatch(
+                            id=uuid.uuid4(),
+                            branch_id=sale.branch_id,
+                            drug_id=sale_item.drug_id,
+                            batch_number=(
+                                target["batch_number"]
+                                or f"RETURN-{sale.sale_number}-{str(sale_item.id)[:8]}"
+                            ),
+                            quantity=0,
+                            remaining_quantity=0,
+                            expiry_date=(
+                                target["batch_expiry_date"]
+                                or date.today() + timedelta(days=365 * 10)
+                            ),
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                        db.add(batch)
+                        await db.flush()
+
+                    previous_batch_qty = batch.remaining_quantity
+                    batch.remaining_quantity += restore_qty
+                    if batch.remaining_quantity > batch.quantity:
+                        batch.quantity = batch.remaining_quantity
+                    batch.updated_at = datetime.now(timezone.utc)
+                    batch.mark_as_pending_sync()
+                    batches_restored += 1
+
+                    movement_before = running_inventory_qty
+                    running_inventory_qty += restore_qty
+                    await InventoryService._record_inventory_movement(
+                        db=db,
+                        organization_id=sale.organization_id,
+                        branch_id=sale.branch_id,
+                        drug_id=sale_item.drug_id,
+                        movement_type="refund",
+                        quantity_change=restore_qty,
+                        quantity_before=movement_before,
+                        quantity_after=running_inventory_qty,
+                        batch_id=batch.id,
+                        batch_quantity_before=previous_batch_qty,
+                        batch_quantity_after=batch.remaining_quantity,
+                        unit_cost=(
+                            Decimal(str(batch.cost_price))
+                            if batch.cost_price is not None
+                            else None
+                        ),
+                        unit_price=Decimal(str(sale_item.unit_price)),
+                        source_type="sale",
+                        source_id=sale.id,
+                        source_line_id=sale_item.id,
+                        reference_number=sale.sale_number,
+                        reason=f"Refund for sale {sale.sale_number}: {refund_data.reason}",
+                        created_by=user.id,
                     )
-                    batch = batch_res.scalar_one_or_none()
-                    if batch:
-                        batch.remaining_quantity += refund_item.quantity
-                        batch.updated_at          = datetime.now(timezone.utc)
-                        batch.mark_as_pending_sync()
-                        batches_restored += 1
+                    qty_to_restore -= restore_qty
+
+                if qty_to_restore > 0:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Refund restock quantity could not be allocated to sale batches.",
+                    )
+
+                inventory.quantity = running_inventory_qty
+                inventory.updated_at = datetime.now(timezone.utc)
+                inventory.mark_as_pending_sync()
 
                 # 'return' is the correct model-valid type for customer returns
                 db.add(
@@ -1029,7 +1411,7 @@ class SalesService:
                         adjustment_type="return",
                         quantity_change=refund_item.quantity,
                         previous_quantity=previous_qty,
-                        new_quantity=inventory.quantity,
+                        new_quantity=running_inventory_qty,
                         reason=(
                             f"Refund for sale {sale.sale_number}: "
                             f"{refund_data.reason}"
@@ -1052,7 +1434,10 @@ class SalesService:
             if sale.customer_id:
                 cust_res = await db.execute(
                     select(Customer)
-                    .where(Customer.id == sale.customer_id)
+                    .where(
+                        Customer.id == sale.customer_id,
+                        Customer.organization_id == sale.organization_id,
+                    )
                     .with_for_update()
                 )
                 customer = cust_res.scalar_one_or_none()
@@ -1085,22 +1470,30 @@ class SalesService:
         # 8. Commit
         await db.commit()
 
-        # 9. Audit log — flush only
-        await create_audit_log(
-            db=db,
-            action="refund_sale",
-            entity_type="Sale",
-            entity_id=sale.id,
-            user_id=user.id,
-            organization_id=sale.organization_id,
-            changes={
-                "refund_amount":            float(refund_amount),
-                "reason":                   refund_data.reason,
-                "inventory_restored":       inventory_restored,
-                "batches_restored":         batches_restored,
-                "loyalty_points_deducted":  loyalty_points_deducted,
-            },
-        )
+        # 9. Audit log — persisted separately so it cannot roll back the refund
+        try:
+            await create_audit_log(
+                db=db,
+                action="refund_sale",
+                entity_type="Sale",
+                entity_id=sale.id,
+                user_id=user.id,
+                organization_id=sale.organization_id,
+                changes={
+                    "previous_refund_amount":   float(existing_refund_amount),
+                    "refund_amount":            float(refund_amount),
+                    "new_refund_total":         float(new_refund_total),
+                    "is_full_refund":           is_full_refund,
+                    "reason":                   refund_data.reason,
+                    "inventory_restored":       inventory_restored,
+                    "batches_restored":         batches_restored,
+                    "loyalty_points_deducted":  loyalty_points_deducted,
+                },
+            )
+            await db.commit()
+        except Exception:
+            logger.exception("Failed to write refund_sale audit log for sale %s", sale.id)
+            await db.rollback()
 
         # 10. Build and return response
         await db.refresh(sale)
@@ -1117,5 +1510,3 @@ class SalesService:
             success=True,
             message="Sale refunded successfully.",
         )
-
-

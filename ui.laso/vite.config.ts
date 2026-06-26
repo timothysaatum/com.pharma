@@ -13,6 +13,9 @@ export default defineConfig(async () => ({
   test: {
     environment: "node",
     globals: true,
+    pool: "threads",
+    maxWorkers: 2,
+    testTimeout: 10_000,
   },
   optimizeDeps: {
     exclude: ["@tauri-apps/plugin-updater", "@tauri-apps/plugin-process"],

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Eye, EyeOff, AlertTriangle,
-    Lock, ArrowRight, ShieldAlert,
+    Lock, ArrowRight, ShieldAlert, ShieldCheck, KeyRound,
 } from "lucide-react";
 import { useLogin } from "@/hooks/useLogin";
 import { BranchSelector } from "@/components/auth/BranchSelector";
@@ -29,7 +29,7 @@ export default function LoginPage() {
         }
     }, [isAuthenticated, activeBranchId, navigate]);
 
-    const { form, isSubmitting, error, isLocked, submit } = useLogin({
+    const { form, isSubmitting, error, isLocked, requiresMfa, submit } = useLogin({
         onSuccess: async () => {
             const { user: loggedInUser } = useAuthStore.getState();
             if (!loggedInUser) return;
@@ -66,6 +66,11 @@ export default function LoginPage() {
     });
 
     const { register, handleSubmit, formState: { errors } } = form;
+    const submitLabel = fetchingBranches
+        ? "Loading branches…"
+        : isSubmitting
+            ? requiresMfa ? "Verifying…" : "Signing in…"
+            : requiresMfa ? "Verify and sign in" : "Sign in";
 
     return (
         <div className="min-h-screen flex">
@@ -247,6 +252,33 @@ export default function LoginPage() {
                                         </button>
                                     </div>
 
+                                    {requiresMfa && (
+                                        <motion.div
+                                            initial={{ opacity: 0, y: -8 }}
+                                            animate={{ opacity: 1, y: 0 }}
+                                            className="space-y-3"
+                                        >
+                                            <div className="rounded-xl border border-brand-100 bg-brand-50 p-3 flex gap-2 items-start">
+                                                <ShieldCheck className="w-4 h-4 text-brand-600 flex-shrink-0 mt-0.5" />
+                                                <p className="text-sm text-brand-800">
+                                                    Two-factor authentication required.
+                                                </p>
+                                            </div>
+                                            <Input
+                                                label="Authenticator code"
+                                                required
+                                                placeholder="123456"
+                                                autoComplete="one-time-code"
+                                                inputMode="numeric"
+                                                pattern="[0-9]*"
+                                                maxLength={6}
+                                                error={errors.totp_code?.message}
+                                                leftIcon={<KeyRound className="w-4 h-4" />}
+                                                {...register("totp_code")}
+                                            />
+                                        </motion.div>
+                                    )}
+
                                     <Button
                                         type="submit"
                                         size="lg"
@@ -254,11 +286,7 @@ export default function LoginPage() {
                                         loading={isSubmitting || fetchingBranches}
                                         disabled={isSubmitting || isLocked || fetchingBranches}
                                     >
-                                        {fetchingBranches
-                                            ? "Loading branches…"
-                                            : isSubmitting
-                                                ? "Signing in…"
-                                                : "Sign in"}
+                                        {submitLabel}
                                         {!isSubmitting && !fetchingBranches && <ArrowRight className="w-4 h-4" />}
                                     </Button>
                                 </form>

@@ -9,12 +9,13 @@ Handles complete organization setup including:
 """
 from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.exc import DataError, IntegrityError
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta, timezone
 import uuid
+import logging
 
 from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.models.user.user_model import User, Role, UserRole, Permission
@@ -22,6 +23,8 @@ from app.models.system_md.sys_models import AuditLog
 from app.schemas.branch_schemas import BranchCreate
 from app.utils.iso_dates import to_iso
 from app.core.security import SecurityUtils
+
+logger = logging.getLogger(__name__)
 
 
 class OrganizationOnboardingService:
@@ -107,7 +110,10 @@ class OrganizationOnboardingService:
             
             # Store idempotency key if provided
             if idempotency_key:
-                organization.settings["_onboarding_ik"] = idempotency_key
+                organization.settings = {
+                    **(organization.settings or {}),
+                    "_onboarding_ik": idempotency_key,
+                }
             
             # Create default roles and assign admin role to the admin user
             default_roles = await self._create_default_roles(organization.id)
@@ -209,11 +215,12 @@ class OrganizationOnboardingService:
         except (IntegrityError, DataError):
             await self.db.rollback()
             raise
-        except Exception as e:
+        except Exception:
             await self.db.rollback()
+            logger.exception("Organization onboarding failed")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to onboard organization: {str(e)}"
+                detail="Failed to onboard organization",
             )
     
     async def _check_organization_exists(self, name: str) -> Optional[Organization]:
@@ -285,12 +292,11 @@ class OrganizationOnboardingService:
                     Permission.VIEW_REPORTS.value,
                     Permission.EXPORT_DATA.value,
                     Permission.MANAGE_CUSTOMERS.value,
-                    Permission.MANAGE_PRESCRIPTIONS.value,
+                     Permission.MANAGE_PRESCRIPTIONS.value,
                 ]
             },
             {
                 "name": "Pharmacist",
-                "description": "Drug and prescription management",
                 "level": 30,
                 "permissions": [
                     Permission.MANAGE_DRUGS.value,
@@ -509,9 +515,11 @@ class OrganizationOnboardingService:
         """Generate unique branch code"""
         # Count existing branches
         result = await self.db.execute(
-            select(Branch).where(Branch.organization_id == organization_id)
+            select(func.count(Branch.id)).where(
+                Branch.organization_id == organization_id
+            )
         )
-        count = len(result.scalars().all())
+        count = result.scalar_one()
         
         # Generate code: BR001, BR002, etc.
         return f"BR{str(count + 1).zfill(3)}"

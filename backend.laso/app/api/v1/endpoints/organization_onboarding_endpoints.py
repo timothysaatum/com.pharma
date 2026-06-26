@@ -13,6 +13,7 @@ from app.db.dependencies import get_db
 from app.core.deps import (
     get_current_user,
     require_permission,
+    require_super_admin,
     get_client_ip,
     get_user_agent,
 )
@@ -48,12 +49,11 @@ router = APIRouter(prefix="/organizations", tags=["Organization Onboarding"])
     
     **Requires super_admin role**
     """,
-    dependencies=[Depends(require_permission("manage_organization"))]
 )
 async def onboard_organization(
     request: Request,
     onboarding_data: OrganizationOnboardingRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_super_admin),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -287,13 +287,12 @@ async def update_organization(
     "/{organization_id}/activate",
     response_model=OrganizationResponse,
     summary="Activate organization",
-    description="Activate an inactive organization. **Requires manage_organization permission**",
-    dependencies=[Depends(require_permission("manage_organization"))]
+    description="Activate an inactive organization. **Requires platform super admin**",
 )
 async def activate_organization(
     organization_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_super_admin)
 ):
     """Activate an organization"""
     service = OrganizationOnboardingService(db)
@@ -308,14 +307,13 @@ async def activate_organization(
     "/{organization_id}/deactivate",
     response_model=OrganizationResponse,
     summary="Deactivate organization",
-    description="Deactivate an active organization. **Requires manage_organization permission**",
-    dependencies=[Depends(require_permission("manage_organization"))]
+    description="Deactivate an active organization. **Requires platform super admin**",
 )
 async def deactivate_organization(
     organization_id: uuid.UUID,
     request_data: OrganizationActivationRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_super_admin)
 ):
     """Deactivate an organization"""
     service = OrganizationOnboardingService(db)
@@ -331,14 +329,13 @@ async def deactivate_organization(
     "/{organization_id}/subscription",
     response_model=OrganizationResponse,
     summary="Update subscription",
-    description="Update organization subscription tier and duration. **Requires manage_organization permission**",
-    dependencies=[Depends(require_permission("manage_organization"))]
+    description="Update organization subscription tier and duration. **Requires platform super admin**",
 )
 async def update_subscription(
     organization_id: uuid.UUID,
     subscription_data: SubscriptionUpdateRequest,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_super_admin)
 ):
     """
     Update organization subscription

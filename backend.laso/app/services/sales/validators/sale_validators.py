@@ -12,23 +12,27 @@ load_and_validate_contract   — load PriceContract and run all applicability
 """
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 import re
 from typing import Dict, List, Optional, Tuple
 import uuid
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.customer.customer_model import Customer
 from app.models.inventory.inventory_model import Drug
 from app.models.pricing.pricing_model import PriceContract, PriceContractItem
+from app.models.sales.sales_model import Sale
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import User
 from app.schemas.sales_schemas import SaleItemCreate
-
-from datetime import datetime, timezone
+from app.services.contracts.contract_verification_tokens import (
+    ContractVerificationTokenError,
+    verify_contract_verification_token,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +146,10 @@ async def load_and_validate_contract(
     drug_ids: List[uuid.UUID],
     user: User,
     insurance_verified: bool,
+    contract_verification_token: Optional[str],
+    insurance_preauth_number: Optional[str],
     customer_id: Optional[uuid.UUID],
-) -> Tuple[PriceContract, Dict[uuid.UUID, PriceContractItem]]:
+) -> Tuple[PriceContract, Dict[uuid.UUID, PriceContractItem], bool]:
     """
     Load the PriceContract and run all applicability guards.
 
@@ -168,7 +174,11 @@ async def load_and_validate_contract(
         customer_id:        Customer ID (required for insurance contracts).
 
     Returns:
-        Tuple of (PriceContract, dict of PriceContractItem keyed by drug_id).
+        Tuple of (
+            PriceContract,
+            dict of PriceContractItem keyed by drug_id,
+            whether a server-signed verification token was validated,
+        ).
 
     Raises:
         HTTPException(404): Contract not found or not active.
@@ -178,13 +188,16 @@ async def load_and_validate_contract(
     today = date.today()
 
     result = await db.execute(
-        select(PriceContract).where(
+        select(PriceContract)
+        .options(selectinload(PriceContract.insurance_provider))
+        .where(
             PriceContract.id == contract_id,
             PriceContract.organization_id == user.organization_id,
             PriceContract.is_deleted == False,
             PriceContract.is_active == True,
             PriceContract.status == "active",
         )
+        .with_for_update()
     )
     contract = result.scalar_one_or_none()
     if not contract:
@@ -243,13 +256,96 @@ async def load_and_validate_contract(
                 detail=f"{contract.contract_type.capitalize()} contracts require a registered customer.",
             )
 
-    if contract.requires_verification or contract.contract_type == "insurance":
-        if not insurance_verified:
+    verification_confirmed = False
+    requires_token = (
+        contract.requires_verification
+        or contract.contract_type == "insurance"
+        or contract.requires_approval
+    )
+    if requires_token:
+        try:
+            verify_contract_verification_token(
+                token=contract_verification_token,
+                organization_id=user.organization_id,
+                contract_id=contract.id,
+                branch_id=branch_id,
+                customer_id=customer_id,
+                drug_ids=drug_ids,
+                user_id=user.id,
+            )
+        except ContractVerificationTokenError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+        verification_confirmed = True
+    elif insurance_verified:
+        # Kept for backwards-compatible payloads, but never trusted as proof.
+        verification_confirmed = False
+
+    provider_requires_preauth = bool(
+        contract.insurance_provider and contract.insurance_provider.requires_preauth
+    )
+    if (
+        contract.requires_preauthorization
+        or provider_requires_preauth
+    ) and not insurance_preauth_number:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Pre-authorization number is required for "
+                f"'{contract.contract_name}'."
+            ),
+        )
+
+    if contract.daily_usage_limit:
+        start_of_day = datetime.combine(today, datetime.min.time(), tzinfo=timezone.utc)
+        end_of_day = start_of_day + timedelta(days=1)
+        daily_count = (await db.execute(
+            select(func.count())
+            .select_from(Sale)
+            .where(
+                Sale.price_contract_id == contract.id,
+                Sale.organization_id == user.organization_id,
+                Sale.status.in_(["completed", "refunded"]),
+                Sale.created_at >= start_of_day,
+                Sale.created_at < end_of_day,
+            )
+        )).scalar() or 0
+        if daily_count >= contract.daily_usage_limit:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"Verification is required for '{contract.contract_name}' "
-                    "before processing the sale."
+                    f"Daily usage limit reached for "
+                    f"'{contract.contract_name}'."
+                ),
+            )
+
+    if contract.per_customer_usage_limit:
+        if not customer_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "A registered customer is required for contracts with "
+                    "per-customer limits."
+                ),
+            )
+        customer_count = (await db.execute(
+            select(func.count())
+            .select_from(Sale)
+            .where(
+                Sale.price_contract_id == contract.id,
+                Sale.organization_id == user.organization_id,
+                Sale.customer_id == customer_id,
+                Sale.status.in_(["completed", "refunded"]),
+            )
+        )).scalar() or 0
+        if customer_count >= contract.per_customer_usage_limit:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Customer usage limit reached for "
+                    f"'{contract.contract_name}'."
                 ),
             )
 
@@ -264,4 +360,4 @@ async def load_and_validate_contract(
         ci.drug_id: ci for ci in overrides_res.scalars().all()
     }
 
-    return contract, contract_items
+    return contract, contract_items, verification_confirmed

@@ -6,8 +6,9 @@ Allows administrators and managers to view user activity and system changes.
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import String, cast, or_, select
 from typing import Optional
+from datetime import date, datetime, time, timedelta, timezone
 import uuid
 
 from app.core.deps import get_current_user, require_permission
@@ -29,6 +30,9 @@ async def list_audit_logs(
     user_id: Optional[uuid.UUID] = Query(None),
     action: Optional[str] = Query(None),
     entity_type: Optional[str] = Query(None),
+    search: Optional[str] = Query(None, max_length=500),
+    start_date: Optional[date] = Query(None),
+    end_date: Optional[date] = Query(None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -41,6 +45,7 @@ async def list_audit_logs(
 
     query = (
         select(AuditLog)
+        .outerjoin(User, AuditLog.user_id == User.id)
         .options(joinedload(AuditLog.user))
         .where(AuditLog.organization_id == current_user.organization_id)
         .order_by(AuditLog.created_at.desc())
@@ -52,6 +57,35 @@ async def list_audit_logs(
         query = query.where(AuditLog.action == action)
     if entity_type:
         query = query.where(AuditLog.entity_type == entity_type)
+    if search and search.strip():
+        term = f"%{search.strip()}%"
+        query = query.where(
+            or_(
+                AuditLog.action.ilike(term),
+                AuditLog.entity_type.ilike(term),
+                cast(AuditLog.entity_id, String).ilike(term),
+                cast(AuditLog.changes, String).ilike(term),
+                cast(AuditLog.context_metadata, String).ilike(term),
+                cast(AuditLog.ip_address, String).ilike(term),
+                AuditLog.user_agent.ilike(term),
+                User.full_name.ilike(term),
+                User.username.ilike(term),
+            )
+        )
+    if start_date:
+        query = query.where(
+            AuditLog.created_at
+            >= datetime.combine(start_date, time.min, tzinfo=timezone.utc)
+        )
+    if end_date:
+        query = query.where(
+            AuditLog.created_at
+            < datetime.combine(
+                end_date + timedelta(days=1),
+                time.min,
+                tzinfo=timezone.utc,
+            )
+        )
 
     paginator = Paginator(db)
     result = await paginator.paginate(query, pagination)

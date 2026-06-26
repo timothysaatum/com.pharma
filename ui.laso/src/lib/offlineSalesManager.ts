@@ -2,7 +2,7 @@
  * offlineSalesManager.ts
  * ======================
  * Robust offline-first sales queue management with:
- *   - Transactional sale recording (all or nothing)
+ *   - Fail-fast sale recording with compensating rollback
  *   - Automatic retry with exponential backoff
  *   - Duplicate detection and prevention
  *   - Inventory sync consistency
@@ -35,8 +35,9 @@ const INITIAL_RETRY_DELAY_MS = 1000; // 1 second
 
 class OfflineSalesManager {
   /**
-   * Record a sale transaction with full atomicity.
-   * If ANY step fails, the entire transaction rolls back.
+   * Record a sale and compensate all completed local writes if a later step
+   * fails. The Tauri SQL guest API does not expose a multi-call transaction,
+   * so every failure must be surfaced and explicitly reversed.
    * 
    * IMPORTANT: Prescription refills are decremented IMMEDIATELY (offline) to prevent
    * overselling. The sync_version field prevents double-decrement on server during sync.
@@ -49,6 +50,9 @@ class OfflineSalesManager {
   ): Promise<{ success: true; saleId: string } | { success: false; error: string }> {
     const db = await getDb();
     const now = new Date().toISOString();
+    const appliedInventoryDeltas: Array<{ drug_id: string; delta: number }> = [];
+    let saleWritten = false;
+    let prescriptionDecremented = false;
 
     try {
       const existing = await db.select<Array<{ id: string; sync_status: string }>>(
@@ -69,28 +73,36 @@ class OfflineSalesManager {
       }
 
       await writeLocal.sale({ ...sale, items } as Parameters<typeof writeLocal.sale>[0]);
+      saleWritten = true;
 
       for (const { drug_id, delta } of inventoryDeltas) {
-        try {
-          await writeLocal.inventory(sale.branch_id, drug_id, delta);
-        } catch (invErr) {
-          console.warn(`[OfflineSalesManager] Inventory update failed for drug ${drug_id}:`, invErr);
-        }
+        await writeLocal.inventory(sale.branch_id, drug_id, delta);
+        appliedInventoryDeltas.push({ drug_id, delta });
       }
 
       // ─── Step 2: Decrement prescription refills IMMEDIATELY (optimistic update) ──
       if (sale.prescription_id) {
         const decrementStatus = await this.decrementPrescriptionRefillsOffline(sale.prescription_id);
         if (!decrementStatus.success) {
-          console.warn(`[OfflineSalesManager] Failed to decrement prescription refills: ${decrementStatus.error}`);
-          // Don't fail the entire sale — prescription might have been deleted or modified
+          throw new Error(
+            decrementStatus.error ?? "Failed to decrement prescription refills"
+          );
         }
+        prescriptionDecremented = true;
       }
 
       await this.recordAuditRow(db, sale, items, inventoryDeltas, idempotencyKey, now);
       return { success: true, saleId: sale.id };
     } catch (err) {
       console.error("[OfflineSalesManager] Transaction failed:", err);
+      await this.compensateFailedSale({
+        saleId: sale.id,
+        branchId: sale.branch_id,
+        prescriptionId: sale.prescription_id ?? null,
+        prescriptionDecremented,
+        saleWritten,
+        appliedInventoryDeltas,
+      });
       return {
         success: false,
         error: err instanceof Error ? err.message : "Failed to record sale transaction",
@@ -195,7 +207,6 @@ class OfflineSalesManager {
     idempotencyKey: string,
     now: string
   ): Promise<void> {
-    try {
       const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
       
       // ─── Capture prescription sync version if prescription was used ──────────
@@ -250,8 +261,78 @@ class OfflineSalesManager {
         `INSERT OR REPLACE INTO offline_sales (${cols.join(", ")}) VALUES (${placeholders})`,
         vals
       );
-    } catch (err) {
-      console.warn("[OfflineSalesManager] Offline sale audit row failed:", err);
+  }
+
+  private async compensateFailedSale({
+    saleId,
+    branchId,
+    prescriptionId,
+    prescriptionDecremented,
+    saleWritten,
+    appliedInventoryDeltas,
+  }: {
+    saleId: string;
+    branchId: string;
+    prescriptionId: string | null;
+    prescriptionDecremented: boolean;
+    saleWritten: boolean;
+    appliedInventoryDeltas: Array<{ drug_id: string; delta: number }>;
+  }): Promise<void> {
+    const db = await getDb();
+
+    for (const { drug_id, delta } of [...appliedInventoryDeltas].reverse()) {
+      try {
+        await writeLocal.inventory(branchId, drug_id, -delta);
+      } catch (error) {
+        console.error(
+          `[OfflineSalesManager] Failed to restore inventory for ${drug_id}:`,
+          error
+        );
+      }
+    }
+
+    if (prescriptionDecremented && prescriptionId) {
+      try {
+        await db.execute(
+          `UPDATE prescriptions
+           SET refills_remaining = refills_remaining + 1,
+               sync_version = MAX(1, sync_version - 1),
+               status = 'active',
+               sync_status = 'pending',
+               updated_at = $1
+           WHERE id = $2`,
+          [new Date().toISOString(), prescriptionId]
+        );
+      } catch (error) {
+        console.error(
+          `[OfflineSalesManager] Failed to restore prescription ${prescriptionId}:`,
+          error
+        );
+      }
+    }
+
+    if (saleWritten) {
+      try {
+        await db.execute(
+          "DELETE FROM sync_queue WHERE table_name = 'sales' AND record_id = $1",
+          [saleId]
+        );
+        await db.execute("DELETE FROM sales WHERE id = $1", [saleId]);
+      } catch (error) {
+        console.error(
+          `[OfflineSalesManager] Failed to remove incomplete sale ${saleId}:`,
+          error
+        );
+      }
+    }
+
+    try {
+      await db.execute("DELETE FROM offline_sales WHERE id = $1", [saleId]);
+    } catch (error) {
+      console.error(
+        `[OfflineSalesManager] Failed to remove audit row for ${saleId}:`,
+        error
+      );
     }
   }
 

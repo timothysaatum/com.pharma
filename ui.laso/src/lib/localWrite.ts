@@ -246,21 +246,45 @@ export const writeLocal = {
 
         const result = await db.execute(
             `UPDATE branch_inventory
-             SET quantity    = MAX(0, quantity + $1),
+             SET quantity    = quantity + $1,
                  sync_status = 'pending',
+                 sync_version = sync_version + 1,
                  updated_at  = $2
-             WHERE branch_id = $3 AND drug_id = $4`,
+             WHERE branch_id = $3
+               AND drug_id = $4
+               AND quantity + $1 >= 0`,
             [quantityDelta, now, branchId, drugId]
         );
 
         if (result.rowsAffected === 0) {
-            // No row yet — create one
+            const existing = await db.select<{ id: string; quantity: number }[]>(
+                `SELECT id, quantity
+                 FROM branch_inventory
+                 WHERE branch_id = $1 AND drug_id = $2
+                 LIMIT 1`,
+                [branchId, drugId]
+            );
+
+            if (existing.length > 0) {
+                throw new Error(
+                    `Insufficient local stock for drug ${drugId}. ` +
+                    `Available: ${existing[0].quantity}, requested change: ${quantityDelta}.`
+                );
+            }
+
+            if (quantityDelta < 0) {
+                throw new Error(
+                    `No local inventory record exists for drug ${drugId} at branch ${branchId}.`
+                );
+            }
+
+            // No row yet — create one only for non-negative stock additions.
             const id = crypto.randomUUID();
             await upsertAndEnqueue("branch_inventory", {
                 id,
                 branch_id: branchId,
                 drug_id: drugId,
-                quantity: Math.max(0, quantityDelta),
+                quantity: quantityDelta,
                 reserved_quantity: 0,
                 location: null,
                 selling_price: null,

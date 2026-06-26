@@ -6,7 +6,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { BarChart2, Download, RefreshCw, AlertCircle, ChevronLeft, ChevronRight, Building2, FileText } from 'lucide-react';
+import { BarChart2, Download, RefreshCw, AlertCircle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
 import { branchApi } from '@/api/branches';
@@ -76,7 +76,6 @@ export default function ReportsPage() {
   const [isExporting, setIsExporting] = useState(false);
   const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
   const [contracts, setContracts] = useState<{ id: string; name: string; code: string }[]>([]);
-  const [filterLoading, setFilterLoading] = useState(true);
 
   // Daily Sales Query
   const { data: dailySalesPaginated, isFetching: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
@@ -232,7 +231,6 @@ export default function ReportsPage() {
   useEffect(() => {
     let cancelled = false;
     async function load() {
-      setFilterLoading(true);
       try {
         const [branchRes, contractRes] = await Promise.all([
           branchApi.list({ page: 1, page_size: 100 }),
@@ -245,7 +243,7 @@ export default function ReportsPage() {
       } catch {
         // non-critical — filters will just show "All"
       } finally {
-        if (!cancelled) setFilterLoading(false);
+        // Filter metadata is optional; reports remain usable if it cannot load.
       }
     }
     void load();

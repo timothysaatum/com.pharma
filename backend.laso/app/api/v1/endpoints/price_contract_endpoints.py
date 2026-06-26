@@ -20,6 +20,8 @@ from app.schemas.price_contract_schemas import (
     PriceContractWithDetails,
     PriceContractListResponse,
     PriceContractFilters,
+    VerifyContractEligibilityRequest,
+    ContractEligibilityResponse,
     ApproveContractRequest,
     SuspendContractRequest,
     ActivateContractRequest
@@ -225,6 +227,33 @@ async def list_contracts(
         total_active_contracts=total_active_contracts,
         total_suspended_contracts=total_suspended_contracts,
         total_expired_contracts=total_expired_contracts
+    )
+
+
+# ============================================
+# VERIFY CONTRACT ELIGIBILITY
+# ============================================
+
+@router.post(
+    "/verify-eligibility",
+    response_model=ContractEligibilityResponse,
+    summary="Verify contract eligibility for POS"
+)
+async def verify_contract_eligibility(
+    eligibility_data: VerifyContractEligibilityRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Verify whether a contract can be applied to the current POS sale.
+
+    For verification-required contracts, the response includes a short-lived
+    token that must be submitted with the sale.
+    """
+    return await PriceContractService.verify_contract_eligibility(
+        db=db,
+        request=eligibility_data,
+        user=current_user,
     )
 
 
@@ -603,12 +632,14 @@ async def duplicate_contract(
         effective_from=date.today(),  # Start from today
         effective_to=original.effective_to,
         requires_verification=original.requires_verification,
+        requires_approval=original.requires_approval,
         allowed_user_roles=original.allowed_user_roles,
-        daily_usage_limit=None,
-        per_customer_usage_limit=None,
+        daily_usage_limit=original.daily_usage_limit,
+        per_customer_usage_limit=original.per_customer_usage_limit,
         insurance_provider_id=original.insurance_provider_id,
         copay_amount=Decimal(str(original.copay_amount)) if original.copay_amount else None,
         copay_percentage=Decimal(str(original.copay_percentage)) if original.copay_percentage else None,
+        requires_preauthorization=original.requires_preauthorization,
         status='draft',  # Always create as draft
         is_active=False
     )

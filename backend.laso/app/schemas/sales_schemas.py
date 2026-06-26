@@ -330,7 +330,7 @@ class SaleCreate(SaleBase):
     def validate_insurance_fields(self) -> 'SaleCreate':
         """Validate insurance-related fields"""
         if self.payment_method == 'insurance':
-            if not self.insurance_verified:
+            if not self.insurance_verified and not self.contract_verification_token:
                 raise ValueError(
                     "Insurance must be verified before processing payment"
                 )

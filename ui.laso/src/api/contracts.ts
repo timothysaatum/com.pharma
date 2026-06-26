@@ -6,6 +6,7 @@
  * Endpoints covered:
  *   POST   /contracts                        create
  *   GET    /contracts                        list (paginated + filtered)
+ *   POST   /contracts/verify-eligibility     POS eligibility + verification token
  *   GET    /contracts/{id}                   get single
  *   GET    /contracts/{id}/details           get with insurance + branch details
  *   PATCH  /contracts/{id}                   update (partial)
@@ -45,6 +46,41 @@ export interface AvailableContract {
     maximum_purchase_amount: number | null;
 }
 
+export interface ContractEligibilityRequest {
+    contract_id: string;
+    customer_id?: string | null;
+    drug_ids: string[];
+    branch_id: string;
+    sale_amount?: number | null;
+}
+
+export interface ContractEligibilityResponse {
+    eligible: boolean;
+    message: string;
+    contract_name: string;
+    discount_percentage: number;
+    customer_eligible: boolean;
+    customer_message?: string | null;
+    branch_eligible: boolean;
+    branch_message?: string | null;
+    date_eligible: boolean;
+    date_message?: string | null;
+    amount_eligible: boolean;
+    amount_message?: string | null;
+    user_role_eligible: boolean;
+    user_role_message?: string | null;
+    eligible_drugs: Array<Record<string, unknown>>;
+    ineligible_drugs: Array<Record<string, unknown>>;
+    requires_verification: boolean;
+    requires_approval: boolean;
+    requires_preauthorization: boolean;
+    insurance_details?: Record<string, unknown> | null;
+    copay_amount?: number | null;
+    copay_percentage?: number | null;
+    verification_token?: string | null;
+    verification_expires_at?: string | null;
+}
+
 // ── Contract response shape (full) ────────────────────────────────────────────
 
 export type ContractType =
@@ -54,8 +90,10 @@ export type ContractType =
 export type ContractStatus = "draft" | "active" | "suspended" | "expired" | "cancelled";
 
 export interface ContractResponse extends PriceContract {
-    requires_approval?: boolean;
-    daily_usage_limit?: number | null;
+    requires_approval: boolean;
+    daily_usage_limit: number | null;
+    per_customer_usage_limit: number | null;
+    requires_preauthorization: boolean;
     usage_count: number;
     total_sales_amount: number;
     total_discount_given: number;
@@ -101,7 +139,7 @@ export interface ContractCreate {
     description?: string;
     contract_type: ContractType;
     is_default_contract: boolean;
-    discount_type: "percentage" | "fixed_amount" | "tiered" | "custom";
+    discount_type: "percentage" | "fixed_amount" | "custom";
     discount_percentage: number;
     applies_to_prescription_only: boolean;
     applies_to_otc: boolean;
@@ -192,6 +230,14 @@ export const contractsApi = {
     /** GET /contracts/{id} */
     getById(id: string, signal?: AbortSignal): Promise<ContractResponse> {
         return get<ContractResponse>(`/contracts/${id}`, { signal });
+    },
+
+    /** POST /contracts/verify-eligibility — POS contract validation */
+    verifyEligibility(
+        data: ContractEligibilityRequest,
+        signal?: AbortSignal,
+    ): Promise<ContractEligibilityResponse> {
+        return post<ContractEligibilityResponse>("/contracts/verify-eligibility", data, { signal });
     },
 
     /** GET /contracts/{id}/details — with insurance provider + branch names */

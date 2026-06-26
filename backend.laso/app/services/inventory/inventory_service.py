@@ -45,6 +45,7 @@ from app.models.inventory.branch_inventory import (
     DrugBatch,
     StockAdjustment,
 )
+from app.models.inventory.ledger import InventoryMovement
 from app.models.inventory.inventory_model import Drug
 from app.schemas.inventory_schemas import (
     BranchInventoryWithDetails,
@@ -81,6 +82,81 @@ _VALID_ADJUSTMENT_TYPES: frozenset[str] = frozenset(
 
 class InventoryService:
     """Stateless service for inventory management."""
+
+    @staticmethod
+    async def _get_branch_organization_id(
+        db: AsyncSession,
+        branch_id: uuid.UUID,
+    ) -> uuid.UUID:
+        from app.models.pharmacy.pharmacy_model import Branch
+
+        organization_id = await db.scalar(
+            select(Branch.organization_id).where(Branch.id == branch_id)
+        )
+        if organization_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Branch not found.",
+            )
+        return organization_id
+
+    @staticmethod
+    async def _record_inventory_movement(
+        db: AsyncSession,
+        *,
+        branch_id: uuid.UUID,
+        drug_id: uuid.UUID,
+        movement_type: str,
+        quantity_change: int,
+        quantity_before: int,
+        quantity_after: int,
+        organization_id: Optional[uuid.UUID] = None,
+        batch_id: Optional[uuid.UUID] = None,
+        batch_quantity_before: Optional[int] = None,
+        batch_quantity_after: Optional[int] = None,
+        unit_cost: Optional[Decimal] = None,
+        unit_price: Optional[Decimal] = None,
+        source_type: Optional[str] = None,
+        source_id: Optional[uuid.UUID] = None,
+        source_line_id: Optional[uuid.UUID] = None,
+        reference_number: Optional[str] = None,
+        reason: Optional[str] = None,
+        created_by: Optional[uuid.UUID] = None,
+        context_metadata: Optional[dict] = None,
+    ) -> InventoryMovement:
+        if organization_id is None:
+            organization_id = await InventoryService._get_branch_organization_id(
+                db, branch_id
+            )
+
+        movement = InventoryMovement(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            branch_id=branch_id,
+            drug_id=drug_id,
+            batch_id=batch_id,
+            movement_type=movement_type,
+            quantity_change=quantity_change,
+            quantity_before=quantity_before,
+            quantity_after=quantity_after,
+            batch_quantity_before=batch_quantity_before,
+            batch_quantity_after=batch_quantity_after,
+            unit_cost=unit_cost,
+            unit_price=unit_price,
+            source_type=source_type,
+            source_id=source_id,
+            source_line_id=source_line_id,
+            reference_number=reference_number,
+            reason=reason,
+            created_by=created_by,
+            context_metadata=context_metadata,
+            occurred_at=datetime.now(timezone.utc),
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        )
+        db.add(movement)
+        await db.flush()
+        return movement
 
     @staticmethod
     async def _get_fefo_batch_selling_prices(
@@ -378,6 +454,7 @@ class InventoryService:
             .with_for_update()
         )
         inventory = result.scalar_one_or_none()
+        previous_quantity = inventory.quantity if inventory else 0
 
         if inventory:
             inventory.quantity = quantity
@@ -430,6 +507,23 @@ class InventoryService:
             )
             sys_batch.mark_as_pending_sync()
             db.add(sys_batch)
+
+        quantity_change = quantity - previous_quantity
+        if quantity_change != 0:
+            await InventoryService._record_inventory_movement(
+                db=db,
+                branch_id=branch_id,
+                drug_id=drug_id,
+                movement_type="correction",
+                quantity_change=quantity_change,
+                quantity_before=previous_quantity,
+                quantity_after=quantity,
+                batch_id=sys_batch.id,
+                batch_quantity_before=None,
+                batch_quantity_after=sys_batch.remaining_quantity,
+                source_type="stock_adjustment",
+                reason="Manual inventory set",
+            )
 
         # Resolve any existing low stock alerts if quantity is now healthy
         await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, quantity)
@@ -653,6 +747,18 @@ class InventoryService:
             )
 
         async with db.begin_nested():  # savepoint — both sides or neither
+            source_org_id = await InventoryService._get_branch_organization_id(
+                db, from_branch_id
+            )
+            dest_org_id = await InventoryService._get_branch_organization_id(
+                db, to_branch_id
+            )
+            if source_org_id != dest_org_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot transfer stock between different organizations.",
+                )
+
             # -- Pre-flight: check available stock at source with a lock -------
             src_res = await db.execute(
                 select(BranchInventory)
@@ -688,8 +794,9 @@ class InventoryService:
                 )
                 .with_for_update()
             )
-            if not dst_res.scalar_one_or_none():
-                dest = BranchInventory(
+            dest_inventory = dst_res.scalar_one_or_none()
+            if not dest_inventory:
+                dest_inventory = BranchInventory(
                     id=uuid.uuid4(),
                     branch_id=to_branch_id,
                     drug_id=drug_id,
@@ -698,31 +805,197 @@ class InventoryService:
                     created_at=datetime.now(timezone.utc),
                     updated_at=datetime.now(timezone.utc),
                 )
-                dest.mark_as_pending_sync()
-                db.add(dest)
+                dest_inventory.mark_as_pending_sync()
+                db.add(dest_inventory)
                 await db.flush()  # persist so _apply_adjustment can find it
 
-            # -- Deduct from source -------------------------------------------
-            source_adjustment, _ = await InventoryService._apply_adjustment(
-                db=db,
+            source_previous = source_inventory.quantity
+            dest_previous = dest_inventory.quantity
+            source_new = source_previous - quantity
+            dest_new = dest_previous + quantity
+
+            source_adjustment = StockAdjustment(
+                id=uuid.uuid4(),
                 branch_id=from_branch_id,
                 drug_id=drug_id,
-                quantity_change=-quantity,
                 adjustment_type="transfer",
+                quantity_change=-quantity,
+                previous_quantity=source_previous,
+                new_quantity=source_new,
                 reason=f"Transfer to branch {to_branch_id}: {reason}",
                 adjusted_by=transferred_by,
                 transfer_to_branch_id=to_branch_id,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
             )
-
-            # -- Credit destination -------------------------------------------
-            dest_adjustment, _ = await InventoryService._apply_adjustment(
-                db=db,
+            dest_adjustment = StockAdjustment(
+                id=uuid.uuid4(),
                 branch_id=to_branch_id,
                 drug_id=drug_id,
-                quantity_change=quantity,
                 adjustment_type="transfer",
+                quantity_change=quantity,
+                previous_quantity=dest_previous,
+                new_quantity=dest_new,
                 reason=f"Transfer from branch {from_branch_id}: {reason}",
                 adjusted_by=transferred_by,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            db.add_all([source_adjustment, dest_adjustment])
+            await db.flush()
+
+            source_batches_res = await db.execute(
+                select(DrugBatch)
+                .where(
+                    DrugBatch.branch_id == from_branch_id,
+                    DrugBatch.drug_id == drug_id,
+                    DrugBatch.remaining_quantity > 0,
+                    DrugBatch.expiry_date > date.today(),
+                )
+                .order_by(DrugBatch.expiry_date.asc(), DrugBatch.created_at.asc())
+                .with_for_update()
+            )
+            source_batches = source_batches_res.scalars().all()
+
+            qty_to_move = quantity
+            running_source_qty = source_previous
+            running_dest_qty = dest_previous
+
+            for source_batch in source_batches:
+                if qty_to_move <= 0:
+                    break
+
+                take = min(source_batch.remaining_quantity, qty_to_move)
+                source_batch_before = source_batch.remaining_quantity
+                source_batch.remaining_quantity -= take
+                source_batch.updated_at = datetime.now(timezone.utc)
+                source_batch.mark_as_pending_sync()
+
+                dest_batch_res = await db.execute(
+                    select(DrugBatch)
+                    .where(
+                        DrugBatch.branch_id == to_branch_id,
+                        DrugBatch.drug_id == drug_id,
+                        DrugBatch.batch_number == source_batch.batch_number,
+                    )
+                    .with_for_update()
+                )
+                dest_batch = dest_batch_res.scalar_one_or_none()
+                if dest_batch:
+                    dest_batch_before = dest_batch.remaining_quantity
+                    dest_batch.remaining_quantity += take
+                    dest_batch.quantity += take
+                    dest_batch.updated_at = datetime.now(timezone.utc)
+                    dest_batch.mark_as_pending_sync()
+                else:
+                    dest_batch_before = 0
+                    dest_batch = DrugBatch(
+                        id=uuid.uuid4(),
+                        branch_id=to_branch_id,
+                        drug_id=drug_id,
+                        batch_number=source_batch.batch_number,
+                        quantity=take,
+                        remaining_quantity=take,
+                        manufacturing_date=source_batch.manufacturing_date,
+                        expiry_date=source_batch.expiry_date,
+                        cost_price=source_batch.cost_price,
+                        selling_price=source_batch.selling_price,
+                        supplier=source_batch.supplier,
+                        purchase_order_id=source_batch.purchase_order_id,
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                    dest_batch.mark_as_pending_sync()
+                    db.add(dest_batch)
+                    await db.flush()
+
+                source_before = running_source_qty
+                running_source_qty -= take
+                dest_before = running_dest_qty
+                running_dest_qty += take
+
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    organization_id=source_org_id,
+                    branch_id=from_branch_id,
+                    drug_id=drug_id,
+                    movement_type="transfer_out",
+                    quantity_change=-take,
+                    quantity_before=source_before,
+                    quantity_after=running_source_qty,
+                    batch_id=source_batch.id,
+                    batch_quantity_before=source_batch_before,
+                    batch_quantity_after=source_batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(source_batch.cost_price))
+                        if source_batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=(
+                        Decimal(str(source_batch.selling_price))
+                        if source_batch.selling_price is not None
+                        else None
+                    ),
+                    source_type="stock_adjustment",
+                    source_id=source_adjustment.id,
+                    source_line_id=dest_adjustment.id,
+                    reference_number=source_batch.batch_number,
+                    reason=reason,
+                    created_by=transferred_by,
+                    context_metadata={"to_branch_id": str(to_branch_id)},
+                )
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    organization_id=dest_org_id,
+                    branch_id=to_branch_id,
+                    drug_id=drug_id,
+                    movement_type="transfer_in",
+                    quantity_change=take,
+                    quantity_before=dest_before,
+                    quantity_after=running_dest_qty,
+                    batch_id=dest_batch.id,
+                    batch_quantity_before=dest_batch_before,
+                    batch_quantity_after=dest_batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(dest_batch.cost_price))
+                        if dest_batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=(
+                        Decimal(str(dest_batch.selling_price))
+                        if dest_batch.selling_price is not None
+                        else None
+                    ),
+                    source_type="stock_adjustment",
+                    source_id=dest_adjustment.id,
+                    source_line_id=source_adjustment.id,
+                    reference_number=dest_batch.batch_number,
+                    reason=reason,
+                    created_by=transferred_by,
+                    context_metadata={"from_branch_id": str(from_branch_id)},
+                )
+
+                qty_to_move -= take
+
+            if qty_to_move > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"Insufficient valid batch stock for transfer. "
+                        f"Unable to allocate {qty_to_move} unit(s)."
+                    ),
+                )
+
+            source_inventory.quantity = source_new
+            source_inventory.updated_at = datetime.now(timezone.utc)
+            source_inventory.mark_as_pending_sync()
+
+            dest_inventory.quantity = dest_new
+            dest_inventory.updated_at = datetime.now(timezone.utc)
+            dest_inventory.mark_as_pending_sync()
+
+            await InventoryService._resolve_inventory_alerts(
+                db, to_branch_id, drug_id, dest_new
             )
 
         # Both sides succeeded — commit once
@@ -835,6 +1108,7 @@ class InventoryService:
     async def create_batch(
         db: AsyncSession,
         batch_data: DrugBatchCreate,
+        created_by: Optional[uuid.UUID] = None,
     ) -> DrugBatch:
         """
         Create a drug batch and **add** its quantity to ``BranchInventory``.
@@ -920,7 +1194,7 @@ class InventoryService:
             # Use a dummy system user ID if no specific user is associated with PO receipt
             # Or assume the caller will handle it if we want to be strict.
             # For now, we try to get the 'ordered_by' from PO if available.
-            adjusted_by = uuid.UUID(int=0)  # Default system UUID
+            adjusted_by = created_by or uuid.UUID(int=0)  # Default system UUID
             # Try to find who received it if PO exists
             if batch_data.purchase_order_id:
                 from app.models.sales.sales_model import PurchaseOrder
@@ -943,6 +1217,38 @@ class InventoryService:
                 updated_at=datetime.now(timezone.utc),
             )
             db.add(adjustment)
+            await db.flush()
+
+            await InventoryService._record_inventory_movement(
+                db=db,
+                branch_id=batch_data.branch_id,
+                drug_id=batch_data.drug_id,
+                movement_type="purchase_receipt",
+                quantity_change=batch_data.quantity,
+                quantity_before=previous_quantity,
+                quantity_after=new_quantity,
+                batch_id=batch.id,
+                batch_quantity_before=0,
+                batch_quantity_after=batch.remaining_quantity,
+                unit_cost=(
+                    Decimal(str(batch_data.cost_price))
+                    if batch_data.cost_price is not None
+                    else None
+                ),
+                unit_price=(
+                    Decimal(str(batch_data.selling_price))
+                    if batch_data.selling_price is not None
+                    else None
+                ),
+                source_type=(
+                    "purchase_order" if batch_data.purchase_order_id else "batch"
+                ),
+                source_id=batch_data.purchase_order_id or batch.id,
+                source_line_id=batch.id,
+                reference_number=batch_data.batch_number,
+                reason=f"Purchase receipt: Batch {batch_data.batch_number}",
+                created_by=adjusted_by if adjusted_by.int != 0 else None,
+            )
 
         await db.commit()
         await db.refresh(batch)
@@ -978,6 +1284,15 @@ class InventoryService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Batch not found.",
             )
+
+        old_remaining_quantity = batch.remaining_quantity
+        old_inventory_quantity = await db.scalar(
+            select(BranchInventory.quantity).where(
+                BranchInventory.branch_id == batch.branch_id,
+                BranchInventory.drug_id == batch.drug_id,
+            )
+        )
+        old_inventory_quantity = int(old_inventory_quantity or 0)
 
         update_data = batch_data.model_dump(exclude_unset=True)
 
@@ -1021,7 +1336,7 @@ class InventoryService:
             # ── Sync with BranchInventory ──
             # We re-calculate the total quantity from the sum of all batches
             # to resolve any discrepancies/drift between batch counts and the inventory total.
-            await InventoryService._recalculate_inventory_quantity(
+            new_inventory_quantity = await InventoryService._recalculate_inventory_quantity(
                 db=db,
                 branch_id=batch.branch_id,
                 drug_id=batch.drug_id,
@@ -1040,6 +1355,35 @@ class InventoryService:
                 inventory.selling_price = update_data["selling_price"]
                 inventory.updated_at = datetime.now(timezone.utc)
                 inventory.mark_as_pending_sync()
+
+            quantity_change = batch.remaining_quantity - old_remaining_quantity
+            if quantity_change != 0:
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    branch_id=batch.branch_id,
+                    drug_id=batch.drug_id,
+                    movement_type="correction",
+                    quantity_change=quantity_change,
+                    quantity_before=old_inventory_quantity,
+                    quantity_after=new_inventory_quantity,
+                    batch_id=batch.id,
+                    batch_quantity_before=old_remaining_quantity,
+                    batch_quantity_after=batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(batch.cost_price))
+                        if batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=(
+                        Decimal(str(batch.selling_price))
+                        if batch.selling_price is not None
+                        else None
+                    ),
+                    source_type="batch",
+                    source_id=batch.id,
+                    reference_number=batch.batch_number,
+                    reason="Batch quantity correction",
+                )
 
         await db.commit()
         await db.refresh(batch)
@@ -1090,6 +1434,7 @@ class InventoryService:
                     ),
                 )
 
+            previous_batch_quantity = batch.remaining_quantity
             batch.remaining_quantity -= quantity
             batch.updated_at          = datetime.now(timezone.utc)
             batch.mark_as_pending_sync()
@@ -1113,11 +1458,40 @@ class InventoryService:
                     ),
                 )
 
+            previous_inventory_quantity = inventory.quantity
+
             # Keep BranchInventory in sync via recalculation to prevent drift
-            await InventoryService._recalculate_inventory_quantity(
+            new_inventory_quantity = await InventoryService._recalculate_inventory_quantity(
                 db=db,
                 branch_id=batch.branch_id,
                 drug_id=batch.drug_id,
+            )
+
+            await InventoryService._record_inventory_movement(
+                db=db,
+                branch_id=batch.branch_id,
+                drug_id=batch.drug_id,
+                movement_type="batch_consume",
+                quantity_change=-quantity,
+                quantity_before=previous_inventory_quantity,
+                quantity_after=new_inventory_quantity,
+                batch_id=batch.id,
+                batch_quantity_before=previous_batch_quantity,
+                batch_quantity_after=batch.remaining_quantity,
+                unit_cost=(
+                    Decimal(str(batch.cost_price))
+                    if batch.cost_price is not None
+                    else None
+                ),
+                unit_price=(
+                    Decimal(str(batch.selling_price))
+                    if batch.selling_price is not None
+                    else None
+                ),
+                source_type="batch",
+                source_id=batch.id,
+                reference_number=batch.batch_number,
+                reason="Direct batch consumption",
             )
 
         await db.commit()
@@ -1617,6 +1991,7 @@ class InventoryService:
                 detail="Inventory record not found for this drug at this branch.",
             )
 
+        previous_inventory_quantity = inventory.quantity
         new_quantity = inventory.quantity + quantity_change
         if new_quantity < 0:
             raise HTTPException(
@@ -1666,6 +2041,7 @@ class InventoryService:
             )
             target_batch = batch_res.scalar_one_or_none()
             if target_batch:
+                previous_batch_quantity = target_batch.remaining_quantity
                 target_batch.remaining_quantity += quantity_change
                 # Prevent IntegrityError: ensure initial quantity tracks discovered stock
                 if target_batch.remaining_quantity > target_batch.quantity:
@@ -1676,6 +2052,7 @@ class InventoryService:
             else:
                 # No active batch found - create a system adjustment batch to prevent data loss
                 # during recalculation.
+                previous_batch_quantity = 0
                 target_batch = DrugBatch(
                     id=uuid.uuid4(),
                     branch_id=branch_id,
@@ -1690,10 +2067,44 @@ class InventoryService:
                 target_batch.mark_as_pending_sync()
                 db.add(target_batch)
 
+            movement_type = (
+                "transfer_in"
+                if adjustment_type == "transfer"
+                else adjustment_type
+            )
+            await InventoryService._record_inventory_movement(
+                db=db,
+                branch_id=branch_id,
+                drug_id=drug_id,
+                movement_type=movement_type,
+                quantity_change=quantity_change,
+                quantity_before=previous_inventory_quantity,
+                quantity_after=new_quantity,
+                batch_id=target_batch.id,
+                batch_quantity_before=previous_batch_quantity,
+                batch_quantity_after=target_batch.remaining_quantity,
+                unit_cost=(
+                    Decimal(str(target_batch.cost_price))
+                    if target_batch.cost_price is not None
+                    else None
+                ),
+                unit_price=(
+                    Decimal(str(target_batch.selling_price))
+                    if target_batch.selling_price is not None
+                    else None
+                ),
+                source_type="stock_adjustment",
+                source_id=adjustment.id,
+                reference_number=target_batch.batch_number,
+                reason=reason,
+                created_by=adjusted_by,
+            )
+
         elif quantity_change < 0:
             # For deductions (damage/theft/correction), deduct FEFO
             # For expired write-offs, deduct from already-expired batches
             qty_to_deduct = abs(quantity_change)
+            running_inventory_quantity = previous_inventory_quantity
             expiry_condition = (
                 DrugBatch.expiry_date <= date.today()
                 if adjustment_type == "expired"
@@ -1714,10 +2125,55 @@ class InventoryService:
                 if qty_to_deduct <= 0:
                     break
                 take = min(batch.remaining_quantity, qty_to_deduct)
+                previous_batch_quantity = batch.remaining_quantity
+                movement_quantity_before = running_inventory_quantity
+                running_inventory_quantity -= take
                 batch.remaining_quantity -= take
                 batch.updated_at = datetime.now(timezone.utc)
                 batch.mark_as_pending_sync()
                 qty_to_deduct -= take
+
+                movement_type = (
+                    "transfer_out"
+                    if adjustment_type == "transfer"
+                    else adjustment_type
+                )
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    branch_id=branch_id,
+                    drug_id=drug_id,
+                    movement_type=movement_type,
+                    quantity_change=-take,
+                    quantity_before=movement_quantity_before,
+                    quantity_after=running_inventory_quantity,
+                    batch_id=batch.id,
+                    batch_quantity_before=previous_batch_quantity,
+                    batch_quantity_after=batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(batch.cost_price))
+                        if batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=(
+                        Decimal(str(batch.selling_price))
+                        if batch.selling_price is not None
+                        else None
+                    ),
+                    source_type="stock_adjustment",
+                    source_id=adjustment.id,
+                    reference_number=batch.batch_number,
+                    reason=reason,
+                    created_by=adjusted_by,
+                )
+
+            if qty_to_deduct > 0:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Insufficient eligible batch stock for adjustment. "
+                        f"Unable to allocate {qty_to_deduct} unit(s) from batches."
+                    ),
+                )
 
         # ── Final parity check ──
         # Ensure aggregate inventory matches the new batch totals exactly

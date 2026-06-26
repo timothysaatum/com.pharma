@@ -79,6 +79,7 @@ class RedisBackend:
         self._redis_url = redis_url
         self._redis = None
         self._connect_error: Optional[str] = None
+        self._fallback = MemoryBackend()
 
     async def _get_redis(self):
         if self._redis is not None:
@@ -104,16 +105,21 @@ class RedisBackend:
     async def is_limited(self, key: str, max_requests: int, window_seconds: int) -> bool:
         r = await self._get_redis()
         if r is None:
-            return False
+            return await self._fallback.is_limited(
+                key, max_requests, window_seconds
+            )
         try:
             val = await r.get(key)
             return (int(val) if val else 0) >= max_requests
         except Exception:
-            return False
+            return await self._fallback.is_limited(
+                key, max_requests, window_seconds
+            )
 
     async def record(self, key: str, window_seconds: int) -> None:
         r = await self._get_redis()
         if r is None:
+            await self._fallback.record(key, window_seconds)
             return
         try:
             pipe = r.pipeline()
@@ -121,22 +127,27 @@ class RedisBackend:
             pipe.expire(key, window_seconds)
             await pipe.execute()
         except Exception:
-            pass
+            await self._fallback.record(key, window_seconds)
 
     async def remaining(self, key: str, max_requests: int, window_seconds: int) -> int:
         r = await self._get_redis()
         if r is None:
-            return max_requests
+            return await self._fallback.remaining(
+                key, max_requests, window_seconds
+            )
         try:
             val = await r.get(key)
             current = int(val) if val else 0
             return max(0, max_requests - current)
         except Exception:
-            return max_requests
+            return await self._fallback.remaining(
+                key, max_requests, window_seconds
+            )
 
     async def close(self) -> None:
         if self._redis:
             await self._redis.aclose()
+        await self._fallback.close()
 
 
 # ── Backend Factory ──────────────────────────────────────────────────────
@@ -214,12 +225,13 @@ _rate_limit_counter: List[int] = [0]
 
 
 def _get_client_ip(request: Request) -> str:
-    forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
-        return forwarded.split(",")[0].strip()
-    real_ip = request.headers.get("X-Real-IP")
-    if real_ip:
-        return real_ip
+    if settings.TRUST_PROXY_HEADERS:
+        forwarded = request.headers.get("X-Forwarded-For")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+        real_ip = request.headers.get("X-Real-IP")
+        if real_ip:
+            return real_ip
     return request.client.host if request.client else "unknown"
 
 

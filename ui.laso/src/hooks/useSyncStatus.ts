@@ -9,13 +9,14 @@
 import { useState, useEffect, useCallback } from "react";
 import { syncEngine } from "@/lib/syncEngine";
 import type { SyncStatus } from "@/types";
-import type { QueuedConflict } from "@/lib/localDb";
+import type { QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
 export interface SyncState {
     status: SyncStatus;
     pendingCount: number;
     lastSyncAt: string | null;
     conflicts: QueuedConflict[];
+    failures: QueuedFailure[];
     /** Manually trigger a sync (e.g. from a button) */
     syncNow: () => Promise<void>;
     /** Resolve a manual conflict with server or local preference */
@@ -30,6 +31,7 @@ export function useSyncStatus(): SyncState {
     const [pendingCount, setPendingCount] = useState(0);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
     const [conflicts, setConflicts] = useState<QueuedConflict[]>(syncEngine.pendingConflicts);
+    const [failures, setFailures] = useState<QueuedFailure[]>(syncEngine.pendingFailures);
 
     useEffect(() => {
         const unsub = syncEngine.subscribe((s, count, last) => {
@@ -37,11 +39,12 @@ export function useSyncStatus(): SyncState {
             setPendingCount(count);
             setLastSyncAt(last);
             setConflicts([...syncEngine.pendingConflicts]);
+            setFailures([...syncEngine.pendingFailures]);
         });
         return unsub;
     }, []);
 
-    const syncNow = useCallback(() => syncEngine.sync(), []);
+    const syncNow = useCallback(() => syncEngine.retryFailed(), []);
 
     const resolveConflict = useCallback(
         (conflict: QueuedConflict, resolution: "server_wins" | "local_wins") =>
@@ -49,5 +52,5 @@ export function useSyncStatus(): SyncState {
         []
     );
 
-    return { status, pendingCount, lastSyncAt, conflicts, syncNow, resolveConflict };
+    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict };
 }

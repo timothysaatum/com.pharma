@@ -23,7 +23,7 @@ interface AuthState {
     setupState: SetupState;
 
     initialize: () => Promise<void>;
-    login: (username: string, password: string) => Promise<void>;
+    login: (username: string, password: string, totp_code?: string) => Promise<void>;
     logout: () => Promise<void>;
     setUser: (user: User) => void;
     setActiveBranch: (branchId: string) => void;
@@ -100,7 +100,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 set({ user, isAuthenticated: true, activeBranchId, setupState });
 
                 if (activeBranchId) {
-                    syncEngine.start(activeBranchId);
+                    syncEngine.start(activeBranchId, user.organization_id);
                 }
             }
         } catch {
@@ -133,7 +133,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         });
 
         if (branchId) {
-            syncEngine.start(branchId);
+            syncEngine.start(branchId, data.user.organization_id);
         }
     },
 
@@ -154,10 +154,11 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     },
 
     setActiveBranch: (branchId) => {
+        const { user } = get();
         authStorage.setActiveBranch(branchId);
         set({ activeBranchId: branchId });
         syncEngine.stop();
-        syncEngine.start(branchId);
+        syncEngine.start(branchId, user?.organization_id ?? null);
     },
 
     /**
@@ -169,6 +170,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (!user) return;
         authStorage.setActiveBranch(branchId);
         set({ activeBranchId: branchId, setupState: "ready" });
-        syncEngine.start(branchId);
+        syncEngine.start(branchId, user.organization_id);
     },
 }));

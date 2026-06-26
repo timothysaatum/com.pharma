@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
 from pydantic import ValidationError
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DataError, IntegrityError
 
 from app.core.config import get_settings
@@ -103,7 +104,10 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info(f"Starting {settings.PROJECT_NAME} v{settings.VERSION}")
     logger.info(f"Environment: {settings.ENVIRONMENT}")
-    logger.info(f"Database: {settings.DATABASE_URL}")
+    database_url = make_url(settings.DATABASE_URL).render_as_string(
+        hide_password=True
+    )
+    logger.info("Database: %s", database_url)
     
     try:
         # Database connection check
@@ -483,7 +487,11 @@ async def deep_health_check():
     except Exception as e:
         logger.error(f"Database health check failed: {str(e)}")
         health_status["status"] = "degraded"
-        health_status["checks"]["database"] = f"unhealthy: {str(e)}"
+        health_status["checks"]["database"] = (
+            "unhealthy"
+            if settings.is_production
+            else f"unhealthy: {str(e)}"
+        )
     
     return health_status
 
@@ -529,8 +537,8 @@ async def root():
     return {
         "message": f"Welcome to {settings.PROJECT_NAME}",
         "version": settings.VERSION,
-        "docs": f"{settings.API_PREFIX or '/api/v1'}/docs",
-        "redoc": f"{settings.API_PREFIX or '/api/v1'}/redoc",
+        "docs": "/docs",
+        "redoc": "/redoc",
         "health": "/health",
         "deep_health": "/health/deep",
     }

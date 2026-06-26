@@ -1,3 +1,9 @@
+import os
+
+os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["SECRET_KEY"] = "test-secret-key-that-is-long-enough-for-jwt-signing"
+os.environ["ENVIRONMENT"] = "test"
+
 import pytest
 import pytest_asyncio
 import uuid
@@ -12,7 +18,7 @@ from app.models.user.user_model import User
 from app.models.inventory.inventory_model import Drug
 from app.models.customer.customer_model import Customer
 
-DATABASE_URL_TEST = "sqlite+aiosqlite:///:memory:"
+DATABASE_URL_TEST = os.environ["DATABASE_URL"]
 
 @pytest_asyncio.fixture(scope="function")
 async def db():

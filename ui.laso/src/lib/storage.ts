@@ -1,16 +1,16 @@
 /**
  * Tauri-safe storage layer.
- * Uses @tauri-apps/plugin-store in native Tauri context (encrypted),
- * falls back to localStorage with AES-GCM encryption for browser / dev mode.
+ * Uses @tauri-apps/plugin-store in native Tauri context.
+ * Browser/dev auth tokens use sessionStorage so they are cleared when the tab
+ * closes; non-sensitive cached data uses localStorage.
  *
  * plugin-store v2 changed API: use load() instead of new Store()
  *
- * Security note (browser fallback):
- *   Tokens are encrypted with AES-GCM using a random key derived at page load.
- *   The encryption key lives only in memory (not persisted), so a new page
- *   load or XSS that reads localStorage will get ciphertext only.
- *   This mitigates — but does not fully eliminate — localStorage XSS risk.
- *   Production deployments should use the Tauri native store.
+ * Security note:
+ *   Browser storage remains accessible to JavaScript and therefore requires a
+ *   strict Content Security Policy and XSS prevention. Native builds should
+ *   migrate refresh tokens to Tauri Stronghold before handling untrusted local
+ *   users or regulated data.
  */
 
 import type { BranchListItem, Organization, OrganizationStats, PaginatedResponse, UserResponse } from "@/types";
@@ -18,64 +18,14 @@ import type { BranchListItem, Organization, OrganizationStats, PaginatedResponse
 const IS_TAURI =
     typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
-// ── Browser-only encryption helpers ─────────────────────────
-
-let _browserKey: CryptoKey | null = null;
-
-async function _getBrowserKey(): Promise<CryptoKey | null> {
-    if (_browserKey) return _browserKey;
-    try {
-        // Generate an ephemeral AES-GCM key that lives only in memory
-        _browserKey = await crypto.subtle.generateKey(
-            { name: "AES-GCM", length: 256 },
-            false, // not extractable — key never leaves memory
-            ["encrypt", "decrypt"],
-        );
-        return _browserKey;
-    } catch {
-        return null; // crypto unavailable — store in plaintext
-    }
-}
-
-async function _encrypt(plaintext: string): Promise<string> {
-    const key = await _getBrowserKey();
-    if (!key) return plaintext;
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encoded = new TextEncoder().encode(plaintext);
-    const ciphertext = await crypto.subtle.encrypt(
-        { name: "AES-GCM", iv },
-        key,
-        encoded,
-    );
-    // Prepend IV to ciphertext and encode as base64
-    const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-    combined.set(iv);
-    combined.set(new Uint8Array(ciphertext), iv.length);
-    return btoa(String.fromCharCode(...combined));
-}
-
-async function _decrypt(data: string): Promise<string | null> {
-    const key = await _getBrowserKey();
-    if (!key) return data;
-    try {
-        const combined = Uint8Array.from(atob(data), c => c.charCodeAt(0));
-        const iv = combined.slice(0, 12);
-        const ciphertext = combined.slice(12);
-        const plaintext = await crypto.subtle.decrypt(
-            { name: "AES-GCM", iv },
-            key,
-            ciphertext,
-        );
-        return new TextDecoder().decode(plaintext);
-    } catch {
-        return null; // decryption failed — possibly tampered
-    }
-}
-
 const _SENSITIVE_KEYS = new Set([
     "auth.access_token",
     "auth.refresh_token",
 ]);
+
+function browserStorage(key: string): Storage {
+    return _SENSITIVE_KEYS.has(key) ? sessionStorage : localStorage;
+}
 
 // ── Tauri store ─────────────────────────────────────────────
 
@@ -111,21 +61,10 @@ async function storageGet<T>(key: string): Promise<T | null> {
         const val: any = await store.get(key);
         return (val ?? null) as T | null;
     }
-    const raw = localStorage.getItem(key);
+    const raw = browserStorage(key).getItem(key);
     if (!raw) return null;
     try {
-        let parsed: unknown;
-        if (_SENSITIVE_KEYS.has(key)) {
-            const decrypted = await _decrypt(raw);
-            if (decrypted === null) {
-                localStorage.removeItem(key);
-                return null;
-            }
-            parsed = decrypted;
-        } else {
-            parsed = raw;
-        }
-        return JSON.parse(parsed as string) as T;
+        return JSON.parse(raw) as T;
     } catch {
         return raw as unknown as T;
     }
@@ -138,12 +77,7 @@ async function storageSet(key: string, value: unknown): Promise<void> {
         return;
     }
     const serialized = JSON.stringify(value);
-    if (_SENSITIVE_KEYS.has(key)) {
-        const encrypted = await _encrypt(serialized);
-        localStorage.setItem(key, encrypted);
-    } else {
-        localStorage.setItem(key, serialized);
-    }
+    browserStorage(key).setItem(key, serialized);
 }
 
 async function storageDel(key: string): Promise<void> {
@@ -152,7 +86,7 @@ async function storageDel(key: string): Promise<void> {
         await store.delete(key);
         return;
     }
-    localStorage.removeItem(key);
+    browserStorage(key).removeItem(key);
 }
 
 // ── Auth-specific helpers ──────────────────────────────────

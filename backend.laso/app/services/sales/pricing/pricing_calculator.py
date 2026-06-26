@@ -178,18 +178,36 @@ def compute_item_pricing(
                 )
 
             else:
-                # Percentage discount: per-drug override takes priority over default
-                effective_pct = (
-                    d(ci.override_discount_percentage)
-                    if ci is not None and ci.override_discount_percentage is not None
-                    else d(contract.discount_percentage)
-                )
-                discount_pct  = effective_pct
-                raw_discount  = r2(item_subtotal * effective_pct / 100)
+                if ci is not None and ci.override_discount_percentage is not None:
+                    effective_pct = d(ci.override_discount_percentage)
+                    discount_pct  = effective_pct
+                    raw_discount  = r2(item_subtotal * effective_pct / 100)
+                elif contract.discount_type == "fixed_amount":
+                    raw_discount = min(
+                        item_subtotal,
+                        r2(d(contract.discount_percentage)),
+                    )
+                    discount_pct = (
+                        r2(raw_discount / item_subtotal * 100)
+                        if item_subtotal > 0
+                        else Decimal("0")
+                    )
+                elif contract.discount_type == "custom":
+                    raw_discount = Decimal("0")
+                    discount_pct = Decimal("0")
+                else:
+                    effective_pct = d(contract.discount_percentage)
+                    discount_pct  = effective_pct
+                    raw_discount  = r2(item_subtotal * effective_pct / 100)
 
                 # Cap: maximum_discount_amount per item
                 if contract.maximum_discount_amount is not None:
                     raw_discount = min(raw_discount, d(contract.maximum_discount_amount))
+                    discount_pct = (
+                        r2(raw_discount / item_subtotal * 100)
+                        if item_subtotal > 0
+                        else Decimal("0")
+                    )
 
                 discount_amount = raw_discount
 

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
-from jose import JWTError, jwt
+import jwt
+from jwt import InvalidTokenError
 from passlib.context import CryptContext
 import hashlib
 import secrets
@@ -54,18 +55,20 @@ class SecurityUtils:
     ) -> str:
         """Create a JWT access token"""
         to_encode = data.copy()
+        now = datetime.now(timezone.utc)
         
         if expires_delta:
-            expire = datetime.now(timezone.utc) + expires_delta
+            expire = now + expires_delta
         else:
-            expire = datetime.now(timezone.utc) + timedelta(
+            expire = now + timedelta(
                 minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
             )
         
         to_encode.update({
             "exp": expire,
-            "iat": datetime.now(timezone.utc),
-            "type": "access"
+            "iat": now,
+            "jti": str(uuid.uuid4()),
+            "type": "access",
         })
         
         encoded_jwt = jwt.encode(
@@ -83,18 +86,20 @@ class SecurityUtils:
     ) -> str:
         """Create a JWT refresh token"""
         to_encode = data.copy()
+        now = datetime.now(timezone.utc)
         
         if expires_delta:
-            expire = datetime.now(timezone.utc) + expires_delta
+            expire = now + expires_delta
         else:
-            expire = datetime.now(timezone.utc) + timedelta(
+            expire = now + timedelta(
                 days=settings.REFRESH_TOKEN_EXPIRE_DAYS
             )
         
         to_encode.update({
             "exp": expire,
-            "iat": datetime.now(timezone.utc),
-            "type": "refresh"
+            "iat": now,
+            "jti": str(uuid.uuid4()),
+            "type": "refresh",
         })
         
         encoded_jwt = jwt.encode(
@@ -115,7 +120,7 @@ class SecurityUtils:
                 algorithms=[settings.ALGORITHM]
             )
             return payload
-        except JWTError:
+        except InvalidTokenError:
             return None
     
     @staticmethod
@@ -168,6 +173,29 @@ class SecurityUtils:
         """Get otpauth:// URI for QR code generation"""
         import pyotp
         return pyotp.TOTP(secret).provisioning_uri(email, issuer_name=issuer)
+
+    @staticmethod
+    def get_totp_qr_code_data_uri(provisioning_uri: str) -> str:
+        """Render an otpauth:// provisioning URI as a PNG data URL."""
+        import base64
+        from io import BytesIO
+
+        import qrcode
+
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=qrcode.constants.ERROR_CORRECT_M,
+            box_size=8,
+            border=4,
+        )
+        qr.add_data(provisioning_uri)
+        qr.make(fit=True)
+
+        image = qr.make_image(fill_color="black", back_color="white")
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        return f"data:image/png;base64,{encoded}"
 
     @staticmethod
     def verify_totp(secret: str, code: str) -> bool:
@@ -223,6 +251,11 @@ def generate_totp_secret() -> str:
 def get_totp_provisioning_uri(secret: str, email: str, issuer: str = "PharmaApp") -> str:
     """Get otpauth:// URI for QR code generation"""
     return SecurityUtils.get_totp_provisioning_uri(secret, email, issuer)
+
+
+def get_totp_qr_code_data_uri(provisioning_uri: str) -> str:
+    """Render an otpauth:// provisioning URI as a PNG data URL."""
+    return SecurityUtils.get_totp_qr_code_data_uri(provisioning_uri)
 
 
 def verify_totp(secret: str, code: str) -> bool:

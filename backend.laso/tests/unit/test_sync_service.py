@@ -2,6 +2,7 @@ import uuid
 
 import pytest
 
+from app.api.v1.endpoints.sync_endpoints import _user_can_sync_branch
 from app.schemas.sync_schemas import PullRequest, PullResponse
 from app.services.sync.sync_service import SyncService
 
@@ -61,3 +62,11 @@ async def test_pull_uses_fresh_session_when_request_session_already_has_transact
     await SyncService.pull(request_session, request, organization_id)
 
     assert seen_sessions == [snapshot_session]
+
+
+def test_sync_branch_access_normalizes_uuid_assignments():
+    branch_id = uuid.uuid4()
+    user = type("User", (), {"assigned_branches": [branch_id]})()
+
+    assert _user_can_sync_branch(user, branch_id)
+    assert _user_can_sync_branch(user, str(branch_id))

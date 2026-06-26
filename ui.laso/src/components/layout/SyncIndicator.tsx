@@ -25,10 +25,14 @@ interface SyncIndicatorProps {
 }
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
-    const { status, pendingCount, lastSyncAt, conflicts, syncNow } = useSyncStatus();
+    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow } = useSyncStatus();
     const [showConflictModal, setShowConflictModal] = useState(false);
 
     const hasConflicts = conflicts.length > 0;
+    const hasFailures = failures.length > 0;
+    const blockedFailures = failures.filter((failure) => failure.is_blocked).length;
+    const latestFailure = failures[0];
+    const latestFailureText = latestFailure?.error ?? "Unknown sync error";
 
     // ── Icon and colour per status ──────────────────────────
 
@@ -37,7 +41,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return <RefreshCw className="w-3.5 h-3.5 animate-spin text-brand-400" />;
         if (status === "offline")
             return <WifiOff className="w-3.5 h-3.5 text-amber-400" />;
-        if (status === "error" || hasConflicts)
+        if (status === "error" || hasConflicts || hasFailures)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
         return <CheckCircle2 className="w-3.5 h-3.5 text-brand-400" />;
     })();
@@ -45,8 +49,14 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
     const label = (() => {
         if (status === "syncing") return "Syncing…";
         if (status === "offline") return "Offline";
-        if (status === "error") return "Sync error";
         if (hasConflicts) return `${conflicts.length} conflict${conflicts.length > 1 ? "s" : ""}`;
+        if (hasFailures) {
+            if (blockedFailures > 0) {
+                return `${blockedFailures} blocked`;
+            }
+            return `${failures.length} failed`;
+        }
+        if (status === "error") return "Sync error";
         if (pendingCount > 0) return `${pendingCount} pending`;
         return formatRelative(lastSyncAt);
     })();
@@ -87,7 +97,11 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
 
                 {/* Pending badge */}
                 {pendingCount > 0 && status !== "syncing" && (
-                    <span className="text-xs bg-amber-500/20 text-amber-300 rounded px-1.5 py-0.5 font-mono leading-none">
+                    <span className={`text-xs rounded px-1.5 py-0.5 font-mono leading-none ${
+                        hasConflicts || hasFailures || status === "error"
+                            ? "bg-red-500/20 text-red-300"
+                            : "bg-amber-500/20 text-amber-300"
+                    }`}>
                         {pendingCount}
                     </span>
                 )}
@@ -96,7 +110,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                 {status !== "syncing" && status !== "offline" && (
                     <button
                         onClick={syncNow}
-                        title="Sync now"
+                        title={hasFailures ? "Retry failed sync records" : "Sync now"}
                         className="text-white/30 hover:text-white transition-colors"
                     >
                         <RefreshCw className="w-3 h-3" />
@@ -116,6 +130,21 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                     >
                         Resolve conflicts
                     </button>
+                </>
+            )}
+            {hasFailures && (
+                <>
+                    <p className="mt-1.5 text-xs text-red-400 leading-tight">
+                        {blockedFailures > 0
+                            ? `${blockedFailures} record${blockedFailures > 1 ? "s have" : " has"} stopped retrying`
+                            : `${failures.length} record${failures.length > 1 ? "s" : ""} failed to sync`}
+                    </p>
+                    <p
+                        className="mt-1 truncate text-[11px] leading-tight text-white/35"
+                        title={`${latestFailure?.table_name ?? "sync"}: ${latestFailureText}`}
+                    >
+                        {latestFailure?.table_name ?? "sync"}: {latestFailureText}
+                    </p>
                 </>
             )}
             <SyncConflictModal
