@@ -42,7 +42,8 @@ from app.models.sales.sales_model import (
 from app.models.system_md.sys_models import (
     AuditLog,
     SystemAlert,
-    SyncQueue
+    SyncQueue,
+    SyncOperationReceipt,
 )
 
 __all__ = [
@@ -88,4 +89,5 @@ __all__ = [
     'AuditLog',
     'SystemAlert',
     'SyncQueue',
+    'SyncOperationReceipt',
 ]

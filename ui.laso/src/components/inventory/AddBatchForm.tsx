@@ -194,7 +194,14 @@ export function AddBatchForm({ drug, branchId, onSuccess, onCancel }: AddBatchFo
 
         const saveOffline = async () => {
             await writeLocal.drugBatch(offlineBatch);
-            await writeLocal.inventory(branchId, drug.id, values.quantity);
+            // The protocol-v2 batch mutation applies this inventory receipt
+            // atomically on the server. Locally this is only a projection.
+            await writeLocal.inventory(
+                branchId,
+                drug.id,
+                values.quantity,
+                false
+            );
             onSuccess(offlineBatch);
         };
 

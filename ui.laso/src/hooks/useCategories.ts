@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
 import { isOfflineError } from "@/api/client";
+import { useAuthStore } from "@/stores/authStore";
 import type { DrugCategory, DrugCategoryTree } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14,6 +15,16 @@ let flatInflight: Promise<DrugCategory[]> | null = null;
 
 let treeCache: DrugCategoryTree[] | null = null;
 let treeInflight: Promise<DrugCategoryTree[]> | null = null;
+let categoryCacheOrganizationId: string | null = null;
+
+function scopeCategoryCaches(organizationId: string | null): void {
+    if (categoryCacheOrganizationId === organizationId) return;
+    categoryCacheOrganizationId = organizationId;
+    flatCache = null;
+    flatInflight = null;
+    treeCache = null;
+    treeInflight = null;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // useCategories — flat list
@@ -30,6 +41,8 @@ let treeInflight: Promise<DrugCategoryTree[]> | null = null;
  * For a nested tree (category picker with children), use `useCategoryTree`.
  */
 export function useCategories() {
+    const organizationId = useAuthStore((state) => state.user?.organization_id ?? null);
+    scopeCategoryCaches(organizationId);
     const [categories, setCategories] = useState<DrugCategory[]>(flatCache ?? []);
     const [isLoading, setIsLoading] = useState(flatCache === null);
     const [error, setError] = useState<string | null>(null);
@@ -43,10 +56,18 @@ export function useCategories() {
             setIsLoading(false);
             return;
         }
+        setCategories([]);
+        setIsLoading(true);
+        setError(null);
 
         if (!flatInflight) {
             flatInflight = drugApi.listCategories().catch(async (err) => {
-                if (isOfflineError(err)) return localRead.getDrugCategories();
+                if (isOfflineError(err)) {
+                    return localRead.getDrugCategories(
+                        undefined,
+                        organizationId ?? undefined
+                    );
+                }
                 throw err;
             });
         }
@@ -69,7 +90,7 @@ export function useCategories() {
             });
 
         return () => { mounted.current = false; };
-    }, []);
+    }, [organizationId]);
 
     /** Force-refresh (e.g. after creating a new category). */
     function invalidate() {
@@ -88,7 +109,10 @@ export function useCategories() {
             })
             .catch((err) => {
                 if (isOfflineError(err)) {
-                    localRead.getDrugCategories()
+                    localRead.getDrugCategories(
+                        undefined,
+                        organizationId ?? undefined
+                    )
                         .then((data) => {
                             flatCache = data;
                             if (mounted.current) {
@@ -126,6 +150,8 @@ export function useCategories() {
  * Calls GET /drugs/categories/tree (not /drugs/categories).
  */
 export function useCategoryTree() {
+    const organizationId = useAuthStore((state) => state.user?.organization_id ?? null);
+    scopeCategoryCaches(organizationId);
     const [tree, setTree] = useState<DrugCategoryTree[]>(treeCache ?? []);
     const [isLoading, setIsLoading] = useState(treeCache === null);
     const [error, setError] = useState<string | null>(null);
@@ -139,10 +165,17 @@ export function useCategoryTree() {
             setIsLoading(false);
             return;
         }
+        setTree([]);
+        setIsLoading(true);
+        setError(null);
 
         if (!treeInflight) {
             treeInflight = drugApi.listCategoriesTree().catch(async (err) => {
-                if (isOfflineError(err)) return localRead.getDrugCategoryTree();
+                if (isOfflineError(err)) {
+                    return localRead.getDrugCategoryTree(
+                        organizationId ?? undefined
+                    );
+                }
                 throw err;
             });
         }
@@ -165,7 +198,7 @@ export function useCategoryTree() {
             });
 
         return () => { mounted.current = false; };
-    }, []);
+    }, [organizationId]);
 
     /** Force-refresh both caches so flat and tree stay in sync. */
     function invalidate() {
@@ -186,7 +219,9 @@ export function useCategoryTree() {
             })
             .catch((err) => {
                 if (isOfflineError(err)) {
-                    localRead.getDrugCategoryTree()
+                    localRead.getDrugCategoryTree(
+                        organizationId ?? undefined
+                    )
                         .then((data) => {
                             treeCache = data;
                             if (mounted.current) {

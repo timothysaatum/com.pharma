@@ -8,6 +8,8 @@ on:
 
 jobs:
   build:
+    env:
+      VITE_API_URL: ${{ vars.VITE_API_URL || 'https://api.atlas.drive4health.org' }}
     strategy:
       fail-fast: false
       matrix:
@@ -35,7 +37,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          version: 10
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -51,7 +53,30 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: ui.laso
-        run: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate production API URL
+        run: node -e "if (!process.env.VITE_API_URL?.startsWith('https://')) throw new Error('VITE_API_URL must be an HTTPS URL')"
+
+      - name: Test frontend
+        working-directory: ui.laso
+        run: pnpm test
+
+      - name: Audit frontend dependencies
+        working-directory: ui.laso
+        run: pnpm audit --prod
+
+      - name: Test Rust commands
+        working-directory: ui.laso/src-tauri
+        run: cargo test --locked
+
+      - name: Audit Rust dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: ui.laso/src-tauri/Cargo.toml
+          command: check
+          command-arguments: advisories
 
       - name: Build and release Tauri app
         uses: tauri-apps/tauri-action@v0

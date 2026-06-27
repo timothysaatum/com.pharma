@@ -1,11 +1,13 @@
 import asyncio
+import ipaddress
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta
+from time import monotonic
 from typing import Dict, List, Optional, Protocol, Tuple
-import json
 
 from fastapi import Request, HTTPException, status
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import get_settings
@@ -79,13 +81,15 @@ class RedisBackend:
         self._redis_url = redis_url
         self._redis = None
         self._connect_error: Optional[str] = None
+        self._last_connect_attempt = 0.0
         self._fallback = MemoryBackend()
 
     async def _get_redis(self):
         if self._redis is not None:
             return self._redis
-        if self._connect_error:
+        if self._connect_error and monotonic() - self._last_connect_attempt < 5:
             return None
+        self._last_connect_attempt = monotonic()
         try:
             import redis.asyncio as aioredis
             self._redis = aioredis.from_url(
@@ -95,12 +99,32 @@ class RedisBackend:
                 decode_responses=True,
             )
             await self._redis.ping()
+            self._connect_error = None
             logger.info("Redis rate-limit backend connected")
         except Exception as exc:
             self._connect_error = str(exc)
-            logger.warning("Redis unavailable for rate limiting (%s); rate limiting disabled", exc)
+            logger.warning(
+                "Redis unavailable for rate limiting (%s); using the "
+                "per-process fallback",
+                exc,
+            )
             self._redis = None
         return self._redis
+
+    async def _mark_unavailable(self, exc: Exception) -> None:
+        logger.warning(
+            "Redis rate-limit operation failed (%s); using the per-process fallback",
+            exc,
+        )
+        self._connect_error = str(exc)
+        self._last_connect_attempt = monotonic()
+        redis_client = self._redis
+        self._redis = None
+        if redis_client is not None:
+            try:
+                await redis_client.aclose()
+            except Exception:
+                pass
 
     async def is_limited(self, key: str, max_requests: int, window_seconds: int) -> bool:
         r = await self._get_redis()
@@ -111,7 +135,8 @@ class RedisBackend:
         try:
             val = await r.get(key)
             return (int(val) if val else 0) >= max_requests
-        except Exception:
+        except Exception as exc:
+            await self._mark_unavailable(exc)
             return await self._fallback.is_limited(
                 key, max_requests, window_seconds
             )
@@ -126,7 +151,8 @@ class RedisBackend:
             pipe.incr(key)
             pipe.expire(key, window_seconds)
             await pipe.execute()
-        except Exception:
+        except Exception as exc:
+            await self._mark_unavailable(exc)
             await self._fallback.record(key, window_seconds)
 
     async def remaining(self, key: str, max_requests: int, window_seconds: int) -> int:
@@ -139,7 +165,8 @@ class RedisBackend:
             val = await r.get(key)
             current = int(val) if val else 0
             return max(0, max_requests - current)
-        except Exception:
+        except Exception as exc:
+            await self._mark_unavailable(exc)
             return await self._fallback.remaining(
                 key, max_requests, window_seconds
             )
@@ -188,10 +215,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         limited = await backend.is_limited(key, max_req, window)
         if limited:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Rate limit exceeded. Max {max_req} requests per {window} seconds",
                 headers={"Retry-After": str(window)},
+                content={
+                    "detail": (
+                        f"Rate limit exceeded. Max {max_req} requests "
+                        f"per {window} seconds"
+                    )
+                },
             )
 
         await backend.record(key, window)
@@ -225,14 +257,30 @@ _rate_limit_counter: List[int] = [0]
 
 
 def _get_client_ip(request: Request) -> str:
-    if settings.TRUST_PROXY_HEADERS:
+    direct_ip = request.client.host if request.client else "unknown"
+    if settings.TRUST_PROXY_HEADERS and _is_trusted_proxy(direct_ip):
         forwarded = request.headers.get("X-Forwarded-For")
         if forwarded:
             return forwarded.split(",")[0].strip()
         real_ip = request.headers.get("X-Real-IP")
         if real_ip:
             return real_ip
-    return request.client.host if request.client else "unknown"
+    return direct_ip
+
+
+def _is_trusted_proxy(client_ip: str) -> bool:
+    try:
+        address = ipaddress.ip_address(client_ip)
+    except ValueError:
+        return False
+
+    for trusted in settings.TRUSTED_PROXY_IPS:
+        try:
+            if address in ipaddress.ip_network(trusted, strict=False):
+                return True
+        except ValueError:
+            logger.error("Ignoring invalid TRUSTED_PROXY_IPS entry: %s", trusted)
+    return False
 
 
 def rate_limit(max_requests: int = 10, window_seconds: int = 60):

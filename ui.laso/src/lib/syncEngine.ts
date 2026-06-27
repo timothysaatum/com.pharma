@@ -9,8 +9,10 @@
  *     drugs, drug_categories, price_contracts, customers (after dedup)
  *
  *   PUSH+PULL  (branch-level, client is source of truth offline):
- *     branch_inventory, drug_batches, stock_adjustments,
- *     sales, purchase_orders
+ *     branch_inventory, drug_batches, sales, purchase_orders
+ *
+ *   PUSH-ONLY:
+ *     stock_adjustments (immutable audit commands)
  *
  *   SPECIAL:
  *     customers  — created locally offline, pushed to server,
@@ -22,10 +24,11 @@ import {
     getDb,
     getLastSyncAt, setLastSyncAt,
     getPendingQueue, getPendingConflicts, getPendingFailures, resetPendingFailures,
-    dequeue, markQueueError, markQueueConflict, clearQueueConflict,
-    getPendingCount,
+    dequeue, markQueueError, markQueueConflict,
+    getPendingCount, getNextRetryAt, requeueConflictForLocalWin,
 } from "@/lib/localDb";
 import { isOfflineError } from "@/api/client";
+import { RetryBackoff } from "@/lib/syncRetryBackoff";
 import type {
     PullRequest,
     PullResponse,
@@ -72,9 +75,11 @@ class SyncEngine {
     private branchId: string | null = null;
     private organizationId: string | null = null;
     private intervalId: ReturnType<typeof setInterval> | null = null;
+    private retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     private listeners: StatusListener[] = [];
     private _status: SyncStatus = "idle";
     private _isSyncing = false;
+    private networkRetryAttempt = 0;
 
     // Bound references kept so addEventListener and removeEventListener
     // receive the exact same function object — arrow functions passed inline
@@ -138,6 +143,10 @@ class SyncEngine {
             clearInterval(this.intervalId);
             this.intervalId = null;
         }
+        if (this.retryTimeoutId) {
+            clearTimeout(this.retryTimeoutId);
+            this.retryTimeoutId = null;
+        }
         window.removeEventListener("online", this._onOnline);
         window.removeEventListener("offline", this._onOffline);
         this.branchId = null;
@@ -189,6 +198,8 @@ class SyncEngine {
             const pushResult = await this.push();
             await this.pull(pushResult.nextPullTimestamp ?? undefined);
             await this.loadPersistedQueueState();
+            this.networkRetryAttempt = 0;
+            await this.scheduleNextQueuedRetry();
 
             const pending = await getPendingCount(this.queueScope());
             this.notify(pending);
@@ -205,6 +216,7 @@ class SyncEngine {
             } else {
                 this.setStatus("error");
             }
+            this.scheduleNetworkRetry();
         } finally {
             this._isSyncing = false;
         }
@@ -232,14 +244,40 @@ class SyncEngine {
                 break;
             }
 
-            const records: PushRecord[] = queue.map((q) => ({
-                table_name: q.table_name,
-                local_id: q.record_id,
-                operation: q.operation,
-                sync_version: q.sync_version,
-                data: JSON.parse(q.payload_json),
-                created_offline_at: q.created_offline_at,
-            }));
+            const records: PushRecord[] = [];
+            for (const queued of queue) {
+                try {
+                    const data = JSON.parse(
+                        queued.payload_json
+                    ) as Record<string, unknown>;
+                    if (!data || typeof data !== "object" || Array.isArray(data)) {
+                        throw new TypeError("Queue payload must be an object.");
+                    }
+                    records.push({
+                        operation_id: queued.operation_id,
+                        table_name: queued.table_name,
+                        local_id: queued.record_id,
+                        operation: queued.operation,
+                        sync_version: queued.sync_version,
+                        data,
+                        force: data._force_sync_overwrite === true,
+                        created_offline_at: queued.created_offline_at,
+                    });
+                } catch (error) {
+                    hadFailures = true;
+                    await markQueueError(
+                        queued.table_name,
+                        queued.record_id,
+                        `Invalid local queue payload: ${
+                            error instanceof Error ? error.message : String(error)
+                        }`
+                    );
+                }
+            }
+            if (records.length === 0) {
+                hasMore = queue.length === batchSize;
+                continue;
+            }
 
             let response: PushResponse;
             try {
@@ -259,8 +297,8 @@ class SyncEngine {
 
             // Accepted → remove from queue, mark local record as synced
             for (const item of response.accepted) {
-                await dequeue(item.table_name, item.local_id);
                 await this.markSynced(item.table_name, item.local_id, item.server_id);
+                await dequeue(item.table_name, item.local_id);
             }
 
             // Conflicts
@@ -293,6 +331,29 @@ class SyncEngine {
                 const attempts = await markQueueError(item.table_name, item.local_id, error);
                 if (attempts >= MAX_PUSH_ATTEMPTS) {
                     deadLettered++;
+                }
+            }
+
+            const handledKeys = new Set([
+                ...response.accepted.map(
+                    (item) => `${item.table_name}:${item.local_id}`
+                ),
+                ...response.conflicts.map(
+                    (item) => `${item.table_name}:${item.local_id}`
+                ),
+                ...response.failed.map(
+                    (item) => `${item.table_name}:${item.local_id}`
+                ),
+            ]);
+            for (const record of records) {
+                const key = `${record.table_name}:${record.local_id}`;
+                if (!handledKeys.has(key)) {
+                    hadFailures = true;
+                    await markQueueError(
+                        record.table_name,
+                        record.local_id,
+                        "Sync server omitted this record from its response."
+                    );
                 }
             }
             if (deadLettered > 0) {
@@ -586,15 +647,39 @@ class SyncEngine {
     private async markSynced(
         table: string,
         localId: string,
-        _serverId?: string
+        serverId?: string
     ): Promise<void> {
         const db = await getDb();
         const now = new Date().toISOString();
         try {
+            if (serverId && serverId !== localId) {
+                const serverRows = await db.select<{ id: string }[]>(
+                    `SELECT id FROM ${table} WHERE id = $1 LIMIT 1`,
+                    [serverId]
+                );
+                if (serverRows.length > 0) {
+                    await db.execute(`DELETE FROM ${table} WHERE id = $1`, [localId]);
+                } else {
+                    await db.execute(
+                        `UPDATE ${table} SET id = $1 WHERE id = $2`,
+                        [serverId, localId]
+                    );
+                }
+            }
+
             await db.execute(
                 `UPDATE ${table} SET sync_status = 'synced', synced_at = $1 WHERE id = $2`,
-                [now, localId]
+                [now, serverId ?? localId]
             );
+
+            if (table === "sales") {
+                await db.execute(
+                    `UPDATE offline_sales
+                     SET sync_status = 'synced', error_message = NULL, updated_at = $1
+                     WHERE id = $2`,
+                    [now, localId]
+                );
+            }
         } catch {
             // Table may not have sync_status (e.g. sync_queue) — safe to ignore
         }
@@ -637,12 +722,18 @@ class SyncEngine {
                     );
                 }
             } else {
+                if (serverId && serverId !== conflict.record_id) {
+                    const db = await getDb();
+                    await db.execute(
+                        `DELETE FROM ${conflict.table_name} WHERE id = $1`,
+                        [conflict.record_id]
+                    );
+                }
                 await this.applyServerRecord(conflict.table_name, conflict.conflict.server_record);
             }
             await dequeue(conflict.table_name, conflict.record_id);
-            await clearQueueConflict(conflict.table_name, conflict.record_id);
         } else {
-            await clearQueueConflict(conflict.table_name, conflict.record_id);
+            await requeueConflictForLocalWin(conflict);
         }
 
         await this.loadPersistedQueueState();
@@ -669,6 +760,7 @@ class SyncEngine {
 
     private onOnline(): void {
         console.info("[SyncEngine] Back online — triggering sync");
+        this.networkRetryAttempt = 0;
         this.sync();
     }
 
@@ -719,6 +811,33 @@ class SyncEngine {
         } catch (_) {
             console.error(`[SyncEngine] ${context} details (non-serializable error):`, err);
         }
+    }
+
+    private scheduleNetworkRetry(): void {
+        if (!this.branchId || !navigator.onLine) return;
+        const delay = new RetryBackoff().getDelay(this.networkRetryAttempt);
+        this.networkRetryAttempt += 1;
+        this.scheduleRetry(delay);
+    }
+
+    private async scheduleNextQueuedRetry(): Promise<void> {
+        if (!this.branchId) return;
+        const nextRetryAt = await getNextRetryAt(this.queueScope());
+        if (!nextRetryAt) return;
+        const delay = Math.max(0, new Date(nextRetryAt).getTime() - Date.now());
+        this.scheduleRetry(delay);
+    }
+
+    private scheduleRetry(delayMs: number): void {
+        if (this.retryTimeoutId) {
+            clearTimeout(this.retryTimeoutId);
+        }
+        this.retryTimeoutId = setTimeout(() => {
+            this.retryTimeoutId = null;
+            if (navigator.onLine && !this._isSyncing) {
+                void this.sync();
+            }
+        }, delayMs);
     }
 }
 

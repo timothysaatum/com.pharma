@@ -87,7 +87,6 @@ class Role(Base, TimestampMixin, SyncTrackingMixin):
 
     __table_args__ = (
         Index('idx_role_org', 'organization_id'),
-        Index('idx_role_level', 'level'),
         # Ensure role name is unique within an organization
         Index('uq_role_org_name', 'organization_id', 'name', unique=True),
     )

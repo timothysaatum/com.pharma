@@ -24,6 +24,7 @@ import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient } from "@/api/client";
 import { localRead } from "@/lib/localRead";
+import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
 const CONTRACT_TYPE_COLORS: Record<string, string> = {
@@ -70,6 +71,9 @@ interface CustomerSearchWidgetProps {
 function CustomerSearchWidget({
     customerName, customerId, onSetCustomerName, onSetCustomerId, requireRegistered = false, fieldError,
 }: CustomerSearchWidgetProps) {
+    const organizationId = useAuthStore(
+        (state) => state.user?.organization_id
+    );
     const [query, setQuery] = useState("");
     const [results, setResults] = useState<CustomerMatch[]>([]);
     const [searching, setSearching] = useState(false);
@@ -106,7 +110,11 @@ function CustomerSearchWidget({
                 setResults(data.matches ?? []);
                 setOpen(true);
             } catch {
-                const matches = await localRead.searchCustomerMatches(q, 10);
+                const matches = await localRead.searchCustomerMatches(
+                    q,
+                    10,
+                    organizationId
+                );
                 setResults(matches);
                 setOpen(true);
             } finally {

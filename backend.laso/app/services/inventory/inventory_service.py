@@ -1124,6 +1124,40 @@ class InventoryService:
             HTTPException(400): A batch with the same number already exists
                                 for this drug at this branch.
         """
+        from app.models.sales.sales_model import PurchaseOrder
+
+        organization_id = await InventoryService._get_branch_organization_id(
+            db,
+            batch_data.branch_id,
+        )
+        drug_exists = await db.scalar(
+            select(Drug.id).where(
+                Drug.id == batch_data.drug_id,
+                Drug.organization_id == organization_id,
+                Drug.is_active == True,
+                Drug.is_deleted == False,
+            )
+        )
+        if not drug_exists:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Drug not found in the branch organization.",
+            )
+
+        if batch_data.purchase_order_id:
+            purchase_order_exists = await db.scalar(
+                select(PurchaseOrder.id).where(
+                    PurchaseOrder.id == batch_data.purchase_order_id,
+                    PurchaseOrder.organization_id == organization_id,
+                    PurchaseOrder.branch_id == batch_data.branch_id,
+                )
+            )
+            if not purchase_order_exists:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Purchase order not found in this branch.",
+                )
+
         # Duplicate batch check
         result = await db.execute(
             select(DrugBatch).where(
@@ -1197,8 +1231,6 @@ class InventoryService:
             adjusted_by = created_by or uuid.UUID(int=0)  # Default system UUID
             # Try to find who received it if PO exists
             if batch_data.purchase_order_id:
-                from app.models.sales.sales_model import PurchaseOrder
-
                 po = await db.get(PurchaseOrder, batch_data.purchase_order_id)
                 if po and po.ordered_by:
                     adjusted_by = po.ordered_by
@@ -1965,6 +1997,7 @@ class InventoryService:
         reason: str,
         adjusted_by: uuid.UUID,
         transfer_to_branch_id: Optional[uuid.UUID] = None,
+        adjustment_id: Optional[uuid.UUID] = None,
     ) -> Tuple[StockAdjustment, BranchInventory]:
         """
         Internal write helper: apply a quantity delta and record the audit row.
@@ -2005,7 +2038,7 @@ class InventoryService:
             )
 
         adjustment = StockAdjustment(
-            id=uuid.uuid4(),
+            id=adjustment_id or uuid.uuid4(),
             branch_id=branch_id,
             drug_id=drug_id,
             adjustment_type=adjustment_type,

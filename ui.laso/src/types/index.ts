@@ -1451,11 +1451,13 @@ export interface PullResponse {
 }
 
 export interface PushRecord {
+    operation_id: string;
     table_name: string;
     local_id: string;
     operation: "create" | "update" | "delete";
     sync_version: number;
     data: Record<string, unknown>;
+    force?: boolean;
     created_offline_at: string;
 }
 

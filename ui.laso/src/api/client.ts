@@ -2,6 +2,9 @@ import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { authStorage } from "@/lib/storage";
 
 const configuredBaseUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+if (import.meta.env.PROD && !configuredBaseUrl.startsWith("https://")) {
+    throw new Error("Production VITE_API_URL must use HTTPS.");
+}
 const BASE_URL = configuredBaseUrl.replace(/^http:\/\/127\.0\.0\.1:8000\/?$/, "http://localhost:8000");
 let backendReachable = true;
 let backendOfflineSince: number | null = null;
@@ -177,6 +180,25 @@ export function parseApiError(err: unknown): string {
             if (err.code === "ERR_CANCELED") return "";
             return err.message;
         }
+        // Project validation responses use a stable top-level detail plus a
+        // field-level errors array. Surface the actionable messages first.
+        if (Array.isArray(data.errors)) {
+            const messages = data.errors
+                .map((item: unknown) => {
+                    if (!item || typeof item !== "object") return null;
+                    const error = item as {
+                        loc?: unknown[];
+                        msg?: string;
+                    };
+                    if (typeof error.msg !== "string") return null;
+                    const field = Array.isArray(error.loc)
+                        ? error.loc.filter((part) => part !== "body").join(".")
+                        : "";
+                    return field ? `${field}: ${error.msg}` : error.msg;
+                })
+                .filter((message: string | null): message is string => Boolean(message));
+            if (messages.length > 0) return messages.join(", ");
+        }
         // FastAPI string detail
         if (typeof data.detail === "string") return data.detail;
         // FastAPI validation error array
@@ -217,7 +239,6 @@ export function isOfflineError(err: unknown): boolean {
             "connect",
             "timeout",
             "timed out",
-            "networkrequestfailed",
             "networkrequestfailed",
         ];
         for (const p of networkPatterns) {

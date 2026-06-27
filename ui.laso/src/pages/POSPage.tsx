@@ -170,7 +170,10 @@ export default function POSPage() {
         const backendWasReachable = isBackendReachable();
         const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
             const saleId = crypto.randomUUID();
-            const saleNumber = `OFFLINE-${Date.now()}`;
+            const branchFragment = activeBranchId.replace(/-/g, "").slice(0, 8);
+            const randomFragment = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
+            const saleNumber =
+                `OFFLINE-${branchFragment}-${Date.now().toString(36)}-${randomFragment}`;
             const now = new Date().toISOString();
             const totals = cart.totals;
             

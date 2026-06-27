@@ -84,6 +84,11 @@ class OrganizationOnboardingService:
             
             # Check idempotency key if provided
             if idempotency_key:
+                if len(idempotency_key) > 255:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="Idempotency key cannot exceed 255 characters",
+                    )
                 existing = await self._check_idempotency(idempotency_key)
                 if existing:
                     raise HTTPException(
@@ -110,10 +115,7 @@ class OrganizationOnboardingService:
             
             # Store idempotency key if provided
             if idempotency_key:
-                organization.settings = {
-                    **(organization.settings or {}),
-                    "_onboarding_ik": idempotency_key,
-                }
+                organization.onboarding_idempotency_key = idempotency_key
             
             # Create default roles and assign admin role to the admin user
             default_roles = await self._create_default_roles(organization.id)
@@ -262,7 +264,7 @@ class OrganizationOnboardingService:
         """Check if an idempotency key has already been processed"""
         result = await self.db.execute(
             select(Organization).where(
-                Organization.settings["_onboarding_ik"].as_string() == idempotency_key
+                Organization.onboarding_idempotency_key == idempotency_key
             )
         )
         return result.scalar_one_or_none() is not None
@@ -326,7 +328,7 @@ class OrganizationOnboardingService:
             role = Role(
                 organization_id=organization_id,
                 name=role_def["name"],
-                description=role_def["description"],
+                description=role_def.get("description"),
                 level=role_def["level"],
                 permissions=role_def["permissions"]
             )

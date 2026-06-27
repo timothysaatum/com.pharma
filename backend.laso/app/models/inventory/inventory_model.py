@@ -116,15 +116,11 @@ class Drug(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     # Identifiers
     sku: Mapped[Optional[str]] = mapped_column(
         String(100),
-        unique=True,
-        index=True,
         comment="Stock Keeping Unit"
     )
     
     barcode: Mapped[Optional[str]] = mapped_column(
         String(100),
-        unique=True,
-        index=True,
         comment="EAN, UPC, or other barcode"
     )
     
@@ -277,6 +273,8 @@ class Drug(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         ),
         # Comprehensive indexes for fast queries
         Index('idx_drug_org', 'organization_id'),
+        Index('uq_drug_org_sku', 'organization_id', 'sku', unique=True),
+        Index('uq_drug_org_barcode', 'organization_id', 'barcode', unique=True),
         Index('idx_drug_name', 'name'),
         Index('idx_drug_generic', 'generic_name'),
         Index('idx_drug_sku', 'sku'),

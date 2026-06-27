@@ -90,6 +90,12 @@ class Organization(Base, TimestampMixin, SyncTrackingMixin):
         DateTime(timezone=True),
         nullable=True
     )
+
+    onboarding_idempotency_key: Mapped[Optional[str]] = mapped_column(
+        String(255),
+        nullable=True,
+        comment="Stable key used to prevent duplicate organization onboarding",
+    )
     
     # Relationships
     branches: Mapped[List["Branch"]] = relationship(
@@ -110,12 +116,17 @@ class Organization(Base, TimestampMixin, SyncTrackingMixin):
     )
     
     __table_args__ = (
+        Index(
+            'uq_organizations_onboarding_idempotency_key',
+            'onboarding_idempotency_key',
+            unique=True,
+        ),
         CheckConstraint(
             "type IN ('otc', 'pharmacy', 'hospital_pharmacy', 'chain')",
             name='check_org_type'
         ),
         CheckConstraint(
-            "subscription_tier IN ('basic', 'professional', 'enterprise')",
+            "subscription_tier IN ('trial', 'basic', 'professional', 'enterprise')",
             name='check_subscription_tier'
         ),
         Index('idx_org_active', 'is_active'),

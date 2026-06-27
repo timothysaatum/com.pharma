@@ -37,6 +37,7 @@ from app.schemas.base_schemas import Money
 from app.schemas.drugs_schemas import (
     BulkDrugUpdate,
     DrugCategoryCreate,
+    DrugCategoryUpdate,
     DrugCreate,
     DrugUpdate,
 )
@@ -61,8 +62,8 @@ class DrugService:
         Create a new drug with full pre-flight validation.
 
         Validates:
-        - SKU uniqueness globally (matches the DB's bare UNIQUE constraint).
-        - Barcode uniqueness globally.
+        - SKU uniqueness within the organization.
+        - Barcode uniqueness within the organization.
         - Category belongs to the same organisation and is not deleted.
         - Auto-calculates markup_percentage when both prices are supplied.
 
@@ -70,11 +71,12 @@ class DrugService:
             HTTPException(400): Duplicate SKU or barcode.
             HTTPException(404): Category not found.
         """
-        # --- SKU uniqueness (global — matches the DB UNIQUE constraint) -------
+        # --- SKU uniqueness within the tenant catalog -------------------------
         if drug_data.sku:
             result = await db.execute(
                 select(Drug).where(
                     Drug.sku == drug_data.sku,
+                    Drug.organization_id == drug_data.organization_id,
                     Drug.is_deleted == False,
                 )
             )
@@ -84,11 +86,12 @@ class DrugService:
                     detail=f"SKU '{drug_data.sku}' is already in use.",
                 )
 
-        # --- Barcode uniqueness (global) --------------------------------------
+        # --- Barcode uniqueness within the tenant catalog ---------------------
         if drug_data.barcode:
             result = await db.execute(
                 select(Drug).where(
                     Drug.barcode == drug_data.barcode,
+                    Drug.organization_id == drug_data.organization_id,
                     Drug.is_deleted == False,
                 )
             )
@@ -311,11 +314,12 @@ class DrugService:
                 detail="Drug not found.",
             )
 
-        # --- SKU uniqueness (global, exclude self) ----------------------------
+        # --- SKU uniqueness within the tenant, excluding self -----------------
         if drug_data.sku and drug_data.sku != drug.sku:
             result = await db.execute(
                 select(Drug).where(
                     Drug.sku == drug_data.sku,
+                    Drug.organization_id == organization_id,
                     Drug.id != drug_id,
                     Drug.is_deleted == False,
                 )
@@ -326,11 +330,12 @@ class DrugService:
                     detail=f"SKU '{drug_data.sku}' is already in use.",
                 )
 
-        # --- Barcode uniqueness (global, exclude self) ------------------------
+        # --- Barcode uniqueness within the tenant, excluding self -------------
         if drug_data.barcode and drug_data.barcode != drug.barcode:
             result = await db.execute(
                 select(Drug).where(
                     Drug.barcode == drug_data.barcode,
+                    Drug.organization_id == organization_id,
                     Drug.id != drug_id,
                     Drug.is_deleted == False,
                 )
@@ -591,3 +596,146 @@ class DrugService:
 
         result = await db.execute(query)
         return list(result.scalars().all())
+
+    @staticmethod
+    async def update_category(
+        db: AsyncSession,
+        category_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        category_data: DrugCategoryUpdate,
+    ) -> DrugCategory:
+        """Update a category and keep every descendant materialized path valid."""
+        category = (await db.execute(
+            select(DrugCategory).where(
+                DrugCategory.id == category_id,
+                DrugCategory.organization_id == organization_id,
+                DrugCategory.is_deleted == False,
+            )
+        )).scalar_one_or_none()
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Category not found.",
+            )
+
+        old_descendant_prefix = f"{category.path or '/'}{category.id}/"
+        old_level = category.level
+        new_path = category.path or "/"
+        new_level = category.level
+
+        if "parent_id" in category_data.model_fields_set:
+            parent_id = category_data.parent_id
+            if parent_id is None:
+                new_path = "/"
+                new_level = 0
+            else:
+                parent = (await db.execute(
+                    select(DrugCategory).where(
+                        DrugCategory.id == parent_id,
+                        DrugCategory.organization_id == organization_id,
+                        DrugCategory.is_deleted == False,
+                    )
+                )).scalar_one_or_none()
+                if not parent:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail="Parent category not found.",
+                    )
+                if (
+                    parent.id == category.id
+                    or (parent.path or "/").startswith(old_descendant_prefix)
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="A category cannot be moved below itself or a descendant.",
+                    )
+                new_path = f"{parent.path or '/'}{parent.id}/"
+                new_level = parent.level + 1
+
+        if category_data.name is not None:
+            category.name = category_data.name
+        if "description" in category_data.model_fields_set:
+            category.description = category_data.description
+        if "parent_id" in category_data.model_fields_set:
+            category.parent_id = category_data.parent_id
+
+        category.path = new_path
+        category.level = new_level
+        category.updated_at = datetime.now(timezone.utc)
+        category.mark_as_pending_sync()
+
+        level_delta = new_level - old_level
+        new_descendant_prefix = f"{new_path}{category.id}/"
+        if (
+            new_descendant_prefix != old_descendant_prefix
+            or level_delta != 0
+        ):
+            descendants = (await db.execute(
+                select(DrugCategory).where(
+                    DrugCategory.organization_id == organization_id,
+                    DrugCategory.is_deleted == False,
+                    DrugCategory.path.like(f"{old_descendant_prefix}%"),
+                )
+            )).scalars().all()
+            for descendant in descendants:
+                suffix = (descendant.path or "")[len(old_descendant_prefix):]
+                descendant.path = f"{new_descendant_prefix}{suffix}"
+                descendant.level += level_delta
+                descendant.updated_at = datetime.now(timezone.utc)
+                descendant.mark_as_pending_sync()
+
+        await db.commit()
+        await db.refresh(category)
+        return category
+
+    @staticmethod
+    async def delete_category(
+        db: AsyncSession,
+        category_id: uuid.UUID,
+        organization_id: uuid.UUID,
+        deleted_by: uuid.UUID,
+    ) -> None:
+        """Soft-delete an unused leaf category."""
+        category = (await db.execute(
+            select(DrugCategory).where(
+                DrugCategory.id == category_id,
+                DrugCategory.organization_id == organization_id,
+                DrugCategory.is_deleted == False,
+            )
+        )).scalar_one_or_none()
+        if not category:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Category not found.",
+            )
+
+        has_children = await db.scalar(
+            select(DrugCategory.id).where(
+                DrugCategory.parent_id == category_id,
+                DrugCategory.organization_id == organization_id,
+                DrugCategory.is_deleted == False,
+            ).limit(1)
+        )
+        has_drugs = await db.scalar(
+            select(Drug.id).where(
+                Drug.category_id == category_id,
+                Drug.organization_id == organization_id,
+                Drug.is_deleted == False,
+            ).limit(1)
+        )
+        if has_children or has_drugs:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "Category cannot be deleted while it contains active "
+                    "subcategories or drugs."
+                ),
+            )
+
+        now = datetime.now(timezone.utc)
+        category.is_deleted = True
+        category.deleted_at = now
+        category.deleted_by = deleted_by
+        category.updated_at = now
+        category.mark_as_pending_sync()
+        await db.commit()

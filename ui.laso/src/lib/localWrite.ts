@@ -138,7 +138,8 @@ function pickColumns(
 async function upsertAndEnqueue<T extends Record<string, unknown>>(
     table: string,
     record: T,
-    operation: "create" | "update" = "create"
+    operation: "create" | "update" = "create",
+    queueExtras: Record<string, unknown> = {}
 ): Promise<void> {
     const db = await getDb();
     const id = record.id as string;
@@ -172,7 +173,10 @@ async function upsertAndEnqueue<T extends Record<string, unknown>>(
         vals
     );
 
-    await enqueue(table, id, operation, syncVersion, payload as Record<string, unknown>);
+    await enqueue(table, id, operation, syncVersion, {
+        ...payload,
+        ...queueExtras,
+    } as Record<string, unknown>);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +215,15 @@ export const writeLocal = {
             ),
         };
         const payload = pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
-        await upsertAndEnqueue("sales", payload as Record<string, unknown>, "create");
+        await upsertAndEnqueue(
+            "sales",
+            payload as Record<string, unknown>,
+            "create",
+            {
+                items: items ?? [],
+                sync_protocol_version: 2,
+            }
+        );
     },
 
     /**
@@ -228,7 +240,8 @@ export const writeLocal = {
         await upsertAndEnqueue(
             "drug_batches",
             batchData as Record<string, unknown>,
-            "create"
+            "create",
+            { sync_protocol_version: 2 }
         );
     },
 
@@ -239,20 +252,28 @@ export const writeLocal = {
     inventory: async (
         branchId: string,
         drugId: string,
-        quantityDelta: number
+        quantityDelta: number,
+        enqueueForSync = true
     ): Promise<void> => {
         const db = await getDb();
         const now = new Date().toISOString();
 
         const result = await db.execute(
-            `UPDATE branch_inventory
-             SET quantity    = quantity + $1,
-                 sync_status = 'pending',
-                 sync_version = sync_version + 1,
-                 updated_at  = $2
-             WHERE branch_id = $3
-               AND drug_id = $4
-               AND quantity + $1 >= 0`,
+            enqueueForSync
+                ? `UPDATE branch_inventory
+                   SET quantity = quantity + $1,
+                       sync_status = 'pending',
+                       sync_version = sync_version + 1,
+                       updated_at = $2
+                   WHERE branch_id = $3
+                     AND drug_id = $4
+                     AND quantity + $1 >= 0`
+                : `UPDATE branch_inventory
+                   SET quantity = quantity + $1,
+                       updated_at = $2
+                   WHERE branch_id = $3
+                     AND drug_id = $4
+                     AND quantity + $1 >= 0`,
             [quantityDelta, now, branchId, drugId]
         );
 
@@ -280,17 +301,28 @@ export const writeLocal = {
 
             // No row yet — create one only for non-negative stock additions.
             const id = crypto.randomUUID();
-            await upsertAndEnqueue("branch_inventory", {
-                id,
-                branch_id: branchId,
-                drug_id: drugId,
-                quantity: quantityDelta,
-                reserved_quantity: 0,
-                location: null,
-                selling_price: null,
-                updated_at: now,
-                created_at: now,
-            }, "create");
+            if (enqueueForSync) {
+                await upsertAndEnqueue("branch_inventory", {
+                    id,
+                    branch_id: branchId,
+                    drug_id: drugId,
+                    quantity: quantityDelta,
+                    reserved_quantity: 0,
+                    location: null,
+                    selling_price: null,
+                    updated_at: now,
+                    created_at: now,
+                }, "create");
+            } else {
+                await db.execute(
+                    `INSERT INTO branch_inventory (
+                       id, branch_id, drug_id, quantity, reserved_quantity,
+                       location, selling_price, sync_status, sync_version,
+                       synced_at, updated_at, created_at
+                     ) VALUES ($1, $2, $3, $4, 0, NULL, NULL, 'synced', 1, NULL, $5, $5)`,
+                    [id, branchId, drugId, quantityDelta, now]
+                );
+            }
             return;
         }
 
@@ -299,7 +331,7 @@ export const writeLocal = {
             "SELECT * FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2",
             [branchId, drugId]
         );
-        if (row) {
+        if (row && enqueueForSync) {
             await enqueue(
                 "branch_inventory",
                 row.id as string,
@@ -344,7 +376,8 @@ export const writeLocal = {
         await writeLocal.inventory(
             adjustment.branch_id,
             adjustment.drug_id,
-            adjustment.quantity_change
+            adjustment.quantity_change,
+            false
         );
     },
 
@@ -366,7 +399,8 @@ export const writeLocal = {
         await upsertAndEnqueue(
             "purchase_orders",
             payload as Record<string, unknown>,
-            operation
+            operation,
+            { items: items ?? [] }
         );
     },
 

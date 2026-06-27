@@ -44,7 +44,7 @@ class OrganizationBase(BaseSchema):
 class OrganizationCreate(OrganizationBase):
     subscription_tier: str = Field(
         default="basic",
-        pattern="^(basic|professional|enterprise)$"
+        pattern="^(trial|basic|professional|enterprise)$"
     )
 
     model_config = ConfigDict(

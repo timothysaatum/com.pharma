@@ -17,7 +17,7 @@ from app.services.drug.drug_service import DrugService
 from app.services.inventory.inventory_service import InventoryService
 from app.schemas.drugs_schemas import (
     DrugCreate, DrugUpdate, DrugResponse, DrugWithInventory,
-    DrugCategoryCreate, DrugCategoryResponse,
+    DrugCategoryCreate, DrugCategoryResponse, DrugCategoryUpdate,
     DrugSearchFilters, BulkDrugUpdate, DrugCategoryTree,
     BulkDrugImport
 )
@@ -237,6 +237,40 @@ async def get_category_tree(
     )
     
     return categories
+
+
+@router.patch("/categories/{category_id}", response_model=DrugCategoryResponse)
+async def update_drug_category(
+    category_id: uuid.UUID,
+    category_data: DrugCategoryUpdate,
+    current_user: User = Depends(require_permission("manage_drugs")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a category and its descendant materialized paths."""
+    return await DrugService.update_category(
+        db=db,
+        category_id=category_id,
+        organization_id=current_user.organization_id,
+        category_data=category_data,
+    )
+
+
+@router.delete(
+    "/categories/{category_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_drug_category(
+    category_id: uuid.UUID,
+    current_user: User = Depends(require_permission("manage_drugs")),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """Soft-delete an unused leaf category."""
+    await DrugService.delete_category(
+        db=db,
+        category_id=category_id,
+        organization_id=current_user.organization_id,
+        deleted_by=current_user.id,
+    )
 
 
 @router.post("/bulk-update", status_code=status.HTTP_200_OK)

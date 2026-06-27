@@ -54,7 +54,7 @@ class OrganizationOnboardingRequest(BaseSchema):
     )
     subscription_tier: str = Field(
         default="basic",
-        pattern="^(basic|professional|enterprise)$",
+        pattern="^(trial|basic|professional|enterprise)$",
         description="Subscription tier"
     )
     

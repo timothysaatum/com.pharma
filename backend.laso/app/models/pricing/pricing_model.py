@@ -512,8 +512,6 @@ class InsuranceProvider(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin
     code: Mapped[str] = mapped_column(
         String(50),
         nullable=False,
-        unique=True,
-        index=True,
         comment="Short code: GLICO, SIC, ENT"
     )
     
@@ -587,6 +585,12 @@ class InsuranceProvider(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin
             name='check_billing_cycle'
         ),
         Index('idx_insurance_org', 'organization_id'),
+        Index(
+            'uq_insurance_org_code',
+            'organization_id',
+            'code',
+            unique=True,
+        ),
         Index('idx_insurance_code', 'code'),
         Index('idx_insurance_active', 'is_active'),
     )

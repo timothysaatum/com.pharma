@@ -62,7 +62,7 @@ async def onboard_organization(
     - **name**: Unique organization name
     - **type**: Type (small_shop, pharmacy, hospital_pharmacy, chain)
     - **admin**: Admin user credentials
-    - **subscription_tier**: basic, professional, or enterprise
+    - **subscription_tier**: trial, basic, professional, or enterprise
     - **branches**: Optional list of branches to create (max 10). If not provided, one default branch is created.
     
     Returns complete organization details with admin credentials and created branches

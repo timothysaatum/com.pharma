@@ -51,9 +51,7 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     # Unique sale identifier
     sale_number: Mapped[str] = mapped_column(
         String(50),
-        unique=True,
         nullable=False,
-        index=True,
         comment="Human-readable sale number like BR001-20260112-0001"
     )
     
@@ -349,6 +347,7 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
         
         # Indexes
         Index('idx_sale_org', 'organization_id'),
+        Index('uq_sale_branch_number', 'branch_id', 'sale_number', unique=True),
         Index('idx_sale_branch', 'branch_id'),
         Index('idx_sale_customer', 'customer_id'),
         Index('idx_sale_number', 'sale_number'),
@@ -730,9 +729,7 @@ class PurchaseOrder(Base, TimestampMixin, SyncTrackingMixin):
     
     po_number: Mapped[str] = mapped_column(
         String(50),
-        unique=True,
         nullable=False,
-        index=True
     )
     
     supplier_id: Mapped[uuid.UUID] = mapped_column(
@@ -790,6 +787,7 @@ class PurchaseOrder(Base, TimestampMixin, SyncTrackingMixin):
             name='check_po_status'
         ),
         Index('idx_po_org', 'organization_id'),
+        Index('uq_po_branch_number', 'branch_id', 'po_number', unique=True),
         Index('idx_po_branch', 'branch_id'),
         Index('idx_po_supplier', 'supplier_id'),
         Index('idx_po_status', 'status'),

@@ -6,6 +6,7 @@
  */
 
 import type { BranchInventoryWithDetails, PushConflict, Drug, Sale } from "@/types";
+import { RetryBackoff } from "@/lib/syncRetryBackoff";
 
 const DB_PATH = "sqlite:laso.db";
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -77,6 +78,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 9) await migrate_v9(db);
       if (user_version < 10) await migrate_v10(db);
       if (user_version < 11) await migrate_v11(db);
+      if (user_version < 12) await migrate_v12(db);
       await ensureBranchInventorySchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
@@ -493,6 +495,36 @@ async function migrate_v11(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 11");
 }
 
+async function migrate_v12(db: Database): Promise<void> {
+  const addQueueColumn = async (column: string) => {
+    try { await db.execute(`ALTER TABLE sync_queue ADD COLUMN ${column}`); }
+    catch { }
+  };
+
+  await addQueueColumn("operation_id TEXT");
+  await addQueueColumn("next_attempt_at TEXT");
+
+  // Existing queue rows predate operation-level idempotency. Give every row a
+  // stable UUID-shaped identifier so retries after this migration are safe.
+  await db.execute(`
+    UPDATE sync_queue
+    SET operation_id =
+      lower(hex(randomblob(4))) || '-' ||
+      lower(hex(randomblob(2))) || '-' ||
+      lower(hex(randomblob(2))) || '-' ||
+      lower(hex(randomblob(2))) || '-' ||
+      lower(hex(randomblob(6)))
+    WHERE operation_id IS NULL OR operation_id = ''
+  `);
+  await db.execute(
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_operation_id ON sync_queue(operation_id)"
+  );
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_sync_queue_next_attempt ON sync_queue(next_attempt_at)"
+  );
+  await db.execute("PRAGMA user_version = 12");
+}
+
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
@@ -537,6 +569,7 @@ export async function setLastSyncAt(
 
 export interface QueuedRecord {
   id: number;
+  operation_id: string;
   table_name: string;
   record_id: string;
   operation: "create" | "update" | "delete";
@@ -545,6 +578,7 @@ export interface QueuedRecord {
   created_offline_at: string;
   attempts: number;
   last_attempt_at: string | null;
+  next_attempt_at: string | null;
   error: string | null;
   conflict_json?: string | null;
 }
@@ -640,18 +674,31 @@ export async function enqueue(
   payload: Record<string, unknown>
 ): Promise<void> {
   const db = await getDb();
+  const operationId = crypto.randomUUID();
   await db.execute(
     `INSERT INTO sync_queue
-       (table_name, record_id, operation, sync_version, payload_json, created_offline_at, conflict_json)
-     VALUES ($1, $2, $3, $4, $5, $6, NULL)
+       (operation_id, table_name, record_id, operation, sync_version, payload_json,
+        created_offline_at, next_attempt_at, conflict_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL)
      ON CONFLICT(table_name, record_id) DO UPDATE SET
+       operation_id = excluded.operation_id,
        operation    = excluded.operation,
        sync_version = excluded.sync_version,
        payload_json = excluded.payload_json,
        attempts     = 0,
+       last_attempt_at = NULL,
+       next_attempt_at = NULL,
        error        = NULL,
        conflict_json = NULL`,
-    [tableName, recordId, operation, syncVersion, JSON.stringify(payload), new Date().toISOString()]
+    [
+      operationId,
+      tableName,
+      recordId,
+      operation,
+      syncVersion,
+      JSON.stringify(payload),
+      new Date().toISOString(),
+    ]
   );
 }
 
@@ -663,14 +710,23 @@ export async function getPendingQueue(
   const db = await getDb();
   if (!hasQueueScope(scope)) {
     return db.select<QueuedRecord[]>(
-      "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $2 ORDER BY id ASC LIMIT $1",
-      [limit, maxAttempts]
+      `SELECT * FROM sync_queue
+       WHERE conflict_json IS NULL
+         AND attempts < $2
+         AND (next_attempt_at IS NULL OR next_attempt_at <= $3)
+       ORDER BY id ASC
+       LIMIT $1`,
+      [limit, maxAttempts, new Date().toISOString()]
     );
   }
 
   const rows = await db.select<QueuedRecord[]>(
-    "SELECT * FROM sync_queue WHERE conflict_json IS NULL AND attempts < $1 ORDER BY id ASC",
-    [maxAttempts]
+    `SELECT * FROM sync_queue
+     WHERE conflict_json IS NULL
+       AND attempts < $1
+       AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
+     ORDER BY id ASC`,
+    [maxAttempts, new Date().toISOString()]
   );
   return filterQueueByScope(rows ?? [], scope).slice(0, limit);
 }
@@ -689,11 +745,22 @@ export async function markQueueError(
   error: string
 ): Promise<number> {
   const db = await getDb();
+  const currentRows = await db.select<{ attempts: number }[]>(
+    "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
+    [tableName, recordId]
+  );
+  const currentAttempts = currentRows[0]?.attempts ?? 0;
+  const nextAttemptAt = new Date(
+    Date.now() + new RetryBackoff().getDelay(currentAttempts)
+  ).toISOString();
   await db.execute(
     `UPDATE sync_queue
-     SET attempts = attempts + 1, last_attempt_at = $1, error = $2
-     WHERE table_name = $3 AND record_id = $4`,
-    [new Date().toISOString(), error, tableName, recordId]
+     SET attempts = attempts + 1,
+         last_attempt_at = $1,
+         next_attempt_at = $2,
+         error = $3
+     WHERE table_name = $4 AND record_id = $5`,
+    [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
   );
   const rows = await db.select<{ attempts: number }[]>(
     "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
@@ -728,7 +795,8 @@ export async function clearQueueConflict(
   await db.execute(
     `UPDATE sync_queue
      SET error = NULL,
-         conflict_json = NULL
+         conflict_json = NULL,
+         next_attempt_at = NULL
      WHERE table_name = $1 AND record_id = $2`,
     [tableName, recordId]
   );
@@ -806,6 +874,7 @@ export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
         `UPDATE sync_queue
          SET attempts = 0,
              last_attempt_at = NULL,
+             next_attempt_at = NULL,
              error = NULL
          WHERE id = $1`,
         [row.id]
@@ -818,10 +887,76 @@ export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
     `UPDATE sync_queue
      SET attempts = 0,
          last_attempt_at = NULL,
+         next_attempt_at = NULL,
          error = NULL
      WHERE conflict_json IS NULL
        AND error IS NOT NULL`
   );
+}
+
+export async function getNextRetryAt(
+  scope?: QueueScope,
+  maxAttempts = 10
+): Promise<string | null> {
+  const db = await getDb();
+  const rows = await db.select<QueuedRecord[]>(
+    `SELECT *
+     FROM sync_queue
+     WHERE conflict_json IS NULL
+       AND attempts < $1
+       AND next_attempt_at IS NOT NULL
+     ORDER BY next_attempt_at ASC`,
+    [maxAttempts]
+  );
+  const scopedRows = filterQueueByScope(rows ?? [], scope);
+  return scopedRows[0]?.next_attempt_at ?? null;
+}
+
+export async function requeueConflictForLocalWin(
+  conflict: QueuedConflict
+): Promise<void> {
+  const db = await getDb();
+  const nextVersion = Math.max(
+    conflict.sync_version,
+    conflict.conflict.server_version
+  ) + 1;
+  const payload = {
+    ...conflict.local_data,
+    sync_version: nextVersion,
+    _force_sync_overwrite: true,
+  };
+
+  await db.execute(
+    `UPDATE sync_queue
+     SET operation_id = $1,
+         sync_version = $2,
+         payload_json = $3,
+         attempts = 0,
+         last_attempt_at = NULL,
+         next_attempt_at = NULL,
+         error = NULL,
+         conflict_json = NULL
+     WHERE table_name = $4 AND record_id = $5`,
+    [
+      crypto.randomUUID(),
+      nextVersion,
+      JSON.stringify(payload),
+      conflict.table_name,
+      conflict.record_id,
+    ]
+  );
+
+  // Manual conflicts currently apply only to locally editable cached tables.
+  // Keep the row version aligned with the queue so the next pull cannot
+  // overwrite the user's chosen local value before the forced push completes.
+  if (conflict.table_name === "customers" || conflict.table_name === "prescriptions") {
+    await db.execute(
+      `UPDATE ${conflict.table_name}
+       SET sync_status = 'pending', sync_version = $1
+       WHERE id = $2`,
+      [nextVersion, conflict.record_id]
+    );
+  }
 }
 
 export async function getPendingCount(scope?: QueueScope): Promise<number> {

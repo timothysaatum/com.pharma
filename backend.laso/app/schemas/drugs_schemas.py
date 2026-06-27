@@ -176,7 +176,7 @@ class DrugCategoryResponse(DrugCategoryBase, TimestampSchema, SyncSchema):
 
 class DrugCategoryTree(DrugCategoryResponse):
     """Drug category with nested children"""
-    children: List["DrugCategoryTree"] = []
+    children: List["DrugCategoryTree"] = Field(default_factory=list)
 
 
 class DrugSearchFilters(BaseSchema):

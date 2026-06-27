@@ -48,10 +48,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone, date
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
-from sqlalchemy import and_, or_, select, text
+from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -61,9 +62,17 @@ from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
-from app.models.pricing.pricing_model import PriceContract
+from app.models.pricing.pricing_model import InsuranceProvider, PriceContract
 from app.models.precriptions.prescription_model import Prescription
-from app.models.sales.sales_model import Sale, SaleItem, PurchaseOrder
+from app.models.sales.sales_model import (
+    PurchaseOrder,
+    PurchaseOrderItem,
+    Sale,
+    SaleItem,
+    SaleItemBatchAllocation,
+    Supplier,
+)
+from app.models.system_md.sys_models import SyncOperationReceipt
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
@@ -81,6 +90,7 @@ from app.schemas.sync_schemas import (
     PushResponse,
     PushResult,
 )
+from app.services.inventory.inventory_service import InventoryService
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +203,7 @@ _CUSTOMER_WRITABLE: frozenset[str] = frozenset({
     "loyalty_points", "loyalty_tier",
     "preferred_contact_method", "marketing_consent",
     "insurance_provider_id", "insurance_member_id",
+    "preferred_contract_id",
     "is_active",
     "created_at", "updated_at",
 })
@@ -705,10 +716,68 @@ class SyncService:
 
         for record in sorted_records:
             try:
+                if record.operation_id:
+                    receipt = await db.get(
+                        SyncOperationReceipt,
+                        record.operation_id,
+                    )
+                    if receipt:
+                        if (
+                            receipt.organization_id != organization_id
+                            or receipt.branch_id != request.branch_id
+                            or receipt.table_name != record.table_name
+                            or receipt.record_id != record.local_id
+                        ):
+                            failed.append(PushResult(
+                                local_id=record.local_id,
+                                table_name=record.table_name,
+                                success=False,
+                                error=(
+                                    "Operation ID is already bound to a different "
+                                    "sync mutation."
+                                ),
+                            ))
+                            continue
+                        SyncService._append_receipt_result(
+                            receipt,
+                            accepted,
+                            conflicts,
+                            failed,
+                        )
+                        continue
+
                 async with db.begin_nested():  # savepoint per record
+                    receipt = None
+                    if record.operation_id:
+                        # Flush the receipt before applying the mutation. A
+                        # concurrent request with the same operation ID then
+                        # fails at this savepoint before it can mutate data.
+                        receipt = SyncOperationReceipt(
+                            operation_id=record.operation_id,
+                            organization_id=organization_id,
+                            branch_id=request.branch_id,
+                            table_name=record.table_name,
+                            record_id=record.local_id,
+                            result_kind="failed",
+                            response_data={},
+                        )
+                        db.add(receipt)
+                        await db.flush()
+
                     push_result, conflict = await SyncService._handle_record(
                         db, record, organization_id, request.branch_id, pushed_by
                     )
+
+                    if receipt:
+                        if conflict:
+                            receipt.result_kind = "conflict"
+                            receipt.response_data = conflict.model_dump(mode="json")
+                        elif push_result.success:
+                            receipt.result_kind = "accepted"
+                            receipt.response_data = push_result.model_dump(mode="json")
+                        else:
+                            receipt.result_kind = "failed"
+                            receipt.response_data = push_result.model_dump(mode="json")
 
                 if conflict:
                     conflicts.append(conflict)
@@ -764,6 +833,17 @@ class SyncService:
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
         """Route a single record to the correct push handler."""
+        if record.operation == "delete":
+            return PushResult(
+                local_id=record.local_id,
+                table_name=record.table_name,
+                success=False,
+                error=(
+                    "Offline delete is not supported for this resource. "
+                    "Reconnect and use the resource-specific delete endpoint."
+                ),
+            ), None
+
         handler = {
             "sales":             SyncService._push_sale,
             "drug_batches":      SyncService._push_batch,
@@ -783,6 +863,21 @@ class SyncService:
             ), None
 
         return await handler(db, record, organization_id, branch_id, pushed_by)
+
+    @staticmethod
+    def _append_receipt_result(
+        receipt: SyncOperationReceipt,
+        accepted: List[PushResult],
+        conflicts: List[PushConflict],
+        failed: List[PushResult],
+    ) -> None:
+        """Replay the exact durable result for an idempotent operation retry."""
+        if receipt.result_kind == "accepted":
+            accepted.append(PushResult.model_validate(receipt.response_data))
+        elif receipt.result_kind == "conflict":
+            conflicts.append(PushConflict.model_validate(receipt.response_data))
+        else:
+            failed.append(PushResult.model_validate(receipt.response_data))
 
     # =========================================================================
     # Per-table push handlers
@@ -815,14 +910,19 @@ class SyncService:
         - Required FKs (cashier, branch) must exist or sync fails with error
         - All fixes/validations are logged for audit trail
         """
+        if record.operation != "create":
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error="Sales are immutable after creation; use cancel/refund endpoints.",
+            ), None
+
         existing = (await db.execute(
             select(Sale).where(
                 Sale.organization_id == organization_id,
                 Sale.branch_id == branch_id,
-                or_(
-                    Sale.id          == record.local_id,
-                    Sale.sale_number == record.data.get("sale_number"),
-                ),
+                Sale.id == record.local_id,
             )
         )).scalar_one_or_none()
 
@@ -834,11 +934,162 @@ class SyncService:
                 success=True,
             ), None
 
+        sale_number_collision = (await db.execute(
+            select(Sale.id).where(
+                Sale.branch_id == branch_id,
+                Sale.sale_number == record.data.get("sale_number"),
+            )
+        )).scalar_one_or_none()
+        if sale_number_collision:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=(
+                    "Sale number already belongs to another transaction. "
+                    "The local sale was not imported."
+                ),
+            ), None
+
+        items_data = record.data.get("items")
+        if not isinstance(items_data, list) or not items_data:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error="A completed sale must contain at least one line item.",
+            ), None
+
+        normalized_items: list[dict[str, Any]] = []
+        item_drug_ids: set[uuid.UUID] = set()
+        item_subtotal = Decimal("0")
+        item_discount = Decimal("0")
+        item_tax = Decimal("0")
+        item_total = Decimal("0")
+
+        for item in items_data:
+            if not isinstance(item, dict):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error="Every sale item must be an object.",
+                ), None
+            try:
+                drug_id = uuid.UUID(str(item.get("drug_id")))
+                quantity = int(item.get("quantity", 0))
+                unit_price = Decimal(str(item.get("unit_price", 0)))
+                subtotal = Decimal(str(item.get("subtotal", 0)))
+                discount_amount = Decimal(str(item.get("discount_amount") or 0))
+                tax_amount = Decimal(str(item.get("tax_amount") or 0))
+                total_price = Decimal(str(item.get("total_price", 0)))
+            except (ArithmeticError, TypeError, ValueError):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error="Sale item values are invalid.",
+                ), None
+
+            monetary_values = (
+                unit_price,
+                subtotal,
+                discount_amount,
+                tax_amount,
+                total_price,
+            )
+            if not all(value.is_finite() for value in monetary_values):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error="Sale item monetary values must be finite.",
+                ), None
+            if quantity <= 0 or unit_price < 0:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error="Sale item quantity must be positive and price non-negative.",
+                ), None
+            expected_subtotal = unit_price * quantity
+            expected_total = subtotal - discount_amount + tax_amount
+            if (
+                abs(subtotal - expected_subtotal) > Decimal("0.01")
+                or discount_amount < 0
+                or discount_amount > subtotal
+                or tax_amount < 0
+                or abs(total_price - expected_total) > Decimal("0.01")
+            ):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error="Sale line financial totals are inconsistent.",
+                ), None
+
+            normalized = dict(item)
+            normalized["drug_id"] = drug_id
+            normalized["quantity"] = quantity
+            normalized["unit_price"] = unit_price
+            normalized["subtotal"] = subtotal
+            normalized["discount_amount"] = discount_amount
+            normalized["tax_amount"] = tax_amount
+            normalized["total_price"] = total_price
+            normalized_items.append(normalized)
+            item_drug_ids.add(drug_id)
+            item_subtotal += subtotal
+            item_discount += discount_amount
+            item_tax += tax_amount
+            item_total += total_price
+
+        existing_drug_ids = set((await db.execute(
+            select(Drug.id).where(
+                Drug.id.in_(item_drug_ids),
+                Drug.organization_id == organization_id,
+                Drug.is_deleted == False,
+                Drug.is_active == True,
+            )
+        )).scalars().all())
+        if existing_drug_ids != item_drug_ids:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=f"Drugs not found or inactive: {item_drug_ids - existing_drug_ids}",
+            ), None
+
+        header_values = {
+            "subtotal": item_subtotal,
+            "discount_amount": item_discount,
+            "tax_amount": item_tax,
+            "total_amount": item_total,
+        }
+        for field, expected in header_values.items():
+            raw_value = record.data.get(field)
+            if field == "discount_amount" and raw_value is None:
+                raw_value = record.data.get("total_discount_amount", 0)
+            try:
+                actual = Decimal(str(raw_value or 0))
+            except (ArithmeticError, TypeError, ValueError):
+                actual = Decimal("-1")
+            if (
+                not actual.is_finite()
+                or abs(actual - expected) > Decimal("0.01")
+            ):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error=f"Sale {field} does not match its line items.",
+                ), None
+
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
         _parse_datetime_fields(safe_data)
         safe_data["id"] = record.local_id
         safe_data["organization_id"] = str(organization_id)
         safe_data["branch_id"]       = str(branch_id)
+        safe_data["updated_at"] = datetime.now(timezone.utc)
 
         # Remap schema alias → DB column.
         # The client sends total_discount_amount (the serialised alias of the
@@ -885,15 +1136,32 @@ class SyncService:
             ), None
 
         try:
+            inventory_plan = None
+            if record.data.get("sync_protocol_version") == 2:
+                inventory_plan, inventory_error = (
+                    await SyncService._prepare_offline_sale_inventory(
+                        db=db,
+                        branch_id=branch_id,
+                        items=normalized_items,
+                    )
+                )
+                if inventory_error:
+                    return PushResult(
+                        local_id=record.local_id,
+                        table_name="sales",
+                        success=False,
+                        error=inventory_error,
+                    ), None
+
             sale = Sale(**safe_data)
             sale.sync_status = "synced"
             db.add(sale)
             await db.flush()
 
             # Sync SaleItems if present in record data
-            items_data = record.data.get("items")
-            if items_data and isinstance(items_data, list):
-                for item_dict in items_data:
+            created_sale_items: list[SaleItem] = []
+            if normalized_items:
+                for item_dict in normalized_items:
                     # Whitelist SaleItem fields
                     item_safe = {
                         k: v for k, v in item_dict.items()
@@ -908,22 +1176,21 @@ class SyncService:
                     _parse_datetime_fields(item_safe)
                     item_safe["sale_id"] = sale.id
 
-                    # Verify drug existence
-                    drug_exists = (await db.execute(
-                        select(Drug.id).where(
-                            Drug.id == item_safe.get("drug_id"),
-                            Drug.organization_id == organization_id,
-                        )
-                    )).scalar_one_or_none()
-
-                    if drug_exists:
-                        db.add(SaleItem(**item_safe))
-                    else:
-                        logger.warning(
-                            "Sync: Drug %s missing for sale item in sale %s; skipping item",
-                            item_safe.get("drug_id"), record.local_id
-                        )
+                    sale_item = SaleItem(**item_safe)
+                    db.add(sale_item)
+                    created_sale_items.append(sale_item)
                 await db.flush()
+
+            if inventory_plan is not None:
+                await SyncService._apply_offline_sale_inventory(
+                    db=db,
+                    sale=sale,
+                    sale_items=created_sale_items,
+                    organization_id=organization_id,
+                    branch_id=branch_id,
+                    pushed_by=pushed_by,
+                    inventory_plan=inventory_plan,
+                )
 
             # ------------------------------------------------------------------
             # 18. Prescription refill decrement (critical for offline sales)
@@ -939,155 +1206,52 @@ class SyncService:
                         )
                     )
                     prescription = rx_res.scalar_one_or_none()
-                    if prescription and prescription.refills_remaining > 0:
-                        # Get the prescription sync_version that was stored with this sale
-                        # If it was null/missing, this is likely an online sale or legacy data
-                        prescription_sync_version_at_sale = record.data.get("prescription_sync_version")
-                        
-                        # Only decrement if:
-                        # 1. The prescription exists and has refills
-                        # 2. Either no sync_version was stored (online sale), OR
-                        # 3. The server's current sync_version matches what the client had
-                        #    (meaning the prescription hasn't been modified since the sale)
-                        should_decrement = (
-                            prescription_sync_version_at_sale is None or
-                            prescription.sync_version == prescription_sync_version_at_sale
+                    if not prescription:
+                        raise ValueError("Prescription no longer exists.")
+                    if prescription.status != "active":
+                        raise ValueError(
+                            f"Prescription is {prescription.status} and cannot be filled."
                         )
-                        
-                        if should_decrement:
-                            prescription.refills_remaining -= 1
-                            prescription.sync_version += 1
-                            prescription.last_refill_date = date.today()
-                            prescription.status = (
-                                "filled" if prescription.refills_remaining == 0 else "active"
-                            )
-                            prescription.updated_at = datetime.now(timezone.utc)
-                            prescription.mark_as_synced()
-                            logger.info(
-                                "Sync: Decremented refills for prescription %s during sale push "
-                                "(sync_version: %s → %s, refills: %s → %s)",
-                                safe_data["prescription_id"],
-                                prescription.sync_version - 1,
-                                prescription.sync_version,
-                                prescription.refills_remaining + 1,
-                                prescription.refills_remaining,
-                            )
-                        else:
-                            logger.info(
-                                "Sync: Skipped prescription refill decrement for %s "
-                                "(already decremented; server sync_version %s != client %s)",
-                                safe_data["prescription_id"],
-                                prescription.sync_version,
-                                prescription_sync_version_at_sale,
-                            )
+                    if prescription.expiry_date < date.today():
+                        raise ValueError("Prescription has expired.")
+                    if prescription.refills_remaining <= 0:
+                        raise ValueError("Prescription has no refills remaining.")
+
+                    # The sale ID and operation receipt provide idempotency, so
+                    # the server applies this side effect exactly once.
+                    prescription.refills_remaining -= 1
+                    prescription.sync_version += 1
+                    prescription.last_refill_date = date.today()
+                    prescription.status = (
+                        "filled" if prescription.refills_remaining == 0 else "active"
+                    )
+                    prescription.updated_at = datetime.now(timezone.utc)
+                    prescription.mark_as_synced()
+                    logger.info(
+                        "Sync: decremented refills for prescription %s during sale push",
+                        safe_data["prescription_id"],
+                    )
                 except Exception as rx_exc:
-                    logger.warning(
+                    logger.error(
                         "Sync: Failed to decrement prescription refills during sale push: %s",
                         rx_exc,
-                    )
-                    # Don't fail the entire sale push if refill update fails
-                    # (prescription might have been deleted or modified)
-
-        except Exception as exc:
-            # If we still get a FK constraint violation after validation,
-            # it means a referenced record was deleted between validation and flush.
-            # Parse the error to identify which FK constraint failed, then clear it.
-            error_str = str(exc).lower()
-            if "foreign key" in error_str or "fk" in error_str or "constraint" in error_str:
-                logger.warning(
-                    "Sync: FK constraint violation after validation for sale %s; "
-                    "attempting recovery: %s",
-                    record.local_id, exc,
-                )
-                
-                # Remove the sale from the session to start fresh
-                # (may fail if sale is already detached; that's OK)
-                try:
-                    db.expunge(sale)
-                except Exception:
-                    # Sale might not be in session; rollback to clear the failed state
-                    await db.rollback()
-                
-                # Map constraint names to FK fields
-                constraint_to_field = {
-                    "sales_price_contract_id_fkey": ["price_contract_id", "contract_name", "contract_discount_percentage"],
-                    "sales_customer_id_fkey": ["customer_id"],
-                    "sales_pharmacist_id_fkey": ["pharmacist_id"],
-                    "sales_cashier_id_fkey": ["cashier_id"],
-                    "sales_branch_id_fkey": ["branch_id"],
-                }
-                
-                # Try to identify which constraint failed and clear it
-                cleared_fields = []
-                for constraint_name, fields_to_clear in constraint_to_field.items():
-                    if constraint_name in error_str:
-                        for field in fields_to_clear:
-                            safe_data[field] = None
-                            cleared_fields.append(field)
-                        break
-                
-                # If we couldn't identify the constraint, clear all optional FKs
-                if not cleared_fields:
-                    optional_fk_fields = [
-                        "price_contract_id", "contract_name", "contract_discount_percentage",
-                        "customer_id", "pharmacist_id", "prescription_id"
-                    ]
-                    for field in optional_fk_fields:
-                        safe_data[field] = None
-                        cleared_fields.append(field)
-                
-                # Track recovery for response
-                fk_fixes.extend(cleared_fields)
-                
-                # Try to flush again with cleared FKs
-                try:
-                    sale = Sale(**safe_data)
-                    sale.sync_status = "synced"
-                    db.add(sale)
-                    await db.flush()
-                    
-                    logger.info(
-                        "Sync: Recovered from FK violation for sale %s by clearing: %s",
-                        record.local_id, ", ".join(cleared_fields),
-                    )
-                    return PushResult(
-                        local_id=record.local_id,
-                        table_name="sales",
-                        server_id=str(sale.id),
-                        success=True,
-                        fk_fixes=fk_fixes if fk_fixes else None,
-                        recovery_applied=True,
-                    ), None
-                except Exception as recovery_exc:
-                    # Recovery failed; return detailed error
-                    logger.error(
-                        "Sync: Failed to recover from FK constraint violation for sale %s; "
-                        "cleared fields %s but error persists: %s",
-                        record.local_id, cleared_fields, recovery_exc,
                         exc_info=True,
                     )
-                    return PushResult(
-                        local_id=record.local_id,
-                        table_name="sales",
-                        success=False,
-                        error=f"FK constraint violation (non-recoverable): {recovery_exc}",
-                        fk_fixes=fk_fixes if fk_fixes else None,
-                        recovery_applied=True,
-                    ), None
-            else:
-                # Not a FK error; return failure
-                logger.error(
-                    "Sync: Failed to flush sale %s (non-FK error): %s",
-                    record.local_id, exc,
-                    exc_info=True,
-                )
-                return PushResult(
-                    local_id=record.local_id,
-                    table_name="sales",
-                    success=False,
-                    error=f"Database error: {exc}",
-                    fk_fixes=fk_fixes if fk_fixes else None,
-                ), None
+                    raise RuntimeError(
+                        "Prescription refill update failed; sale was rolled back."
+                    ) from rx_exc
+
+        except Exception as exc:
+            # Let the per-record savepoint unwind every sale side effect,
+            # including inventory, allocations, and ledger rows. Attempting an
+            # in-place "recovery" here can commit a partial financial record.
+            logger.error(
+                "Sync: failed to persist sale %s safely: %s",
+                record.local_id,
+                exc,
+                exc_info=True,
+            )
+            raise RuntimeError("Sale could not be persisted safely.") from exc
 
         return PushResult(
             local_id=record.local_id,
@@ -1098,6 +1262,183 @@ class SyncService:
         ), None
 
     @staticmethod
+    async def _prepare_offline_sale_inventory(
+        db: AsyncSession,
+        branch_id: uuid.UUID,
+        items: list[dict[str, Any]],
+    ) -> tuple[
+        Optional[tuple[dict[uuid.UUID, BranchInventory], dict[uuid.UUID, list[DrugBatch]]]],
+        Optional[str],
+    ]:
+        """Lock and validate all stock needed by a protocol-v2 offline sale."""
+        required: dict[uuid.UUID, int] = {}
+        for item in items:
+            drug_id = item["drug_id"]
+            required[drug_id] = required.get(drug_id, 0) + int(item["quantity"])
+
+        inventory_rows = (await db.execute(
+            select(BranchInventory)
+            .where(
+                BranchInventory.branch_id == branch_id,
+                BranchInventory.drug_id.in_(required),
+            )
+            .with_for_update()
+        )).scalars().all()
+        inventories = {row.drug_id: row for row in inventory_rows}
+
+        missing_inventory = set(required) - set(inventories)
+        if missing_inventory:
+            return None, f"Inventory records not found for drugs: {missing_inventory}"
+
+        for drug_id, quantity in required.items():
+            inventory = inventories[drug_id]
+            available = inventory.quantity - inventory.reserved_quantity
+            if available < quantity:
+                return None, (
+                    f"Insufficient stock for drug {drug_id}. "
+                    f"Available: {available}, requested: {quantity}."
+                )
+
+        batch_rows = (await db.execute(
+            select(DrugBatch)
+            .where(
+                DrugBatch.branch_id == branch_id,
+                DrugBatch.drug_id.in_(required),
+                DrugBatch.remaining_quantity > 0,
+                DrugBatch.expiry_date > date.today(),
+            )
+            .order_by(DrugBatch.drug_id, DrugBatch.expiry_date)
+            .with_for_update()
+        )).scalars().all()
+        batches: dict[uuid.UUID, list[DrugBatch]] = {}
+        for batch in batch_rows:
+            batches.setdefault(batch.drug_id, []).append(batch)
+
+        for drug_id, quantity in required.items():
+            available = sum(
+                batch.remaining_quantity for batch in batches.get(drug_id, [])
+            )
+            if available < quantity:
+                return None, (
+                    f"Insufficient non-expired batch stock for drug {drug_id}. "
+                    f"Available: {available}, requested: {quantity}."
+                )
+
+        return (inventories, batches), None
+
+    @staticmethod
+    async def _apply_offline_sale_inventory(
+        db: AsyncSession,
+        sale: Sale,
+        sale_items: list[SaleItem],
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        pushed_by: uuid.UUID,
+        inventory_plan: tuple[
+            dict[uuid.UUID, BranchInventory],
+            dict[uuid.UUID, list[DrugBatch]],
+        ],
+    ) -> None:
+        """Apply sale, batch allocations, ledger, and stock audit atomically."""
+        inventories, batches_by_drug = inventory_plan
+        now = datetime.now(timezone.utc)
+
+        for sale_item in sale_items:
+            inventory = inventories[sale_item.drug_id]
+            previous_quantity = inventory.quantity
+            running_quantity = previous_quantity
+            remaining = sale_item.quantity
+            primary_batch_id: Optional[uuid.UUID] = None
+
+            for batch in batches_by_drug[sale_item.drug_id]:
+                if remaining <= 0:
+                    break
+                take = min(batch.remaining_quantity, remaining)
+                if take <= 0:
+                    continue
+
+                if primary_batch_id is None:
+                    primary_batch_id = batch.id
+                batch_before = batch.remaining_quantity
+                batch.remaining_quantity -= take
+                batch.sync_version += 1
+                batch.sync_status = "synced"
+                batch.updated_at = now
+                remaining -= take
+
+                db.add(SaleItemBatchAllocation(
+                    id=uuid.uuid4(),
+                    sale_item_id=sale_item.id,
+                    branch_id=branch_id,
+                    drug_id=sale_item.drug_id,
+                    batch_id=batch.id,
+                    batch_number=batch.batch_number,
+                    batch_expiry_date=batch.expiry_date,
+                    quantity=take,
+                    refunded_quantity=0,
+                    unit_cost_at_sale=batch.cost_price,
+                    unit_price_at_sale=sale_item.unit_price,
+                    created_at=now,
+                    updated_at=now,
+                ))
+
+                movement_before = running_quantity
+                running_quantity -= take
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    organization_id=organization_id,
+                    branch_id=branch_id,
+                    drug_id=sale_item.drug_id,
+                    movement_type="sale",
+                    quantity_change=-take,
+                    quantity_before=movement_before,
+                    quantity_after=running_quantity,
+                    batch_id=batch.id,
+                    batch_quantity_before=batch_before,
+                    batch_quantity_after=batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(batch.cost_price))
+                        if batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=Decimal(str(sale_item.unit_price)),
+                    source_type="sale",
+                    source_id=sale.id,
+                    source_line_id=sale_item.id,
+                    reference_number=sale.sale_number,
+                    reason=f"Offline sale {sale.sale_number}",
+                    created_by=pushed_by,
+                )
+
+            # Preflight validation guarantees this cannot remain positive.
+            if remaining:
+                raise RuntimeError(
+                    f"Locked batch stock changed unexpectedly for {sale_item.drug_id}."
+                )
+
+            sale_item.batch_id = primary_batch_id
+            inventory.quantity = running_quantity
+            inventory.sync_version += 1
+            inventory.sync_status = "synced"
+            inventory.updated_at = now
+
+            db.add(StockAdjustment(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=sale_item.drug_id,
+                adjustment_type="correction",
+                quantity_change=-sale_item.quantity,
+                previous_quantity=previous_quantity,
+                new_quantity=running_quantity,
+                reason=f"Offline sale {sale.sale_number}",
+                adjusted_by=pushed_by,
+                created_at=now,
+                updated_at=now,
+            ))
+
+        await db.flush()
+
+    @staticmethod
     async def _push_batch(
         db: AsyncSession,
         record: PushRecord,
@@ -1105,7 +1446,18 @@ class SyncService:
         branch_id: uuid.UUID,
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
-        """Create or update a DrugBatch with server-wins conflict resolution."""
+        """Create a batch, atomically applying protocol-v2 goods receipts."""
+        if record.operation != "create":
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error=(
+                    "Offline batch correction is not supported. Reconnect and "
+                    "use the batch update endpoint so inventory is recalculated."
+                ),
+            ), None
+
         existing = (await db.execute(
             select(DrugBatch)
             .where(
@@ -1116,63 +1468,196 @@ class SyncService:
         )).scalar_one_or_none()
 
         if existing:
-            conflict = SyncService._check_conflict(existing, record, "drug_batches")
-            if conflict:
-                return PushResult(
-                    local_id=record.local_id, table_name="drug_batches", success=False
-                ), conflict
-            safe = _whitelist(record.data, _BATCH_WRITABLE)
-            _parse_datetime_fields(safe)
-            safe.pop("id", None)
-            # Validate drug exists in organization
-            drug_id = safe.get("drug_id") or existing.drug_id
-            drug_exists = await db.scalar(
-                select(Drug.id).where(
-                    Drug.id == drug_id,
-                    Drug.organization_id == organization_id,
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                server_id=str(existing.id),
+                success=True,
+            ), None
+
+        safe = _whitelist(record.data, _BATCH_WRITABLE)
+        _parse_datetime_fields(safe)
+        safe["id"] = record.local_id
+        safe["branch_id"] = str(branch_id)
+        safe["updated_at"] = datetime.now(timezone.utc)
+
+        drug_id = safe.get("drug_id")
+        drug_exists = await db.scalar(
+            select(Drug.id).where(
+                Drug.id == drug_id,
+                Drug.organization_id == organization_id,
+                Drug.is_active == True,
+                Drug.is_deleted == False,
+            )
+        )
+        if not drug_exists:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error=f"Drug {drug_id} not found or inactive in organization.",
+            ), None
+
+        try:
+            quantity = int(safe.get("quantity", 0))
+            remaining_quantity = int(safe.get("remaining_quantity", quantity))
+        except (TypeError, ValueError):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error="Batch quantities must be valid integers.",
+            ), None
+        if (
+            quantity <= 0
+            or quantity > MAX_BATCH_QUANTITY
+            or remaining_quantity < 0
+            or remaining_quantity > quantity
+        ):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error="Batch quantities are outside the accepted range.",
+            ), None
+        safe["quantity"] = quantity
+        safe["remaining_quantity"] = remaining_quantity
+
+        duplicate = await db.scalar(
+            select(DrugBatch.id).where(
+                DrugBatch.branch_id == branch_id,
+                DrugBatch.drug_id == drug_id,
+                DrugBatch.batch_number == safe.get("batch_number"),
+            )
+        )
+        if duplicate:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error="A batch with this number already exists for the drug.",
+            ), None
+
+        purchase_order_id = safe.get("purchase_order_id")
+        if purchase_order_id:
+            purchase_order_exists = await db.scalar(
+                select(PurchaseOrder.id).where(
+                    PurchaseOrder.id == purchase_order_id,
+                    PurchaseOrder.organization_id == organization_id,
+                    PurchaseOrder.branch_id == branch_id,
                 )
             )
-            if not drug_exists:
+            if not purchase_order_exists:
                 return PushResult(
-                    local_id=record.local_id, table_name="drug_batches", success=False,
-                    error=f"Drug {drug_id} not found in organization.",
+                    local_id=record.local_id,
+                    table_name="drug_batches",
+                    success=False,
+                    error="Purchase order does not belong to this sync scope.",
                 ), None
-            # Server-side validation: cap batch quantities to prevent inflation
-            if "quantity" in safe:
-                safe["quantity"] = min(int(safe["quantity"]), MAX_BATCH_QUANTITY)
-            if "remaining_quantity" in safe:
-                safe["remaining_quantity"] = min(int(safe["remaining_quantity"]), MAX_BATCH_QUANTITY)
-            for k, v in safe.items():
-                setattr(existing, k, v)
-            existing.sync_status  = "synced"
-            existing.sync_version += 1
-        else:
-            safe = _whitelist(record.data, _BATCH_WRITABLE)
-            _parse_datetime_fields(safe)
-            safe["id"] = record.local_id
-            safe["branch_id"] = str(branch_id)
-            # Validate drug exists in organization
-            drug_id = safe.get("drug_id")
-            if drug_id:
-                drug_exists = await db.scalar(
-                    select(Drug.id).where(
-                        Drug.id == drug_id,
-                        Drug.organization_id == organization_id,
-                    )
+
+        if (
+            record.data.get("sync_protocol_version") == 2
+            and remaining_quantity != quantity
+        ):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error=(
+                    "A new protocol-v2 batch must have its full quantity "
+                    "available at receipt."
+                ),
+            ), None
+
+        existing = DrugBatch(**safe)
+        existing.sync_status = "synced"
+        db.add(existing)
+        await db.flush()
+
+        if record.data.get("sync_protocol_version") == 2:
+            inventory = (await db.execute(
+                select(BranchInventory)
+                .where(
+                    BranchInventory.branch_id == branch_id,
+                    BranchInventory.drug_id == drug_id,
                 )
-                if not drug_exists:
-                    return PushResult(
-                        local_id=record.local_id, table_name="drug_batches", success=False,
-                        error=f"Drug {drug_id} not found in organization.",
-                    ), None
-            # Server-side validation: cap batch quantities for new records
-            if "quantity" in safe:
-                safe["quantity"] = min(int(safe["quantity"]), MAX_BATCH_QUANTITY)
-            if "remaining_quantity" in safe:
-                safe["remaining_quantity"] = min(int(safe["remaining_quantity"]), MAX_BATCH_QUANTITY)
-            existing = DrugBatch(**safe)
-            existing.sync_status = "synced"
-            db.add(existing)
+                .with_for_update()
+            )).scalar_one_or_none()
+            previous_quantity = inventory.quantity if inventory else 0
+            new_quantity = previous_quantity + quantity
+            now = datetime.now(timezone.utc)
+
+            if inventory is None:
+                inventory = BranchInventory(
+                    id=uuid.uuid4(),
+                    branch_id=branch_id,
+                    drug_id=drug_id,
+                    quantity=new_quantity,
+                    reserved_quantity=0,
+                    selling_price=safe.get("selling_price"),
+                    sync_status="synced",
+                    sync_version=1,
+                    synced_at=now,
+                    created_at=now,
+                    updated_at=now,
+                )
+                db.add(inventory)
+            else:
+                inventory.quantity = new_quantity
+                if (
+                    inventory.selling_price is None
+                    and safe.get("selling_price") is not None
+                ):
+                    inventory.selling_price = safe["selling_price"]
+                inventory.sync_version += 1
+                inventory.sync_status = "synced"
+                inventory.synced_at = now
+                inventory.updated_at = now
+
+            db.add(StockAdjustment(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=drug_id,
+                adjustment_type="purchase_receipt",
+                quantity_change=quantity,
+                previous_quantity=previous_quantity,
+                new_quantity=new_quantity,
+                reason=f"Offline batch receipt {existing.batch_number}",
+                adjusted_by=pushed_by,
+                created_at=now,
+                updated_at=now,
+            ))
+            await InventoryService._record_inventory_movement(
+                db=db,
+                organization_id=organization_id,
+                branch_id=branch_id,
+                drug_id=drug_id,
+                movement_type="purchase_receipt",
+                quantity_change=quantity,
+                quantity_before=previous_quantity,
+                quantity_after=new_quantity,
+                batch_id=existing.id,
+                batch_quantity_before=0,
+                batch_quantity_after=remaining_quantity,
+                unit_cost=(
+                    Decimal(str(existing.cost_price))
+                    if existing.cost_price is not None
+                    else None
+                ),
+                unit_price=(
+                    Decimal(str(existing.selling_price))
+                    if existing.selling_price is not None
+                    else None
+                ),
+                source_type=(
+                    "purchase_order" if purchase_order_id else "batch"
+                ),
+                source_id=purchase_order_id or existing.id,
+                source_line_id=existing.id,
+                reference_number=existing.batch_number,
+                reason=f"Offline batch receipt {existing.batch_number}",
+                created_by=pushed_by,
+            )
 
         await db.flush()
         return PushResult(
@@ -1215,16 +1700,23 @@ class SyncService:
                 success=True,
             ), None
 
-        # Whitelist and prepare adjustment data
+        if record.operation != "create":
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error="Stock adjustments are immutable.",
+            ), None
+
+        # Whitelist and validate the immutable adjustment data.
         safe = _whitelist(record.data, _ADJUSTMENT_WRITABLE)
         _parse_datetime_fields(safe)
-        safe["id"] = record.local_id
-        safe["branch_id"]   = str(branch_id)
-        safe["adjusted_by"] = str(pushed_by)
 
-        # Server-side validation: reject unrealistic quantity changes
-        quantity_change = int(safe.get("quantity_change", 0))
-        if abs(quantity_change) > MAX_ADJUSTMENT_CHANGE:
+        try:
+            quantity_change = int(safe.get("quantity_change", 0))
+        except (TypeError, ValueError):
+            quantity_change = 0
+        if quantity_change == 0 or abs(quantity_change) > MAX_ADJUSTMENT_CHANGE:
             logger.warning(
                 "Sync: Rejected stock_adjustment %s with quantity_change=%d "
                 "(max allowed: %d)",
@@ -1234,7 +1726,10 @@ class SyncService:
                 local_id=record.local_id,
                 table_name="stock_adjustments",
                 success=False,
-                error=f"Quantity change {quantity_change} exceeds maximum allowed ({MAX_ADJUSTMENT_CHANGE}).",
+                error=(
+                    "Quantity change must be non-zero and no greater than "
+                    f"{MAX_ADJUSTMENT_CHANGE} units."
+                ),
             ), None
 
         drug_id = safe.get("drug_id")
@@ -1259,71 +1754,38 @@ class SyncService:
                 error=f"Drug {drug_id} not found in organization.",
             ), None
 
-        # Validate inventory BEFORE persisting the adjustment record.
-        # Resolve the current inventory under a row lock so we can:
-        #   1. Reject negative-quantity outcomes before writing.
-        #   2. Server-compute previous_quantity / new_quantity for the
-        #      audit trail instead of blindly trusting client-supplied values.
-        #   3. Apply the inventory change in the same locked query.
-        previous_qty: int = 0
-        new_qty: int = 0
-        if drug_id and quantity_change != 0:
-            inv = (await db.execute(
-                select(BranchInventory)
-                .where(
-                    BranchInventory.branch_id == branch_id,
-                    BranchInventory.drug_id   == drug_id,
-                )
-                .with_for_update()
-            )).scalar_one_or_none()
+        adjustment_type = str(safe.get("adjustment_type") or "")
+        if adjustment_type not in {
+            "damage",
+            "expired",
+            "theft",
+            "return",
+            "correction",
+        }:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error=(
+                    "Offline adjustments support damage, expired, theft, "
+                    "return, and correction only."
+                ),
+            ), None
 
-            if inv:
-                previous_qty = inv.quantity
-                new_qty      = previous_qty + quantity_change
-                if new_qty < 0:
-                    return PushResult(
-                        local_id=record.local_id,
-                        table_name="stock_adjustments",
-                        success=False,
-                    ), PushConflict(
-                        local_id=record.local_id,
-                        table_name="stock_adjustments",
-                        local_version=record.sync_version,
-                        server_version=getattr(inv, "sync_version", 1),
-                        server_record={"quantity": inv.quantity},
-                        resolution="server_wins",
-                    )
-                inv.quantity      = new_qty
-                inv.sync_version += 1
-                inv.mark_as_pending_sync()
-            elif quantity_change > 0:
-                previous_qty = 0
-                new_qty      = quantity_change
-                inv = BranchInventory(
-                    branch_id=branch_id,
-                    drug_id=drug_id,
-                    quantity=new_qty,
-                    reserved_quantity=0,
-                )
-                inv.sync_status = "synced"
-                db.add(inv)
-            else:
-                # quantity_change < 0 with no inventory row: cannot deduct
-                return PushResult(
-                    local_id=record.local_id,
-                    table_name="stock_adjustments",
-                    success=False,
-                    error="Cannot deduct from non-existent inventory.",
-                ), None
-
-        # Override client-supplied quantities with server-computed values
-        safe["previous_quantity"] = previous_qty
-        safe["new_quantity"]     = new_qty
-
-        # Create the adjustment record (now validated against real inventory)
-        adj = StockAdjustment(**safe)
-        db.add(adj)
-        await db.flush()
+        # Reuse the authoritative inventory service so batch quantities,
+        # aggregate inventory, adjustment audit, and movement ledger remain
+        # in parity inside the current per-record savepoint.
+        adj, inventory = await InventoryService._apply_adjustment(
+            db=db,
+            branch_id=branch_id,
+            drug_id=uuid.UUID(str(drug_id)),
+            quantity_change=quantity_change,
+            adjustment_type=adjustment_type,
+            reason=str(safe.get("reason") or "Offline stock adjustment"),
+            adjusted_by=pushed_by,
+            adjustment_id=uuid.UUID(record.local_id),
+        )
+        inventory.mark_as_synced()
 
         return PushResult(
             local_id=record.local_id,
@@ -1385,21 +1847,50 @@ class SyncService:
             _parse_datetime_fields(safe)
             safe.pop("id", None)
             safe.pop("drug_id", None)
-            # Server-side validation: cap inventory quantity to prevent inflation attacks
-            if "quantity" in safe:
-                safe["quantity"] = min(int(safe["quantity"]), MAX_INVENTORY_QUANTITY)
-            for k, v in safe.items():
-                setattr(existing, k, v)
-            existing.sync_status  = "synced"
-            existing.sync_version += 1
         else:
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
             safe["id"] = record.local_id
             safe["branch_id"] = str(branch_id)
-            # Server-side validation: cap inventory quantity for new records
-            if "quantity" in safe:
-                safe["quantity"] = min(int(safe["quantity"]), MAX_INVENTORY_QUANTITY)
+
+        try:
+            quantity = int(safe.get(
+                "quantity",
+                existing.quantity if existing else 0,
+            ))
+            reserved_quantity = int(safe.get(
+                "reserved_quantity",
+                existing.reserved_quantity if existing else 0,
+            ))
+        except (TypeError, ValueError):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="branch_inventory",
+                success=False,
+                error="Inventory quantities must be valid integers.",
+            ), None
+        if (
+            quantity < 0
+            or quantity > MAX_INVENTORY_QUANTITY
+            or reserved_quantity < 0
+            or reserved_quantity > quantity
+        ):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="branch_inventory",
+                success=False,
+                error="Inventory quantities are outside the accepted range.",
+            ), None
+        safe["quantity"] = quantity
+        safe["reserved_quantity"] = reserved_quantity
+        safe["updated_at"] = datetime.now(timezone.utc)
+
+        if existing:
+            for k, v in safe.items():
+                setattr(existing, k, v)
+            existing.sync_status = "synced"
+            existing.sync_version += 1
+        else:
             existing = BranchInventory(**safe)
             existing.sync_status = "synced"
             db.add(existing)
@@ -1420,7 +1911,7 @@ class SyncService:
         branch_id: uuid.UUID,
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
-        """Create or update a PurchaseOrder."""
+        """Create or update a draft purchase order and its line items."""
         existing = (await db.execute(
             select(PurchaseOrder).where(
                 PurchaseOrder.id              == record.local_id,
@@ -1430,28 +1921,163 @@ class SyncService:
         )).scalar_one_or_none()
 
         if existing:
+            if existing.status != "draft":
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="purchase_orders",
+                    success=False,
+                    error="Only draft purchase orders can be edited offline.",
+                ), None
             conflict = SyncService._check_conflict(existing, record, "purchase_orders")
             if conflict:
                 return PushResult(
                     local_id=record.local_id, table_name="purchase_orders", success=False
                 ), conflict
-            safe = _whitelist(record.data, _PO_WRITABLE)
-            _parse_datetime_fields(safe)
+        safe = _whitelist(record.data, _PO_WRITABLE)
+        _parse_datetime_fields(safe)
+
+        supplier_id = safe.get("supplier_id")
+        supplier_exists = await db.scalar(
+            select(Supplier.id).where(
+                Supplier.id == supplier_id,
+                Supplier.organization_id == organization_id,
+                Supplier.is_deleted == False,
+            )
+        )
+        if not supplier_exists:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="purchase_orders",
+                success=False,
+                error=f"Supplier {supplier_id} not found in organization.",
+            ), None
+
+        items_data = record.data.get("items")
+        if not isinstance(items_data, list) or not items_data:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="purchase_orders",
+                success=False,
+                error="A purchase order must contain at least one item.",
+            ), None
+
+        normalized_items: list[dict[str, Any]] = []
+        drug_ids: set[uuid.UUID] = set()
+        subtotal = Decimal("0")
+        for item in items_data:
+            if not isinstance(item, dict):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="purchase_orders",
+                    success=False,
+                    error="Every purchase order item must be an object.",
+                ), None
+            try:
+                drug_id = uuid.UUID(str(item.get("drug_id")))
+                quantity = int(item.get("quantity_ordered", 0))
+                unit_cost = Decimal(str(item.get("unit_cost", 0)))
+                item_id = (
+                    uuid.UUID(str(item["id"]))
+                    if item.get("id")
+                    else uuid.uuid4()
+                )
+            except (ArithmeticError, TypeError, ValueError):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="purchase_orders",
+                    success=False,
+                    error="Purchase order item values are invalid.",
+                ), None
+            if quantity <= 0 or not unit_cost.is_finite() or unit_cost <= 0:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="purchase_orders",
+                    success=False,
+                    error="Purchase order quantities and unit costs must be positive.",
+                ), None
+            line_total = unit_cost * quantity
+            drug_ids.add(drug_id)
+            normalized_items.append({
+                "id": item_id,
+                "drug_id": drug_id,
+                "quantity_ordered": quantity,
+                "quantity_received": 0,
+                "unit_cost": unit_cost,
+                "total_cost": line_total,
+                "batch_number": None,
+                "expiry_date": None,
+            })
+            subtotal += line_total
+
+        found_drug_ids = set((await db.execute(
+            select(Drug.id).where(
+                Drug.id.in_(drug_ids),
+                Drug.organization_id == organization_id,
+                Drug.is_deleted == False,
+            )
+        )).scalars().all())
+        if found_drug_ids != drug_ids:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="purchase_orders",
+                success=False,
+                error=f"Drugs not found in organization: {drug_ids - found_drug_ids}",
+            ), None
+
+        try:
+            tax_amount = Decimal(str(safe.get("tax_amount") or 0))
+            shipping_cost = Decimal(str(safe.get("shipping_cost") or 0))
+        except (ArithmeticError, TypeError, ValueError):
+            tax_amount = shipping_cost = Decimal("-1")
+        if (
+            not tax_amount.is_finite()
+            or not shipping_cost.is_finite()
+            or tax_amount < 0
+            or shipping_cost < 0
+        ):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="purchase_orders",
+                success=False,
+                error="Tax and shipping amounts cannot be negative.",
+            ), None
+
+        safe.update({
+            "subtotal": subtotal,
+            "tax_amount": tax_amount,
+            "shipping_cost": shipping_cost,
+            "total_amount": subtotal + tax_amount + shipping_cost,
+            "status": "draft",
+            "updated_at": datetime.now(timezone.utc),
+        })
+
+        if existing:
             safe.pop("id", None)
+            safe.pop("created_at", None)
             for k, v in safe.items():
                 setattr(existing, k, v)
             existing.sync_status = "synced"
             existing.sync_version += 1
+            await db.execute(
+                delete(PurchaseOrderItem).where(
+                    PurchaseOrderItem.purchase_order_id == existing.id
+                )
+            )
         else:
-            safe = _whitelist(record.data, _PO_WRITABLE)
-            _parse_datetime_fields(safe)
             safe["id"] = record.local_id
             safe["organization_id"] = str(organization_id)
-            safe["branch_id"]       = str(branch_id)
-            safe["ordered_by"]      = str(pushed_by)
+            safe["branch_id"] = str(branch_id)
+            safe["ordered_by"] = str(pushed_by)
             existing = PurchaseOrder(**safe)
             existing.sync_status = "synced"
             db.add(existing)
+            await db.flush()
+
+        for item in normalized_items:
+            db.add(PurchaseOrderItem(
+                **item,
+                purchase_order_id=existing.id,
+            ))
 
         await db.flush()
         return PushResult(
@@ -1484,13 +2110,22 @@ class SyncService:
             )
         )).scalar_one_or_none()
 
-        if existing:
+        if existing and record.operation == "create":
             return PushResult(
                 local_id=record.local_id,
                 table_name="customers",
                 server_id=str(existing.id),
                 success=True,
             ), None
+
+        if existing:
+            conflict = SyncService._check_conflict(existing, record, "customers")
+            if conflict:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="customers",
+                    success=False,
+                ), conflict
 
         # Deduplicate by phone / email — strip and check for non-empty values
         phone = (record.data.get("phone") or "").strip()
@@ -1506,6 +2141,7 @@ class SyncService:
             dupe = (await db.execute(
                 select(Customer).where(
                     Customer.organization_id == organization_id,
+                    Customer.id != record.local_id,
                     or_(*dupe_conditions),
                 )
             )).scalar_one_or_none()
@@ -1524,11 +2160,55 @@ class SyncService:
 
         safe = _whitelist(record.data, _CUSTOMER_WRITABLE)
         _parse_datetime_fields(safe)
-        safe["id"] = record.local_id
-        safe["organization_id"] = str(organization_id)
-        customer = Customer(**safe)
-        customer.sync_status = "synced"
-        db.add(customer)
+        safe["updated_at"] = datetime.now(timezone.utc)
+
+        insurance_provider_id = safe.get("insurance_provider_id")
+        if insurance_provider_id:
+            provider_exists = await db.scalar(
+                select(InsuranceProvider.id).where(
+                    InsuranceProvider.id == insurance_provider_id,
+                    InsuranceProvider.organization_id == organization_id,
+                    InsuranceProvider.is_deleted == False,
+                )
+            )
+            if not provider_exists:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="customers",
+                    success=False,
+                    error="Insurance provider does not belong to this organization.",
+                ), None
+
+        preferred_contract_id = safe.get("preferred_contract_id")
+        if preferred_contract_id:
+            contract_exists = await db.scalar(
+                select(PriceContract.id).where(
+                    PriceContract.id == preferred_contract_id,
+                    PriceContract.organization_id == organization_id,
+                    PriceContract.is_deleted == False,
+                )
+            )
+            if not contract_exists:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="customers",
+                    success=False,
+                    error="Preferred contract does not belong to this organization.",
+                ), None
+
+        if existing:
+            safe.pop("id", None)
+            for key, value in safe.items():
+                setattr(existing, key, value)
+            existing.sync_status = "synced"
+            existing.sync_version += 1
+            customer = existing
+        else:
+            safe["id"] = record.local_id
+            safe["organization_id"] = str(organization_id)
+            customer = Customer(**safe)
+            customer.sync_status = "synced"
+            db.add(customer)
         await db.flush()
 
         return PushResult(
@@ -1546,18 +2226,15 @@ class SyncService:
         branch_id: uuid.UUID,
         pushed_by: uuid.UUID,
     ) -> Tuple[PushResult, Optional[PushConflict]]:
-        """Push a prescription created offline."""
+        """Create or update an offline prescription with version checks."""
         existing = (await db.execute(
             select(Prescription).where(
                 Prescription.organization_id == organization_id,
-                or_(
-                    Prescription.id == record.local_id,
-                    Prescription.prescription_number == record.data.get("prescription_number")
-                )
+                Prescription.id == record.local_id,
             )
         )).scalar_one_or_none()
 
-        if existing:
+        if existing and record.operation == "create":
             return PushResult(
                 local_id=record.local_id,
                 table_name="prescriptions",
@@ -1565,10 +2242,45 @@ class SyncService:
                 success=True,
             ), None
 
+        if existing:
+            conflict = SyncService._check_conflict(
+                existing,
+                record,
+                "prescriptions",
+            )
+            if conflict:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="prescriptions",
+                    success=False,
+                ), conflict
+        else:
+            duplicate = (await db.execute(
+                select(Prescription).where(
+                    Prescription.organization_id == organization_id,
+                    Prescription.prescription_number
+                    == record.data.get("prescription_number"),
+                )
+            )).scalar_one_or_none()
+            if duplicate:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="prescriptions",
+                    success=False,
+                ), PushConflict(
+                    local_id=record.local_id,
+                    table_name="prescriptions",
+                    local_version=record.sync_version,
+                    server_version=duplicate.sync_version,
+                    server_record=PrescriptionSyncResponse.model_validate(
+                        duplicate
+                    ).model_dump(mode="json"),
+                    resolution="server_wins",
+                )
+
         safe = _whitelist(record.data, _PRESCRIPTION_WRITABLE)
         _parse_datetime_fields(safe)
-        safe["id"] = record.local_id
-        safe["organization_id"] = str(organization_id)
+        safe["updated_at"] = datetime.now(timezone.utc)
 
         customer_id = safe.get("customer_id")
         customer_exists = await db.scalar(
@@ -1590,12 +2302,27 @@ class SyncService:
             import json
             try:
                 safe["medications"] = json.loads(safe["medications"])
-            except:
-                pass
+            except (TypeError, ValueError):
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="prescriptions",
+                    success=False,
+                    error="medications must be a valid JSON array.",
+                ), None
 
-        prescription = Prescription(**safe)
-        prescription.sync_status = "synced"
-        db.add(prescription)
+        if existing:
+            safe.pop("id", None)
+            for key, value in safe.items():
+                setattr(existing, key, value)
+            existing.sync_status = "synced"
+            existing.sync_version += 1
+            prescription = existing
+        else:
+            safe["id"] = record.local_id
+            safe["organization_id"] = str(organization_id)
+            prescription = Prescription(**safe)
+            prescription.sync_status = "synced"
+            db.add(prescription)
         await db.flush()
 
         return PushResult(
@@ -1616,12 +2343,19 @@ class SyncService:
         table_name: str,
     ) -> Optional[PushConflict]:
         """
-        Return a ``PushConflict`` if the server record has a higher
-        ``sync_version`` than the client sent, indicating the client is
-        operating on stale data.
+        Return a ``PushConflict`` unless the client presents the next version.
+        Equality means another writer already committed that version; exact
+        retries are intercepted by operation receipts before this method.
         """
         server_version = getattr(server_record, "sync_version", 1)
-        if server_version <= client_record.sync_version:
+        if client_record.force:
+            return None
+
+        # The client increments its version before queueing an update. Equality
+        # therefore means another writer already committed that same next
+        # version. Replays of the same mutation are handled by operation
+        # receipts before reaching this comparison.
+        if server_version < client_record.sync_version:
             return None
 
         resolution = CONFLICT_RESOLUTION.get(table_name, "server_wins")
@@ -1631,6 +2365,8 @@ class SyncService:
             "drug_batches":     DrugBatchResponse,
             "purchase_orders":  PurchaseOrderResponse,
             "sales":            SaleResponse,
+            "customers":        CustomerResponse,
+            "prescriptions":    PrescriptionSyncResponse,
         }
         schema = _schema_map.get(table_name)
         try:

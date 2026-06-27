@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing_extensions import Annotated
 from pydantic import (
-    BaseModel, Field, ConfigDict, condecimal, PlainSerializer
+    AliasChoices, BaseModel, Field, ConfigDict, condecimal, PlainSerializer
 )
 from typing import Any, Dict, List, Optional, TypeAlias
 from datetime import datetime, timezone
@@ -37,7 +37,10 @@ class SyncSchema(BaseSchema):
     """Mixin for sync tracking"""
     sync_status: str = Field(default="synced")
     sync_version: int = Field(default=1, ge=1)
-    synced_at: Optional[datetime] = None
+    synced_at: Optional[datetime] = Field(
+        None,
+        validation_alias=AliasChoices("synced_at", "last_synced_at"),
+    )
 
 
 class ResponseMetadata(BaseSchema):

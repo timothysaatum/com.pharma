@@ -353,23 +353,42 @@ export const localRead = {
     return buildPagination(rows, page, page_size, total);
   },
 
-  async getDrugCategories(parentId?: string): Promise<DrugCategory[]> {
+  async getDrugCategories(
+    parentId?: string,
+    organizationId?: string
+  ): Promise<DrugCategory[]> {
     const db = await getDb();
+    const organizationClause = organizationId
+      ? " AND organization_id = $2"
+      : "";
     if (parentId) {
       return db.select<DrugCategory[]>(
-        `SELECT * FROM drug_categories WHERE is_deleted = 0 AND parent_id = $1 ORDER BY name`,
-        [parentId]
+        `SELECT * FROM drug_categories
+         WHERE is_deleted = 0
+           AND parent_id = $1${organizationClause}
+         ORDER BY name`,
+        organizationId ? [parentId, organizationId] : [parentId]
       );
     }
+    const rootOrganizationClause = organizationId
+      ? " AND organization_id = $1"
+      : "";
     return db.select<DrugCategory[]>(
-      `SELECT * FROM drug_categories WHERE is_deleted = 0 AND (parent_id IS NULL OR parent_id = '') ORDER BY name`
+      `SELECT * FROM drug_categories
+       WHERE is_deleted = 0
+         AND (parent_id IS NULL OR parent_id = '')${rootOrganizationClause}
+       ORDER BY name`,
+      organizationId ? [organizationId] : []
     );
   },
 
-  async getDrugCategoryTree(): Promise<DrugCategoryTree[]> {
+  async getDrugCategoryTree(organizationId?: string): Promise<DrugCategoryTree[]> {
     const db = await getDb();
     const rows = await db.select<DrugCategory[]>(
-      `SELECT * FROM drug_categories WHERE is_deleted = 0 ORDER BY name`
+      `SELECT * FROM drug_categories
+       WHERE is_deleted = 0${organizationId ? " AND organization_id = $1" : ""}
+       ORDER BY name`,
+      organizationId ? [organizationId] : []
     );
     const byId = new Map<string, DrugCategoryTree>();
     const roots: DrugCategoryTree[] = [];

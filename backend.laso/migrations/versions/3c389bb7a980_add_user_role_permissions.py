@@ -87,6 +87,7 @@ def upgrade() -> None:
         # 2. DROP OLD INDEXES
         batch_op.drop_index('idx_user_role')
         batch_op.drop_index('ix_users_role')
+        batch_op.drop_constraint('check_user_role', type_='check')
 
         # 3. NEW INDEXES
         batch_op.create_index('idx_user_super_admin', ['is_super_admin'])
@@ -111,6 +112,7 @@ def downgrade() -> None:
                 'role',
                 sa.VARCHAR(length=50),
                 nullable=False,
+                server_default='viewer',
                 comment='super_admin, admin, manager, pharmacist, cashier, viewer'
             )
         )
@@ -119,6 +121,7 @@ def downgrade() -> None:
                 'permissions',
                 sa.TEXT(),
                 nullable=False,
+                server_default='{}',
                 comment="{ additional: ['perm1', 'perm2'], denied: ['perm3'] }"
             )
         )
@@ -128,6 +131,10 @@ def downgrade() -> None:
 
         batch_op.create_index('ix_users_role', ['role'])
         batch_op.create_index('idx_user_role', ['role'])
+        batch_op.create_check_constraint(
+            'check_user_role',
+            "role IN ('super_admin', 'admin', 'manager', 'pharmacist', 'cashier', 'viewer')",
+        )
 
         batch_op.drop_column('is_super_admin')
 

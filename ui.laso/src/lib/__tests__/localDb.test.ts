@@ -8,6 +8,7 @@ function queuedRecord(
 ): QueuedRecord {
   return {
     id: 1,
+    operation_id: "21a9a2b1-a93f-4c60-b67f-4ee1fc1ff6f4",
     table_name: tableName,
     record_id: "record-1",
     operation: "create",
@@ -16,6 +17,7 @@ function queuedRecord(
     created_offline_at: "2026-06-26T00:00:00.000Z",
     attempts: 0,
     last_attempt_at: null,
+    next_attempt_at: null,
     error: null,
     conflict_json: null,
   };

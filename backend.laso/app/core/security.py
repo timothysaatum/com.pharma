@@ -1,8 +1,9 @@
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 import jwt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError, VerifyMismatchError
 from jwt import InvalidTokenError
-from passlib.context import CryptContext
 import hashlib
 import secrets
 import uuid
@@ -10,16 +11,36 @@ import uuid
 from app.core.config import get_settings
 settings = get_settings()
 
-# Password hashing context (Argon2)
-# This is THE single source of truth for password hashing.
-# Other modules should import pwd_context from here, not redefine it.
-pwd_context = CryptContext(
-    schemes=["argon2"],
-    deprecated="auto",
-    argon2__memory_cost=65536,  # 64 MB
-    argon2__time_cost=3,
-    argon2__parallelism=4
-)
+class Argon2PasswordContext:
+    """Small passlib-compatible adapter backed by maintained argon2-cffi."""
+
+    def __init__(self) -> None:
+        self._hasher = PasswordHasher(
+            memory_cost=65_536,
+            time_cost=3,
+            parallelism=4,
+        )
+
+    def hash(self, password: str) -> str:
+        return self._hasher.hash(password)
+
+    def verify(self, password: str, encoded_hash: str) -> bool:
+        try:
+            return self._hasher.verify(encoded_hash, password)
+        except (InvalidHashError, VerificationError, VerifyMismatchError):
+            return False
+
+    def needs_update(self, encoded_hash: str) -> bool:
+        try:
+            return self._hasher.check_needs_rehash(encoded_hash)
+        except InvalidHashError:
+            return True
+
+
+# Single source of truth for password hashing. The compatibility methods keep
+# existing model call sites stable while avoiding passlib's deprecated crypt
+# module import on Python 3.12+.
+pwd_context = Argon2PasswordContext()
 
 
 class SecurityUtils:
@@ -33,10 +54,7 @@ class SecurityUtils:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash"""
-        try:
-            return pwd_context.verify(plain_password, hashed_password)
-        except Exception:
-            return False
+        return pwd_context.verify(plain_password, hashed_password)
     
     @staticmethod
     def hash_token(token: str) -> str:

@@ -6,11 +6,9 @@
  *
  * plugin-store v2 changed API: use load() instead of new Store()
  *
- * Security note:
- *   Browser storage remains accessible to JavaScript and therefore requires a
- *   strict Content Security Policy and XSS prevention. Native builds should
- *   migrate refresh tokens to Tauri Stronghold before handling untrusted local
- *   users or regulated data.
+ * Native auth tokens are stored in the operating-system credential vault via
+ * narrow Rust commands. Browser development uses sessionStorage, so tokens are
+ * removed when the browser session closes.
  */
 
 import type { BranchListItem, Organization, OrganizationStats, PaginatedResponse, UserResponse } from "@/types";
@@ -55,6 +53,10 @@ function getStore(): Promise<AnyStore | null> {
 }
 
 async function storageGet<T>(key: string): Promise<T | null> {
+    if (IS_TAURI && _SENSITIVE_KEYS.has(key)) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        return await invoke<T | null>("secure_get", { key });
+    }
     const store = await getStore();
     if (store) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -71,6 +73,14 @@ async function storageGet<T>(key: string): Promise<T | null> {
 }
 
 async function storageSet(key: string, value: unknown): Promise<void> {
+    if (IS_TAURI && _SENSITIVE_KEYS.has(key)) {
+        if (typeof value !== "string") {
+            throw new TypeError("Secure auth values must be strings.");
+        }
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("secure_set", { key, value });
+        return;
+    }
     const store = await getStore();
     if (store) {
         await store.set(key, value);
@@ -81,6 +91,11 @@ async function storageSet(key: string, value: unknown): Promise<void> {
 }
 
 async function storageDel(key: string): Promise<void> {
+    if (IS_TAURI && _SENSITIVE_KEYS.has(key)) {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("secure_delete", { key });
+        return;
+    }
     const store = await getStore();
     if (store) {
         await store.delete(key);

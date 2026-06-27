@@ -1,5 +1,4 @@
 import logging
-import secrets
 from functools import lru_cache
 from typing import List, Optional
 
@@ -47,9 +46,10 @@ class Settings(BaseSettings):
     
     # Rate Limiting
     RATE_LIMIT_ENABLED: bool = True
-    RATE_LIMIT_REQUESTS: int = 100
+    RATE_LIMIT_REQUESTS: int = 1000
     RATE_LIMIT_WINDOW_SECONDS: int = 60
     TRUST_PROXY_HEADERS: bool = False
+    TRUSTED_PROXY_IPS: List[str] = Field(default_factory=list)
     
     # Session Management
     MAX_SESSIONS_PER_USER: int = 5
@@ -117,6 +117,9 @@ class Settings(BaseSettings):
     )
 
     def model_post_init(self, __context):
+        if not self.DATABASE_URL:
+            raise ValueError("DATABASE_URL must be configured.")
+
         if self.ENVIRONMENT.lower() == "production":
             if not self.SECRET_KEY or len(self.SECRET_KEY) < 32:
                 raise ValueError(
@@ -124,9 +127,29 @@ class Settings(BaseSettings):
                     "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(64))\""
                 )
             if self.DATABASE_URL.startswith("sqlite"):
-                logger.warning(
-                    "SQLite is not recommended for production. "
+                raise ValueError(
+                    "SQLite is not supported for the production API. "
                     "Use PostgreSQL with DATABASE_URL=postgresql+asyncpg://..."
+                )
+            if not self.ENCRYPTION_KEY:
+                raise ValueError("ENCRYPTION_KEY must be configured in production.")
+            try:
+                from cryptography.fernet import Fernet
+
+                Fernet(self.ENCRYPTION_KEY.encode())
+            except (TypeError, ValueError) as exc:
+                raise ValueError(
+                    "ENCRYPTION_KEY must be a valid Fernet key."
+                ) from exc
+            if self.RATE_LIMIT_ENABLED and not self.REDIS_URL:
+                raise ValueError(
+                    "REDIS_URL is required for production rate limiting "
+                    "across multiple API workers."
+                )
+            if self.TRUST_PROXY_HEADERS and not self.TRUSTED_PROXY_IPS:
+                raise ValueError(
+                    "TRUSTED_PROXY_IPS is required when proxy headers are "
+                    "trusted in production."
                 )
 
     # -------------------------
@@ -152,12 +175,34 @@ class Settings(BaseSettings):
             return [i.strip() for i in v.split(",")]
         return v
 
+    @field_validator("TRUSTED_PROXY_IPS", mode="before")
+    @classmethod
+    def parse_trusted_proxy_ips(cls, value):
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            value = value.strip()
+            if value.startswith("["):
+                return json.loads(value)
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
     @field_validator("ALEMBIC_DB_URL", mode="before")
     @classmethod
     def set_alembic_url(cls, v, info):
         if v:
             return v
         return info.data.get("DATABASE_URL")
+
+    @field_validator("ALGORITHM")
+    @classmethod
+    def validate_jwt_algorithm(cls, value: str) -> str:
+        allowed = {"HS256", "HS384", "HS512"}
+        if value not in allowed:
+            raise ValueError(f"ALGORITHM must be one of {sorted(allowed)}")
+        return value
     
     @property
     def is_production(self) -> bool:

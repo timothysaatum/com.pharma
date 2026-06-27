@@ -17,6 +17,7 @@ from app.core.security import (
     verify_totp,
 )
 from app.core.config import get_settings
+from app.core.encryption import decrypt_secret, encrypt_secret
 from app.services.audit_service import AuditService
 settings = get_settings()
 
@@ -200,7 +201,8 @@ class AuthService:
                     detail="MFA_REQUIRED",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-            if not verify_totp(user.two_factor_secret, login_data.totp_code):
+            totp_secret = decrypt_secret(user.two_factor_secret)
+            if not verify_totp(totp_secret, login_data.totp_code):
                 now = datetime.now(timezone.utc)
                 window = timedelta(minutes=settings.LOGIN_ATTEMPT_WINDOW_MINUTES)
                 if user.last_login and (now - user.last_login) > window:
@@ -234,6 +236,8 @@ class AuthService:
                     detail="Invalid verification code",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+            if user.two_factor_secret == totp_secret:
+                user.two_factor_secret = encrypt_secret(totp_secret)
 
         # Reset failed attempts on successful login
         user.failed_login_attempts = 0
@@ -591,7 +595,7 @@ class AuthService:
         secret = generate_totp_secret()
         uri = get_totp_provisioning_uri(secret, user.email)
         qr_code_data_uri = get_totp_qr_code_data_uri(uri)
-        user.two_factor_secret = secret
+        user.two_factor_secret = encrypt_secret(secret)
         user.two_factor_enabled = False  # not active until verified
         return secret, uri, qr_code_data_uri
 
@@ -603,12 +607,15 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="MFA has not been set up. Call setup first.",
             )
-        if not verify_totp(user.two_factor_secret, totp_code):
+        secret = decrypt_secret(user.two_factor_secret)
+        if not verify_totp(secret, totp_code):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Invalid verification code",
             )
         user.two_factor_enabled = True
+        # Transparently migrate legacy plaintext secrets after a valid proof.
+        user.two_factor_secret = encrypt_secret(secret)
         user.updated_at = datetime.now(timezone.utc)
         await db.commit()
 

@@ -192,14 +192,17 @@ app = FastAPI(
 # ============================================================================
 
 cors_origins = [
-    "http://localhost:1420",
-    "http://127.0.0.1:1420",
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
     "http://tauri.localhost",
     "tauri://localhost",
     "https://tauri.localhost",
 ]
+if not settings.is_production:
+    cors_origins.extend([
+        "http://localhost:1420",
+        "http://127.0.0.1:1420",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ])
 for origin in settings.CORS_ORIGINS:
     if origin not in cors_origins:
         cors_origins.append(origin)
@@ -242,10 +245,14 @@ if settings.RATE_LIMIT_ENABLED:
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1):\d+$",
+    allow_origin_regex=(
+        None
+        if settings.is_production
+        else r"^http://(localhost|127\.0\.0\.1):\d+$"
+    ),
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
 )
 
 
@@ -297,7 +304,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
                 clean_error["ctx"] = {
                     k: str(v) for k, v in error["ctx"].items()
                 }
-            except:
+            except Exception:
                 pass
         
         formatted_errors.append(clean_error)
@@ -477,6 +484,7 @@ async def deep_health_check():
         "environment": settings.ENVIRONMENT,
         "checks": {
             "database": "unknown",
+            "redis": "disabled" if not settings.REDIS_URL else "unknown",
         },
     }
     
@@ -492,7 +500,40 @@ async def deep_health_check():
             if settings.is_production
             else f"unhealthy: {str(e)}"
         )
-    
+
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content=health_status,
+        )
+
+    if settings.REDIS_URL:
+        redis_client = None
+        try:
+            from redis.asyncio import from_url
+
+            redis_client = from_url(
+                settings.REDIS_URL,
+                socket_connect_timeout=2,
+                socket_timeout=2,
+            )
+            await redis_client.ping()
+            health_status["checks"]["redis"] = "healthy"
+        except Exception as exc:
+            logger.error("Redis health check failed: %s", exc)
+            health_status["status"] = "degraded"
+            health_status["checks"]["redis"] = (
+                "unhealthy"
+                if settings.is_production
+                else f"unhealthy: {exc}"
+            )
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content=health_status,
+            )
+        finally:
+            if redis_client is not None:
+                await redis_client.aclose()
+
     return health_status
 
 

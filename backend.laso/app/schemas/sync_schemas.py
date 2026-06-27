@@ -8,8 +8,10 @@ Ownership rules encoded here:
       drugs, drug_categories, price_contracts
 
   Push+Pull  (branch-level, branch is source of truth):
-      branch_inventory, drug_batches, stock_adjustments,
-      sales, purchase_orders
+      branch_inventory, drug_batches, sales, purchase_orders
+
+  Push-only audit command:
+      stock_adjustments
 
   Special:
       customers  — org-level but branches CREATE them offline,
@@ -27,7 +29,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 import uuid
 
 from app.schemas.base_schemas import BaseSchema
@@ -65,7 +67,10 @@ class PrescriptionSyncResponse(BaseSchema):
     verified_at: Optional[datetime] = None
     sync_status: str = "synced"
     sync_version: int = 1
-    synced_at: Optional[datetime] = None
+    synced_at: Optional[datetime] = Field(
+        None,
+        validation_alias=AliasChoices("synced_at", "last_synced_at"),
+    )
     updated_at: datetime
     created_at: datetime
 
@@ -87,7 +92,7 @@ class PullRequest(BaseSchema):
     )
     # Client can limit which tables it wants (useful for partial refreshes)
     tables: List[str] = Field(
-        default=[
+        default_factory=lambda: [
             "drugs",
             "drug_categories",
             "price_contracts",
@@ -113,7 +118,6 @@ class PullRequest(BaseSchema):
             "prescriptions",
             "branch_inventory",
             "drug_batches",
-            "stock_adjustments",
             "sales",
             "purchase_orders",
         }
@@ -171,6 +175,14 @@ class PushRecord(BaseSchema):
     `sync_version` is used for optimistic concurrency: if the server
     already has a higher version, a conflict is raised.
     """
+    operation_id: uuid.UUID = Field(
+        ...,
+        description=(
+            "Stable client-generated ID for this queued mutation. Reuse it on "
+            "retries so the server can return the original result without "
+            "applying the mutation twice."
+        ),
+    )
     table_name: str = Field(
         ...,
         description="One of: branch_inventory, drug_batches, "
@@ -181,6 +193,10 @@ class PushRecord(BaseSchema):
     operation: str = Field(..., pattern="^(create|update|delete)$")
     sync_version: int = Field(..., ge=1, description="Client's version of this record")
     data: Dict[str, Any] = Field(..., description="Full record payload")
+    force: bool = Field(
+        False,
+        description="Explicit user-approved local-wins conflict resolution.",
+    )
     created_offline_at: datetime = Field(
         ..., description="When the client created/modified this record"
     )
@@ -216,15 +232,21 @@ class PushRequest(BaseSchema):
     @field_validator("records")
     @classmethod
     def validate_no_duplicates(cls, v: List[PushRecord]) -> List[PushRecord]:
-        seen = set()
+        seen_records = set()
+        seen_operations = set()
         for r in v:
             key = (r.table_name, r.local_id)
-            if key in seen:
+            if key in seen_records:
                 raise ValueError(
                     f"Duplicate record in push batch: "
                     f"table={r.table_name} id={r.local_id}"
                 )
-            seen.add(key)
+            if r.operation_id in seen_operations:
+                raise ValueError(
+                    f"Duplicate operation_id in push batch: {r.operation_id}"
+                )
+            seen_records.add(key)
+            seen_operations.add(r.operation_id)
         return v
 
 

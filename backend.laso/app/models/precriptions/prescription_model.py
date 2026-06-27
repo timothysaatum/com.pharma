@@ -35,9 +35,7 @@ class Prescription(Base, TimestampMixin, SyncTrackingMixin):
     
     prescription_number: Mapped[str] = mapped_column(
         String(100),
-        unique=True,
         nullable=False,
-        index=True
     )
     
     customer_id: Mapped[uuid.UUID] = mapped_column(
@@ -113,6 +111,12 @@ class Prescription(Base, TimestampMixin, SyncTrackingMixin):
         CheckConstraint("refills_remaining >= 0", name='check_refills_remaining'),
         CheckConstraint("refills_remaining <= refills_allowed", name='check_refills_valid'),
         Index('idx_prescription_org', 'organization_id'),
+        Index(
+            'uq_prescription_org_number',
+            'organization_id',
+            'prescription_number',
+            unique=True,
+        ),
         Index('idx_prescription_customer', 'customer_id'),
         Index('idx_prescription_issue_date', 'issue_date'),
         Index('idx_prescription_expiry', 'expiry_date'),

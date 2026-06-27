@@ -63,6 +63,7 @@ class TestSyncConsistency:
             branch_id=branch.id,
             records=[
                 PushRecord(
+                    operation_id=uuid.uuid4(),
                     local_id=str(sale_id),
                     table_name="sales",
                     operation="create",

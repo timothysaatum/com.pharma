@@ -3,7 +3,7 @@
  * ======================
  * Robust offline-first sales queue management with:
  *   - Fail-fast sale recording with compensating rollback
- *   - Automatic retry with exponential backoff
+ *   - Retry state coordinated with the durable sync queue
  *   - Duplicate detection and prevention
  *   - Inventory sync consistency
  *   - Comprehensive error recovery
@@ -39,8 +39,9 @@ class OfflineSalesManager {
    * fails. The Tauri SQL guest API does not expose a multi-call transaction,
    * so every failure must be surfaced and explicitly reversed.
    * 
-   * IMPORTANT: Prescription refills are decremented IMMEDIATELY (offline) to prevent
-   * overselling. The sync_version field prevents double-decrement on server during sync.
+   * Prescription refills and inventory are updated locally for immediate UX,
+   * but the sale remains the single queued server operation. The server applies
+   * those side effects atomically when processing sync protocol v2.
    */
   async recordSaleTransaction(
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
@@ -76,7 +77,7 @@ class OfflineSalesManager {
       saleWritten = true;
 
       for (const { drug_id, delta } of inventoryDeltas) {
-        await writeLocal.inventory(sale.branch_id, drug_id, delta);
+        await writeLocal.inventory(sale.branch_id, drug_id, delta, false);
         appliedInventoryDeltas.push({ drug_id, delta });
       }
 
@@ -141,7 +142,9 @@ class OfflineSalesManager {
 
   /**
    * Decrement prescription refills immediately (optimistic offline update).
-   * Uses sync_version to prevent double-decrement on server.
+   * This is a local projection of the queued sale, not an independent
+   * prescription edit. Keep the server version unchanged so the pull that
+   * follows a successful sale push can apply the authoritative version.
    */
   private async decrementPrescriptionRefillsOffline(
     prescriptionId: string
@@ -170,27 +173,25 @@ class OfflineSalesManager {
         return { success: false, error: "No refills remaining" };
       }
 
-      // Decrement refills and increment sync_version
+      // Decrement refills locally without creating a second sync operation.
       const newRefillsRemaining = refills_remaining - 1;
-      const newSyncVersion = sync_version + 1;
       const newStatus = newRefillsRemaining === 0 ? "filled" : "active";
       const lastRefillDate = new Date().toISOString().split("T")[0]; // ISO date only
 
       await db.execute(
         `UPDATE prescriptions
          SET refills_remaining = $1,
-             sync_version = $2,
-             status = $3,
-             last_refill_date = $4,
-             sync_status = 'pending',
-             updated_at = $5
-         WHERE id = $6`,
-        [newRefillsRemaining, newSyncVersion, newStatus, lastRefillDate, now, prescriptionId]
+             status = $2,
+             last_refill_date = $3,
+             sync_status = 'synced',
+             updated_at = $4
+         WHERE id = $5`,
+        [newRefillsRemaining, newStatus, lastRefillDate, now, prescriptionId]
       );
 
       console.info(
         `[OfflineSalesManager] Decremented prescription ${prescriptionId} refills: ` +
-        `${refills_remaining} → ${newRefillsRemaining}, sync_version: ${sync_version} → ${newSyncVersion}`
+        `${refills_remaining} → ${newRefillsRemaining}, sync_version: ${sync_version}`
       );
 
       return { success: true };
@@ -208,26 +209,10 @@ class OfflineSalesManager {
     now: string
   ): Promise<void> {
       const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
-      
-      // ─── Capture prescription sync version if prescription was used ──────────
-      let prescriptionSyncVersion: number | null = null;
-      if (sale.prescription_id) {
-        const presResult = await db.select<Array<{ sync_version: number }>>(
-          `SELECT sync_version FROM prescriptions WHERE id = $1`,
-          [sale.prescription_id]
-        );
-        if (presResult.length) {
-          prescriptionSyncVersion = presResult[0].sync_version;
-        }
-      }
 
       const offlineRecord: OfflineSaleRecord = {
         id: sale.id,
-        sale_data: {
-          ...saleData,
-          // Store the prescription's sync_version at time of sale to prevent double-decrement on server
-          prescription_sync_version: prescriptionSyncVersion,
-        },
+        sale_data: saleData,
         sale_items: items.map((item) => ({
           drug_id: item.drug_id,
           quantity: item.quantity,
@@ -282,7 +267,7 @@ class OfflineSalesManager {
 
     for (const { drug_id, delta } of [...appliedInventoryDeltas].reverse()) {
       try {
-        await writeLocal.inventory(branchId, drug_id, -delta);
+        await writeLocal.inventory(branchId, drug_id, -delta, false);
       } catch (error) {
         console.error(
           `[OfflineSalesManager] Failed to restore inventory for ${drug_id}:`,
@@ -296,9 +281,8 @@ class OfflineSalesManager {
         await db.execute(
           `UPDATE prescriptions
            SET refills_remaining = refills_remaining + 1,
-               sync_version = MAX(1, sync_version - 1),
                status = 'active',
-               sync_status = 'pending',
+               sync_status = 'synced',
                updated_at = $1
            WHERE id = $2`,
           [new Date().toISOString(), prescriptionId]

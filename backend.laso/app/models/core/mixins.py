@@ -10,42 +10,10 @@ from sqlalchemy.sql import func
 from typing import Optional
 from datetime import datetime, timezone
 import uuid
-from cryptography.fernet import Fernet
-import os
-
-from app.core.config import get_settings
 
 # Reuse password hashing context from security module to avoid duplicate CryptContext
 from app.core.security import pwd_context as _security_pwd_context
 pwd_context = _security_pwd_context
-
-# Encryption for sensitive data
-# ENCRYPTION_KEY is loaded lazily to avoid ordering issues with Settings init
-_cipher_suite: Fernet | None = None
-
-
-def get_cipher_suite() -> Fernet:
-    global _cipher_suite
-    if _cipher_suite is not None:
-        return _cipher_suite
-    raw_key = os.environ.get("ENCRYPTION_KEY")
-    if not raw_key:
-        try:
-            raw_key = get_settings().ENCRYPTION_KEY
-        except Exception:
-            pass
-    if not raw_key:
-        raise RuntimeError(
-            "ENCRYPTION_KEY environment variable is not set. "
-            "Generate one with: python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\""
-        )
-    key_bytes = raw_key.encode() if isinstance(raw_key, str) else raw_key
-    _cipher_suite = Fernet(key_bytes)
-    return _cipher_suite
-
-
-cipher_suite = get_cipher_suite()
-
 
 @declarative_mixin
 class TimestampMixin:

@@ -5,9 +5,9 @@ services:
     environment:
       POSTGRES_DB: pharma_db
       POSTGRES_USER: pharma
-      POSTGRES_PASSWORD: pharma_pass
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -19,10 +19,13 @@ services:
   pharma-redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:?Set REDIS_PASSWORD}"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -38,14 +41,17 @@ services:
         condition: service_healthy
     environment:
       ENVIRONMENT: production
-      DATABASE_URL: postgresql+asyncpg://pharma:pharma_pass@pharma-db:5432/pharma_db
-      REDIS_URL: redis://pharma-redis:6379/0
-      SECRET_KEY: ${SECRET_KEY}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      CORS_ORIGINS: '["https://pharma.example.com"]'
-      FRONTEND_URL: https://pharma.example.com
+      DATABASE_URL: ${DATABASE_URL:?Set URL-encoded DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set URL-encoded REDIS_URL}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set ENCRYPTION_KEY}
+      TRUST_PROXY_HEADERS: "true"
+      TRUSTED_PROXY_IPS: "${TRUSTED_PROXY_IPS:?Set reverse proxy IP or CIDR}"
+      FORWARDED_ALLOW_IPS: "${TRUSTED_PROXY_IPS:?Set reverse proxy IP or CIDR}"
+      CORS_ORIGINS: ${CORS_ORIGINS:?Set JSON or comma-separated CORS origins}
+      FRONTEND_URL: ${FRONTEND_URL:?Set public frontend URL}
     ports:
-      - "8000:8000"
+      - "127.0.0.1:8000:8000"
 
 volumes:
   pgdata:

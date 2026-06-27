@@ -113,8 +113,15 @@ class CustomerService:
 
         # ── Validate insurance provider exists ───────────────────────────────
         if customer_data.insurance_provider_id:
-            provider = await db.get(InsuranceProvider, customer_data.insurance_provider_id)
-            if not provider or provider.is_deleted:
+            provider = await db.scalar(
+                select(InsuranceProvider).where(
+                    InsuranceProvider.id == customer_data.insurance_provider_id,
+                    InsuranceProvider.organization_id
+                    == customer_data.organization_id,
+                    InsuranceProvider.is_deleted == False,
+                )
+            )
+            if not provider:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Insurance provider not found",
@@ -122,8 +129,14 @@ class CustomerService:
 
         # ── Validate preferred contract exists ───────────────────────────────
         if customer_data.preferred_contract_id:
-            contract = await db.get(PriceContract, customer_data.preferred_contract_id)
-            if not contract or contract.is_deleted:
+            contract = await db.scalar(
+                select(PriceContract).where(
+                    PriceContract.id == customer_data.preferred_contract_id,
+                    PriceContract.organization_id == customer_data.organization_id,
+                    PriceContract.is_deleted == False,
+                )
+            )
+            if not contract:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Preferred contract not found",
@@ -454,8 +467,14 @@ class CustomerService:
         # ── Validate new insurance provider ───────────────────────────────────
         new_provider_id = payload.get("insurance_provider_id")
         if new_provider_id:
-            provider = await db.get(InsuranceProvider, new_provider_id)
-            if not provider or provider.is_deleted:
+            provider = await db.scalar(
+                select(InsuranceProvider).where(
+                    InsuranceProvider.id == new_provider_id,
+                    InsuranceProvider.organization_id == organization_id,
+                    InsuranceProvider.is_deleted == False,
+                )
+            )
+            if not provider:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Insurance provider not found",
@@ -464,8 +483,14 @@ class CustomerService:
         # ── Validate new preferred contract ───────────────────────────────────
         new_contract_id = payload.get("preferred_contract_id")
         if new_contract_id:
-            contract = await db.get(PriceContract, new_contract_id)
-            if not contract or contract.is_deleted:
+            contract = await db.scalar(
+                select(PriceContract).where(
+                    PriceContract.id == new_contract_id,
+                    PriceContract.organization_id == organization_id,
+                    PriceContract.is_deleted == False,
+                )
+            )
+            if not contract:
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail="Preferred contract not found",
