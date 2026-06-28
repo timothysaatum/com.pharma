@@ -317,6 +317,13 @@ class SalesService:
                         detail="Prescription not found for this customer.",
                     )
 
+                # Verify prescription belongs to the sale's branch
+                if str(prescription.branch_id) != str(sale_data.branch_id):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Prescription belongs to a different branch.",
+                    )
+
                 if prescription.status != "active":
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
@@ -512,18 +519,24 @@ class SalesService:
             # ------------------------------------------------------------------
             # 10. Per-item pricing
             # ------------------------------------------------------------------
+            tax_inclusive = bool(organization.settings.get("tax_inclusive", False))
+
             item_pricing = compute_item_pricing(
                 items=sale_data.items,
                 drugs=drugs,
                 contract=contract,
                 contract_items=contract_items,
                 resolved_prices=resolved_prices,
+                tax_inclusive=tax_inclusive,
             )
 
             subtotal       = _r2(sum((p["item_subtotal"] for p in item_pricing), Decimal("0")))
             total_discount = _r2(sum((p["discount_amount"] for p in item_pricing), Decimal("0")))
             total_tax      = _r2(sum((p["tax_amount"]      for p in item_pricing), Decimal("0")))
-            total_amount   = _r2(subtotal - total_discount + total_tax)
+            if tax_inclusive:
+                total_amount = _r2(subtotal - total_discount)
+            else:
+                total_amount = _r2(subtotal - total_discount + total_tax)
 
             # Track ProcessSaleResponse fields
             alert_count_low_stock  = 0
@@ -961,12 +974,14 @@ class SalesService:
 
             # ------------------------------------------------------------------
             # 18. Loyalty points + tier recalculation
+            #     Only award points when the loyalty program is enabled.
             #     Also increment denormalized purchase counters so
             #     CustomerService._build_with_details always has fresh data
             #     even if the live Sale aggregate query has a type issue.
             # ------------------------------------------------------------------
             points_earned = 0
-            if customer:
+            loyalty_enabled = bool(organization.settings.get("enable_loyalty_program", False))
+            if customer and loyalty_enabled:
                 loyalty_cfg   = organization.settings.get("loyalty", {})
                 points_rate   = _d(loyalty_cfg.get("points_per_unit", "1.0"))
                 points_earned = int(total_amount * points_rate)
@@ -984,7 +999,7 @@ class SalesService:
                 )
                 new_tier = resolve_loyalty_tier(customer.loyalty_points, tier_thresholds)
 
-                if new_tier != customer.loyalty_tier:
+                if new_tier != previous_tier:
                     customer.loyalty_tier  = new_tier
                     loyalty_tier_upgraded   = True
                     new_loyalty_tier_value  = new_tier
@@ -1010,6 +1025,13 @@ class SalesService:
                         )
                     )
 
+                customer.updated_at = datetime.now(timezone.utc)
+                customer.mark_as_pending_sync()
+
+            # Always increment purchase counters even when loyalty is off
+            elif customer:
+                customer.total_orders = (customer.total_orders or 0) + 1
+                customer.total_value  = float(_r2(_d(customer.total_value or 0) + total_amount))
                 customer.updated_at = datetime.now(timezone.utc)
                 customer.mark_as_pending_sync()
 
@@ -1135,12 +1157,12 @@ class SalesService:
                     detail="You don't have access to this sale's branch",
                 )
 
-            if sale.status != "completed":
+            if sale.status not in ("completed", "partially_refunded"):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
                         f"Cannot refund a sale with status '{sale.status}'. "
-                        "Only completed sales may be refunded."
+                        "Only completed or partially refunded sales may be refunded."
                     ),
                 )
 
@@ -1184,8 +1206,16 @@ class SalesService:
                     detail="Approving manager does not have required permissions.",
                 )
 
+            # Lock SaleItem rows to prevent concurrent refund races
+            sale_item_res = await db.execute(
+                select(SaleItem)
+                .where(SaleItem.sale_id == sale.id)
+                .with_for_update()
+            )
+            locked_items = list(sale_item_res.scalars().all())
+
             sale_item_map: Dict[uuid.UUID, SaleItem] = {
-                item.id: item for item in sale.items
+                item.id: item for item in locked_items
             }
             refund_item_ids = {ri.sale_item_id for ri in refund_data.items_to_refund}
             invalid = refund_item_ids - set(sale_item_map.keys())
@@ -1228,17 +1258,37 @@ class SalesService:
                     ),
                 )
 
-            # Update sale record. Partial refunds keep the sale refundable.
+            # Update sale record with refund tracking.
             is_full_refund = new_refund_total == sale_total
-            sale.status        = "refunded" if is_full_refund else "completed"
+            sale.status        = "refunded" if is_full_refund else "partially_refunded"
             sale.payment_status = "refunded" if is_full_refund else "partial"
             sale.refund_amount = float(new_refund_total)
             sale.refunded_at   = datetime.now(timezone.utc)
+            sale.refunded_by   = user.id
+            sale.refund_reason = refund_data.reason
+            sale.refund_reference = f"REF-{sale.sale_number}-{str(uuid.uuid4())[:8]}"
             sale.notes         = (
                 f"Refunded: {refund_data.reason}\n\n{sale.notes or ''}".strip()
             )
             sale.updated_at = datetime.now(timezone.utc)
             sale.mark_as_pending_sync()
+
+            # Restore prescription refill if this sale was prescription-linked
+            if sale.prescription_id:
+                presc_res = await db.execute(
+                    select(Prescription)
+                    .where(
+                        Prescription.id == sale.prescription_id,
+                        Prescription.organization_id == sale.organization_id,
+                    )
+                    .with_for_update()
+                )
+                prescription = presc_res.scalar_one_or_none()
+                if prescription and prescription.refills_remaining < prescription.refills_allowed:
+                    prescription.refills_remaining += 1
+                    prescription.status = "active"
+                    prescription.updated_at = datetime.now(timezone.utc)
+                    prescription.mark_as_pending_sync()
 
             inventory_restored = 0
             batches_restored   = 0
@@ -1343,8 +1393,8 @@ class SalesService:
                                 target["batch_number"]
                                 or f"RETURN-{sale.sale_number}-{str(sale_item.id)[:8]}"
                             ),
-                            quantity=0,
-                            remaining_quantity=0,
+                            quantity=restore_qty,
+                            remaining_quantity=restore_qty,
                             expiry_date=(
                                 target["batch_expiry_date"]
                                 or date.today() + timedelta(days=365 * 10)
@@ -1450,20 +1500,22 @@ class SalesService:
                     )
                     organization = org_res.scalar_one()
 
-                    loyalty_cfg      = organization.settings.get("loyalty", {})
-                    points_rate      = _d(loyalty_cfg.get("points_per_unit", "1.0"))
-                    points_to_deduct = int(refund_amount * points_rate)
+                    loyalty_enabled = bool(organization.settings.get("enable_loyalty_program", False))
+                    if loyalty_enabled:
+                        loyalty_cfg      = organization.settings.get("loyalty", {})
+                        points_rate      = _d(loyalty_cfg.get("points_per_unit", "1.0"))
+                        points_to_deduct = int(refund_amount * points_rate)
 
-                    customer.loyalty_points = max(0, customer.loyalty_points - points_to_deduct)
+                        customer.loyalty_points = max(0, customer.loyalty_points - points_to_deduct)
 
-                    tier_thresholds = loyalty_cfg.get(
-                        "tier_thresholds",
-                        DEFAULT_LOYALTY_THRESHOLDS,
-                    )
-                    customer.loyalty_tier = resolve_loyalty_tier(
-                        customer.loyalty_points, tier_thresholds
-                    )
-                    loyalty_points_deducted = points_to_deduct
+                        tier_thresholds = loyalty_cfg.get(
+                            "tier_thresholds",
+                            DEFAULT_LOYALTY_THRESHOLDS,
+                        )
+                        customer.loyalty_tier = resolve_loyalty_tier(
+                            customer.loyalty_points, tier_thresholds
+                        )
+                        loyalty_points_deducted = points_to_deduct
                     customer.updated_at     = datetime.now(timezone.utc)
                     customer.mark_as_pending_sync()
 

@@ -164,6 +164,14 @@ function toSale(row: Record<string, unknown>): Sale {
     insurance_verified_by: row.insurance_verified_by === null ? null : String(row.insurance_verified_by),
     notes: row.notes === null ? null : String(row.notes),
     status: String(row.status) as SaleStatus,
+    cancelled_at: row.cancelled_at === null ? null : String(row.cancelled_at),
+    cancelled_by: row.cancelled_by === null ? null : String(row.cancelled_by),
+    cancellation_reason: row.cancellation_reason === null ? null : String(row.cancellation_reason),
+    refund_amount: row.refund_amount === null ? null : toNumber(row.refund_amount),
+    refunded_at: row.refunded_at === null ? null : String(row.refunded_at),
+    refunded_by: row.refunded_by === null ? null : String(row.refunded_by),
+    refund_reason: row.refund_reason === null ? null : String(row.refund_reason),
+    refund_reference: row.refund_reference === null ? null : String(row.refund_reference),
     receipt_printed: toBoolean(row.receipt_printed),
     receipt_emailed: toBoolean(row.receipt_emailed),
     items_count: row.items_count === null || row.items_count === undefined ? 0 : toNumber(row.items_count),
@@ -1124,7 +1132,7 @@ export const localRead = {
     };
   },
 
-  async searchPrescriptions(
+async searchPrescriptions(
     params: {
       page?: number;
       page_size?: number;
@@ -1133,10 +1141,11 @@ export const localRead = {
       include_expired?: boolean;
       search?: string;
       organization_id?: string;
+      branch_id?: string;
     } = {},
     page = 1,
     page_size = 25
-  ): Promise<PaginatedResponse<any>> {
+): Promise<PaginatedResponse<any>> {
     const db = await getDb();
     const qualifiers: string[] = [];
     const values: unknown[] = [];
@@ -1155,6 +1164,10 @@ export const localRead = {
     if (params.organization_id) {
       values.push(params.organization_id);
       qualifiers.push(`organization_id = $${values.length}`);
+    }
+    if (params.branch_id) {
+      values.push(params.branch_id);
+      qualifiers.push(`branch_id = $${values.length}`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));

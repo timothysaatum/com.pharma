@@ -3,6 +3,7 @@ import type { PaginatedResponse, Prescription, PrescriptionMedication } from "@/
 
 export interface PrescriptionSearchItem {
     id: string;
+    branch_id: string;
     prescription_number: string;
     prescriber_name: string;
     medications_count: number;
@@ -17,6 +18,7 @@ export interface PrescriptionSearchItem {
 export interface PrescriptionCreate {
     prescription_number: string;
     customer_id: string;
+    branch_id?: string;
     prescriber_name: string;
     prescriber_license: string;
     prescriber_phone?: string | null;

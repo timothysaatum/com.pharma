@@ -97,6 +97,7 @@ const PURCHASE_ORDER_COLUMNS = new Set([
 const PRESCRIPTION_COLUMNS = new Set([
     "id",
     "organization_id",
+    "branch_id",
     "prescription_number",
     "customer_id",
     "prescriber_name",

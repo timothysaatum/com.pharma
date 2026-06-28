@@ -95,6 +95,7 @@ export interface User extends TimestampFields, SyncFields {
     email: string;
     full_name: string;
     is_super_admin: boolean;
+    password_change_required: boolean;
     roles: Role[];
     effective_permissions?: EffectivePermissionInfo;
     phone: string | null;
@@ -151,6 +152,14 @@ export interface LoginRequest {
 
 export interface PasswordChange {
     old_password: string;
+    new_password: string;
+}
+
+export interface ForcePasswordChange {
+    new_password: string;
+}
+
+export interface AdminPasswordReset {
     new_password: string;
 }
 
@@ -891,7 +900,7 @@ export interface InsuranceProvider extends TimestampFields, SyncFields, SoftDele
 
 export type PaymentMethod = "cash" | "card" | "mobile_money" | "insurance" | "credit" | "split";
 export type PaymentStatus = "pending" | "completed" | "partial" | "refunded" | "cancelled";
-export type SaleStatus = "draft" | "completed" | "cancelled" | "refunded";
+export type SaleStatus = "draft" | "completed" | "cancelled" | "refunded" | "partially_refunded";
 
 /** Matches SaleItemCreate Pydantic schema */
 export interface SaleItemCreate {
@@ -989,6 +998,14 @@ export interface Sale extends TimestampFields, SyncFields {
     status: SaleStatus;
     receipt_printed: boolean;
     receipt_emailed: boolean;
+    cancelled_at: string | null;
+    cancelled_by: string | null;
+    cancellation_reason: string | null;
+    refund_amount: number | null;
+    refunded_at: string | null;
+    refunded_by: string | null;
+    refund_reason: string | null;
+    refund_reference: string | null;
     // items is only present on SaleWithDetails (single-sale fetch).
     // The list endpoint returns SaleResponse which omits items but includes items_count.
     items?: SaleItem[];
@@ -1034,6 +1051,7 @@ export interface PrescriptionMedication {
 export interface Prescription extends TimestampFields, SyncFields {
     id: string;
     organization_id: string;
+    branch_id: string;
     prescription_number: string;
     customer_id: string;
     prescriber_name: string;

@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { AlertCircle, ChevronDown, Loader2, Plus, X } from "lucide-react";
 import { insuranceProvidersApi, type InsuranceProviderSearchItem, type InsuranceProviderCreate } from "@/api/insuranceProviders";
 import { parseApiError } from "@/api/client";
+import { toast } from "sonner";
 
 interface InsuranceProviderSelectorProps {
     value: string | null;
@@ -58,7 +59,7 @@ export function InsuranceProviderSelector({
             const result = await insuranceProvidersApi.search(searchQuery, true);
             setProviders(result);
         } catch (err) {
-            console.error("Failed to load insurance providers:", err);
+            toast.error("Failed to load insurance providers. " + parseApiError(err));
         } finally {
             setLoading(false);
         }

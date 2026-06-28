@@ -367,6 +367,7 @@ class TestProcessSale:
             refills_remaining=2,
             status="active",
             organization_id=org.id,
+            branch_id=branch.id,
         )
         
         # Setup inventory and batch
@@ -447,6 +448,7 @@ class TestProcessSale:
             refills_remaining=2,
             status="active",
             organization_id=org.id,
+            branch_id=branch.id,
         )
         batch = DrugBatch(
             id=uuid.uuid4(),
@@ -734,7 +736,7 @@ class TestRefundSale:
 
         assert response.success
         assert response.refund_amount == refund_amount
-        assert response.sale.status == "completed"
+        assert response.sale.status == "partially_refunded"
         assert response.sale.payment_status == "partial"
         assert response.sale.refund_amount == refund_amount
 

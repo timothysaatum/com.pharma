@@ -161,7 +161,6 @@ function BatchViewerPanel({
                 {[
                     { label: "Available", value: available.toLocaleString(), color: available === 0 ? "text-red-600" : "text-ink" },
                     { label: "Total", value: item.quantity.toLocaleString(), color: "text-ink" },
-                    { label: "Reserved", value: String(item.reserved_quantity), color: "text-amber-600" },
                 ].map(({ label, value, color }) => (
                     <div key={label} className="text-center">
                         <p className={`text-lg font-bold ${color}`}>{value}</p>
@@ -1359,7 +1358,6 @@ export default function InventoryPage() {
                                             <tr>
                                                 <th className="text-left px-6 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Drug</th>
                                                 <th className="text-center px-4 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Available</th>
-                                                <th className="text-center px-4 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Reserved</th>
                                                 <th className="text-center px-4 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Total</th>
                                                 <th className="text-left px-4 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Location</th>
                                                 <th className="text-center px-4 py-3 text-xs font-semibold text-ink-muted uppercase tracking-wide">Status</th>
@@ -1387,7 +1385,6 @@ export default function InventoryPage() {
                                                                 {available.toLocaleString()}
                                                             </span>
                                                         </td>
-                                                        <td className="px-4 py-3 text-center text-ink-secondary">{item.reserved_quantity}</td>
                                                         <td className="px-4 py-3 text-center text-ink-secondary">{item.quantity.toLocaleString()}</td>
                                                         <td className="px-4 py-3 text-ink-muted text-xs">{item.location || "Set location"}</td>
                                                         <td className="px-4 py-3 text-center">{stockStatusBadge(item)}</td>

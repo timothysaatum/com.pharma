@@ -12,6 +12,7 @@ import uuid
 from app.models.core.mixins import SyncTrackingMixin, TimestampMixin
 if TYPE_CHECKING:
     from app.models.customer.customer_model import Customer
+    from app.models.pharmacy.pharmacy_model import Branch
 
 
 class Prescription(Base, TimestampMixin, SyncTrackingMixin):
@@ -31,6 +32,14 @@ class Prescription(Base, TimestampMixin, SyncTrackingMixin):
         ForeignKey('organizations.id', ondelete='CASCADE'),
         nullable=False,
         index=True
+    )
+    
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('branches.id', ondelete='RESTRICT'),
+        nullable=False,
+        index=True,
+        comment="Branch/facility that created/owns this prescription"
     )
     
     prescription_number: Mapped[str] = mapped_column(
@@ -121,4 +130,5 @@ class Prescription(Base, TimestampMixin, SyncTrackingMixin):
         Index('idx_prescription_issue_date', 'issue_date'),
         Index('idx_prescription_expiry', 'expiry_date'),
         Index('idx_prescription_status', 'status'),
+        Index('idx_prescription_branch', 'branch_id'),
     )

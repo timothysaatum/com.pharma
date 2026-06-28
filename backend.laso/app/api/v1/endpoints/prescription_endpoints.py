@@ -64,6 +64,10 @@ class PrescriptionCreate(BaseModel):
         description="Unique prescription number from prescriber"
     )
     customer_id: uuid.UUID = Field(..., description="Patient/customer UUID")
+    branch_id: Optional[uuid.UUID] = Field(
+        None,
+        description="Branch/facility creating this prescription (defaults to user's assigned branch)"
+    )
     
     # Prescriber information
     prescriber_name: str = Field(..., description="Doctor/healthcare provider name")
@@ -137,6 +141,7 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
     """Prescription response"""
     id: uuid.UUID
     organization_id: uuid.UUID
+    branch_id: uuid.UUID
     prescription_number: str
     customer_id: uuid.UUID
     customer_name: Optional[str] = None
@@ -178,6 +183,7 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
 class PrescriptionSearchResponse(BaseModel):
     """Quick response for checkout search"""
     id: uuid.UUID
+    branch_id: uuid.UUID
     prescription_number: str
     prescriber_name: str
     medications_count: int = Field(..., description="Number of drugs prescribed")
@@ -285,12 +291,31 @@ async def create_prescription(
             detail=f"Prescription number '{prescription_data.prescription_number}' already exists"
         )
     
+    # Resolve branch_id from request or user's assigned branches
+    branch_id = prescription_data.branch_id
+    if not branch_id:
+        assigned = current_user.assigned_branches or []
+        if not assigned:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No branch assigned to user. Branch ID is required."
+            )
+        branch_id = uuid.UUID(assigned[0]) if isinstance(assigned[0], str) else assigned[0]
+    else:
+        assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+        if str(branch_id) not in assigned_strs and not current_user.is_super_admin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this branch"
+            )
+
     # Create prescription
     medications_list = [m.model_dump() for m in prescription_data.medications]
     
     prescription = Prescription(
         id=uuid.uuid4(),
         organization_id=current_user.organization_id,
+        branch_id=branch_id,
         prescription_number=prescription_data.prescription_number,
         customer_id=prescription_data.customer_id,
         prescriber_name=prescription_data.prescriber_name,
@@ -352,6 +377,14 @@ async def cancel_prescription(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prescription not found"
+        )
+
+    # Check branch access (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if str(prescription.branch_id) not in assigned_strs and not current_user.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this prescription's branch"
         )
 
     prescription.status = "cancelled"
@@ -419,11 +452,19 @@ async def list_prescriptions(
     """
     conditions = [Prescription.organization_id == current_user.organization_id]
 
+    # Scope prescriptions by user's assigned branches (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if not current_user.is_super_admin and assigned_strs:
+        conditions.append(Prescription.branch_id.in_(
+            [uuid.UUID(b) for b in assigned_strs]
+        ))
+
     if customer_id:
         conditions.append(Prescription.customer_id == customer_id)
 
-    if status_filter:
-        conditions.append(Prescription.status == status_filter)
+    # Default to active prescriptions if no status filter provided
+    effective_status = status_filter or "active"
+    conditions.append(Prescription.status == effective_status)
 
     if not include_expired:
         conditions.append(Prescription.expiry_date >= date.today())
@@ -548,6 +589,13 @@ async def search_customer_prescriptions(
         Prescription.customer_id == customer_id,
         Prescription.organization_id == current_user.organization_id,
     ]
+
+    # Scope by user's assigned branches (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if not current_user.is_super_admin and assigned_strs:
+        conditions.append(Prescription.branch_id.in_(
+            [uuid.UUID(b) for b in assigned_strs]
+        ))
     
     if not include_expired:
         conditions.append(Prescription.expiry_date >= date.today())
@@ -615,6 +663,14 @@ async def get_prescription(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prescription not found"
+        )
+
+    # Check branch access (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if str(prescription.branch_id) not in assigned_strs and not current_user.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this prescription's branch"
         )
     
     # Get customer name
@@ -691,6 +747,14 @@ async def update_prescription(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prescription not found"
+        )
+
+    # Check branch access (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if str(prescription.branch_id) not in assigned_strs and not current_user.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this prescription's branch"
         )
     
     # Validate dates if being updated
@@ -822,6 +886,14 @@ async def use_prescription_refill(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Prescription not found"
+        )
+
+    # Check branch access (facility isolation)
+    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+    if str(prescription.branch_id) not in assigned_strs and not current_user.is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this prescription's branch"
         )
     
     # Validation

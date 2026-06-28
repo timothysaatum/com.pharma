@@ -281,6 +281,7 @@ interface CartPanelProps {
     totals: CartTotals;
     validationErrors: CartValidationError[];
     isSubmitting: boolean;
+    taxInclusive?: boolean;
 
     onSetQuantity: (drugId: string, qty: number) => void;
     onRemoveItem: (drugId: string) => void;
@@ -319,7 +320,7 @@ export function CartPanel({
     customerName, customerId, paymentMethod, amountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
     insuranceVerified, notes, totals, validationErrors,
-    isSubmitting, onSetQuantity, onRemoveItem, onSetPrescriptionVerified,
+    isSubmitting, taxInclusive = false, onSetQuantity, onRemoveItem, onSetPrescriptionVerified,
     onSetContract, onSetCustomerId, onSetCustomerName, onSetPaymentMethod, onSetAmountPaid,
     onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
@@ -750,7 +751,7 @@ export function CartPanel({
                         )}
                         {totals.taxAmount > 0 && (
                             <div className="flex justify-between text-xs text-slate-500">
-                                <span>Tax</span>
+                                <span>Tax{taxInclusive ? " (incl.)" : ""}</span>
                                 <span className="font-medium">₵{totals.taxAmount.toFixed(2)}</span>
                             </div>
                         )}

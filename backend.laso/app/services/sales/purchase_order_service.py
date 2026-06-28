@@ -152,7 +152,7 @@ class PurchaseOrderService:
         if supplier.organization_id != user.organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Access denied",
+                detail="This supplier belongs to a different organization",
             )
         supplier.is_deleted = True
         supplier.deleted_at = _now()

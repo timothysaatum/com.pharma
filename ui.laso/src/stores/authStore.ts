@@ -7,12 +7,13 @@ import { syncEngine } from "@/lib/syncEngine";
 // ─────────────────────────────────────────────────────────────────────────────
 // What post-login destination does this user need?
 //
-//  "ready"          — has org + branch → go straight to /drugs
-//  "needs_branch"   — has org but zero branches → go to /setup (add branch)
-//  "needs_onboard"  — super_admin with no org context → go to /onboarding
-//  null             — not yet determined (initial state / logged out)
+//  "ready"              — has org + branch → go straight to /drugs
+//  "needs_branch"       — has org but zero branches → go to /setup (add branch)
+//  "needs_onboard"      — super_admin with no org context → go to /onboarding
+//  "needs_pw_change"    — must change password before accessing the app
+//  null                 — not yet determined (initial state / logged out)
 // ─────────────────────────────────────────────────────────────────────────────
-export type SetupState = "ready" | "needs_branch" | "needs_onboard" | null;
+export type SetupState = "ready" | "needs_branch" | "needs_onboard" | "needs_pw_change" | null;
 
 interface AuthState {
     user: User | null;
@@ -29,6 +30,8 @@ interface AuthState {
     setActiveBranch: (branchId: string) => void;
     /** Called by SetupRequiredPage once the user has finished setup */
     markReady: (branchId: string) => void;
+    /** Called after forced password change succeeds */
+    clearPasswordChangeRequired: () => void;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -45,6 +48,12 @@ interface AuthState {
 //     (Org exists but the admin skipped branch setup — prompt to add one.)
 // ─────────────────────────────────────────────────────────────────────────────
 function deriveSetupState(user: User): SetupState {
+    // Must change password before accessing the app
+    if (user.password_change_required) {
+        return "needs_pw_change";
+    }
+
+
     // Super admins are platform operators — they must onboard an org first.
     if (user.is_super_admin) {
         return "needs_onboard";
@@ -137,6 +146,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
     },
 
+    // Also override setUser to recalc setupState
+    setUser: (user) => {
+        authStorage.setUser(user);
+        const setupState = deriveSetupState(user);
+        set({ user, setupState });
+    },
+
+    /**
+     * Updates the user in the store after a successful forced password change.
+     * Refetches user data from /auth/me and recalculates setupState.
+     */
+    clearPasswordChangeRequired: async () => {
+        try {
+            const fresh = await authApi.me();
+            const setupState = deriveSetupState(fresh);
+            await authStorage.setUser(fresh);
+            set({ user: fresh, setupState });
+        } catch {
+            set({ setupState: "ready" });
+        }
+    },
+
     logout: async () => {
         syncEngine.stop();
         try {
@@ -146,11 +177,6 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         }
         await authStorage.clearTokens();
         set({ user: null, isAuthenticated: false, activeBranchId: null, setupState: null });
-    },
-
-    setUser: (user) => {
-        authStorage.setUser(user);
-        set({ user });
     },
 
     setActiveBranch: (branchId) => {

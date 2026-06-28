@@ -82,6 +82,10 @@ class UserCreate(UserBase):
         description="Password must be at least 8 characters"
     )
     organization_id: Optional[uuid.UUID]= None
+    role_ids: Optional[List[uuid.UUID]] = Field(
+        default_factory=list,
+        description="Role IDs to assign to the new user"
+    )
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -119,11 +123,25 @@ class PasswordChange(BaseSchema):
         return self
 
 
+class ForcePasswordChange(BaseSchema):
+    """Password change without old_password — used for first-login forced change."""
+    new_password: str = Field(..., min_length=8, max_length=100)
+
+
+class AdminPasswordReset(BaseSchema):
+    """Admin/manager resetting another user's password."""
+    new_password: str = Field(..., min_length=8, max_length=100)
+
+
 class UserResponse(UserBase, TimestampSchema, SyncSchema):
     id: uuid.UUID
     organization_id: uuid.UUID
     is_active: bool
     is_super_admin: bool
+    password_change_required: bool = Field(
+        default=False,
+        description="User must change password before accessing the application"
+    )
     roles: List[RoleResponse] = Field(default_factory=list)
     effective_permissions: EffectivePermissionInfo = Field(
         default_factory=EffectivePermissionInfo,
@@ -151,6 +169,8 @@ class UserResponse(UserBase, TimestampSchema, SyncSchema):
         if isinstance(data, dict):
             return data
         user = data
+        # Password change required
+        data.password_change_required = bool(getattr(user, 'must_change_password', False))
         # Effective permissions
         if hasattr(user, '_effective_permissions') and user._effective_permissions is not None:
             effective = user._effective_permissions

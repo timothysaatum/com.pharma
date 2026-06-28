@@ -47,6 +47,7 @@ from app.schemas.purchase_order_schemas import PurchaseOrderResponse
 class PrescriptionSyncResponse(BaseSchema):
     id: uuid.UUID
     organization_id: uuid.UUID
+    branch_id: uuid.UUID
     prescription_number: str
     customer_id: uuid.UUID
     prescriber_name: str

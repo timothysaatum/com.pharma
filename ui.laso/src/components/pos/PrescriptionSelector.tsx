@@ -55,6 +55,7 @@ function toSearchItem(rx: Prescription): PrescriptionSearchItem {
 
     return {
         id: rx.id,
+        branch_id: rx.branch_id,
         prescription_number: rx.prescription_number,
         prescriber_name: rx.prescriber_name,
         medications_count: rx.medications.length,
@@ -75,7 +76,7 @@ export function PrescriptionSelector({
     onSetPrescriptionId,
     onSetPrescriptionVerified,
 }: PrescriptionSelectorProps) {
-    const { user } = useAuthStore();
+    const { user, activeBranchId } = useAuthStore();
     const [prescriptions, setPrescriptions] = useState<PrescriptionSearchItem[]>([]);
     const [loading, setLoading] = useState(false);
     const [loadError, setLoadError] = useState<string | null>(null);
@@ -130,7 +131,7 @@ export function PrescriptionSelector({
             if (err instanceof Error && err.name === "AbortError") return;
             try {
                 const fallback = await localRead.searchPrescriptions(
-                    { customer_id: customerId, status_filter: "active", include_expired: false },
+                    { customer_id: customerId, status_filter: "active", include_expired: false, branch_id: activeBranchId ?? undefined },
                     1,
                     10
                 );
@@ -178,6 +179,7 @@ export function PrescriptionSelector({
             const payload = {
                 prescription_number: prescriptionNumber.trim(),
                 customer_id: customerId,
+                branch_id: activeBranchId ?? undefined,
                 prescriber_name: prescriberName.trim(),
                 prescriber_license: prescriberLicense.trim(),
                 prescriber_phone: prescriberPhone.trim() || null,
@@ -199,6 +201,7 @@ export function PrescriptionSelector({
                     id: crypto.randomUUID(),
                     organization_id: user?.organization_id ?? "",
                     ...payload,
+                    branch_id: activeBranchId ?? "",
                     prescriber_address: null,
                     diagnosis: null,
                     special_instructions: null,

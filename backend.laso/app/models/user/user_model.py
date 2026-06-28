@@ -205,6 +205,14 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         comment="Base32-encoded TOTP secret"
     )
     
+    # Force password change on first login
+    must_change_password: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+        comment="Newly created users must change password on first login"
+    )
+
     # Password reset fields
     reset_token_hash: Mapped[Optional[str]] = mapped_column(
         String(255),
@@ -252,6 +260,7 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
             raise ValueError("Password must be at least 8 characters")
         self.password_hash = pwd_context.hash(password)
         self.password_changed_at = datetime.now(timezone.utc)
+        self.must_change_password = False
     
     def verify_password(self, password: str) -> bool:
         """Verify password against hash"""

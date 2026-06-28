@@ -19,7 +19,7 @@ import { rolesApi } from "@/api/roles";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
-import type { UserResponse, BranchListItem, Role } from "@/types";
+import type { UserResponse, BranchListItem, Role, AdminPasswordReset } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Zod schemas
@@ -477,6 +477,7 @@ function ActionMenu({
     onToggleActive,
     onUnlock,
     onDelete,
+    onResetPassword,
 }: {
     user: UserResponse;
     currentUser: UserResponse;
@@ -484,6 +485,7 @@ function ActionMenu({
     onToggleActive: () => void;
     onUnlock: () => void;
     onDelete: () => void;
+    onResetPassword: () => void;
 }) {
     const [open, setOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
@@ -541,6 +543,9 @@ function ActionMenu({
                                         Unlock account
                                     </MenuItem>
                                 )}
+                                <MenuItem icon={<KeyRound className="w-3.5 h-3.5" />} onClick={() => { onResetPassword(); setOpen(false); }}>
+                                    Reset Password
+                                </MenuItem>
                                 <div className="h-px bg-slate-100 my-1" />
                                 <MenuItem
                                     icon={<Trash2 className="w-3.5 h-3.5" />}
@@ -584,6 +589,101 @@ function MenuItem({
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Reset Password Modal
+// ─────────────────────────────────────────────────────────────────────────────
+
+function ResetPasswordModal({
+    user,
+    onClose,
+    onReset,
+}: {
+    user: UserResponse;
+    onClose: () => void;
+    onReset: () => void;
+}) {
+    const [newPassword, setNewPassword] = useState("");
+    const [confirmPassword, setConfirmPassword] = useState("");
+    const [showPassword, setShowPassword] = useState(false);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const handleSubmit = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setError(null);
+
+        if (newPassword.length < 8) {
+            setError("Password must be at least 8 characters");
+            return;
+        }
+        if (newPassword !== confirmPassword) {
+            setError("Passwords do not match");
+            return;
+        }
+
+        setIsSubmitting(true);
+        try {
+            await usersApi.resetPassword(user.id, { new_password: newPassword });
+            onReset();
+        } catch (err) {
+            setError(parseApiError(err));
+        } finally {
+            setIsSubmitting(false);
+        }
+    };
+
+    return (
+        <ModalShell title="Reset Password" icon={<KeyRound className="w-4 h-4" />} onClose={onClose}>
+            <div className="flex items-center gap-3 p-3 rounded-xl bg-amber-50 border border-amber-100 mb-4">
+                <AlertTriangle className="w-4 h-4 text-amber-600 flex-shrink-0" />
+                <p className="text-xs text-amber-800">
+                    This will reset <strong>{user.full_name}</strong>'s password. They will be
+                    logged out of all devices and must change their password on next login.
+                </p>
+            </div>
+            <form onSubmit={handleSubmit} className="space-y-4">
+                {error && (
+                    <div className="rounded-xl bg-red-50 border border-red-100 px-4 py-3">
+                        <p className="text-xs text-red-700">{error}</p>
+                    </div>
+                )}
+                <div className="relative">
+                    <Input
+                        label="New Password"
+                        required
+                        type={showPassword ? "text" : "password"}
+                        placeholder="Min 8 chars"
+                        value={newPassword}
+                        onChange={(e) => setNewPassword(e.target.value)}
+                    />
+                    <button
+                        type="button"
+                        onClick={() => setShowPassword((v) => !v)}
+                        className="absolute right-3 top-8 text-ink-muted hover:text-ink"
+                        tabIndex={-1}
+                    >
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                </div>
+                <Input
+                    label="Confirm Password"
+                    required
+                    type={showPassword ? "text" : "password"}
+                    placeholder="Re-enter new password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                />
+                <div className="flex justify-end gap-3 pt-2 border-t border-slate-100">
+                    <Button type="button" variant="ghost" onClick={onClose}>Cancel</Button>
+                    <Button type="submit" loading={isSubmitting} disabled={isSubmitting || !newPassword || !confirmPassword}>
+                        Reset Password
+                    </Button>
+                </div>
+            </form>
+        </ModalShell>
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Main Page
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -593,6 +693,7 @@ type Modal =
     | { type: "confirm_deactivate"; user: UserResponse }
     | { type: "confirm_activate"; user: UserResponse }
     | { type: "confirm_delete"; user: UserResponse }
+    | { type: "reset_password"; user: UserResponse }
     | null;
 
 export default function UsersPage() {
@@ -956,6 +1057,7 @@ export default function UsersPage() {
                                                     onToggleActive={() => handleToggleActive(user)}
                                                     onUnlock={() => handleUnlock(user)}
                                                     onDelete={() => setModal({ type: "confirm_delete", user })}
+                                                    onResetPassword={() => setModal({ type: "reset_password", user })}
                                                 />
                                             </td>
                                         </motion.tr>
@@ -1060,6 +1162,17 @@ export default function UsersPage() {
                         danger
                         onConfirm={() => confirmDelete(modal.user)}
                         onCancel={() => setModal(null)}
+                    />
+                )}
+                {modal?.type === "reset_password" && (
+                    <ResetPasswordModal
+                        user={modal.user}
+                        onClose={() => setModal(null)}
+                        onReset={() => {
+                            setModal(null);
+                            fetchUsers();
+                            toast.success("Password reset. Staff member must log in again.");
+                        }}
                     />
                 )}
             </AnimatePresence>

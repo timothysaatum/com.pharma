@@ -96,6 +96,7 @@ def compute_item_pricing(
     contract: PriceContract,
     contract_items: Dict[uuid.UUID, PriceContractItem],
     resolved_prices: Dict[uuid.UUID, Decimal],
+    tax_inclusive: bool = False,
 ) -> List[Dict]:
     """
     Compute the complete pricing breakdown for every line item.
@@ -121,7 +122,16 @@ def compute_item_pricing(
     Insurance copay (only when contract_type == 'insurance'):
       - copay_amount (fixed per unit) or copay_percentage (of discounted line)
 
-    Tax is applied to (subtotal − discount_amount).
+    Tax modes
+    ---------
+    * ``tax_inclusive=False`` (default): tax is added on top of the discounted
+      subtotal.  ``item_total = discounted_subtotal + tax_amount``.
+      ``tax_amount   = discounted_subtotal × tax_rate / 100``
+
+    * ``tax_inclusive=True``:  the unit price already includes tax.  Tax is
+      *extracted* from the discounted subtotal for reporting.
+      ``tax_amount   = discounted_subtotal × tax_rate / (100 + tax_rate)``
+      ``item_total = discounted_subtotal``  (tax is embedded in the price).
 
     Args:
         items:           Line items from the sale request.
@@ -129,6 +139,7 @@ def compute_item_pricing(
         contract:        The validated PriceContract being applied.
         contract_items:  Per-drug PriceContractItem overrides keyed by drug_id.
         resolved_prices: Pre-resolved unit prices keyed by drug_id.
+        tax_inclusive:   When True, unit prices already include tax.
 
     Returns:
         List of dicts, one per item, with keys:
@@ -233,8 +244,14 @@ def compute_item_pricing(
                     patient_copay = r2(discounted * d(contract.copay_percentage) / 100)
 
         discounted_subtotal = item_subtotal - discount_amount
-        tax_amount          = r2(discounted_subtotal * tax_rate / 100) if tax_rate else Decimal("0")
-        item_total          = r2(discounted_subtotal + tax_amount)
+        if tax_inclusive and tax_rate:
+            # Tax is embedded in the unit price.  Extract it for reporting.
+            tax_amount = r2(discounted_subtotal * tax_rate / (100 + tax_rate))
+            item_total = discounted_subtotal
+        else:
+            # Tax-exclusive: tax is added on top of the discounted price.
+            tax_amount = r2(discounted_subtotal * tax_rate / 100) if tax_rate else Decimal("0")
+            item_total = r2(discounted_subtotal + tax_amount)
 
         results.append(
             {

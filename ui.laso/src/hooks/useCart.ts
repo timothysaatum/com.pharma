@@ -256,7 +256,7 @@ export interface CartTotals {
     itemCount: number;
 }
 
-function computeTotals(state: CartState): CartTotals {
+function computeTotals(state: CartState, taxInclusive = false): CartTotals {
     const subtotal = state.items.reduce(
         (sum, item) => sum + item.drug.unit_price * item.quantity,
         0
@@ -276,11 +276,13 @@ function computeTotals(state: CartState): CartTotals {
             state.items.length
             : 0;
     const taxableAmount = subtotal - discountAmount;
-    const taxAmount = parseFloat(
-        ((taxableAmount * avgTaxRate) / 100).toFixed(2)
-    );
+    const taxAmount = taxInclusive
+        ? parseFloat(((taxableAmount * avgTaxRate) / (100 + avgTaxRate)).toFixed(2))
+        : parseFloat(((taxableAmount * avgTaxRate) / 100).toFixed(2));
 
-    const total = parseFloat((taxableAmount + taxAmount).toFixed(2));
+    const total = taxInclusive
+        ? taxableAmount
+        : parseFloat((taxableAmount + taxAmount).toFixed(2));
     // Calculate patient copay based on selected contract (estimate)
     let patientCopay = 0;
     const contract = state.contract;
@@ -449,10 +451,10 @@ function validateCart(
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export function useCart() {
+export function useCart(taxInclusive = false) {
     const [state, dispatch] = useReducer(cartReducer, INITIAL_STATE);
 
-    const totals = useMemo(() => computeTotals(state), [state]);
+    const totals = useMemo(() => computeTotals(state, taxInclusive), [state, taxInclusive]);
 
     const validationErrors = useMemo(
         () => validateCart(state, totals),

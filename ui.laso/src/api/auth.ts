@@ -4,6 +4,7 @@ import type {
     TokenResponse,
     UserResponse,
     PasswordChange,
+    ForcePasswordChange,
     MfaSetupResponse,
     MfaVerifyRequest,
     MfaDisableRequest,
@@ -134,6 +135,16 @@ export const authApi = {
             }
             throw err;
         }
+    },
+
+    /**
+     * POST /auth/force-change-password
+     * Changes password without requiring old_password.
+     * Used when the user must change password on first login.
+     * Unlike changePassword, this does NOT revoke sessions.
+     */
+    async forceChangePassword(data: ForcePasswordChange): Promise<void> {
+        await post<{ detail: string }>("/auth/force-change-password", data);
     },
 
     /**

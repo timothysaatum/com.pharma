@@ -209,7 +209,7 @@ _CUSTOMER_WRITABLE: frozenset[str] = frozenset({
 })
 
 _PRESCRIPTION_WRITABLE: frozenset[str] = frozenset({
-    "id", "prescription_number", "customer_id",
+    "id", "branch_id", "prescription_number", "customer_id",
     "prescriber_name", "prescriber_license", "prescriber_phone",
     "prescriber_address", "issue_date", "expiry_date",
     "medications", "diagnosis", "notes", "special_instructions",
@@ -568,7 +568,7 @@ class SyncService:
         if "prescriptions" in tables:
             rows = await SyncService._pull_table(
                 db, Prescription, since,
-                Prescription.organization_id == organization_id,
+                Prescription.branch_id == branch_id,
             )
             result.prescriptions = [
                 PrescriptionSyncResponse.model_validate(r).model_copy(
@@ -1208,6 +1208,10 @@ class SyncService:
                     prescription = rx_res.scalar_one_or_none()
                     if not prescription:
                         raise ValueError("Prescription no longer exists.")
+                    if str(prescription.branch_id) != str(branch_id):
+                        raise ValueError(
+                            "Prescription belongs to a different branch."
+                        )
                     if prescription.status != "active":
                         raise ValueError(
                             f"Prescription is {prescription.status} and cannot be filled."
@@ -2295,6 +2299,16 @@ class SyncService:
                 table_name="prescriptions",
                 success=False,
                 error=f"Customer {customer_id} not found in organization.",
+            ), None
+
+        # Validate branch_id — must match the pushing branch
+        safe_branch_id = safe.get("branch_id")
+        if safe_branch_id and str(safe_branch_id) != str(branch_id):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="prescriptions",
+                success=False,
+                error=f"Branch mismatch: prescription belongs to {safe_branch_id}, pushing from {branch_id}.",
             ), None
 
         # Ensure medications is correctly handled (it's JSONB in DB)

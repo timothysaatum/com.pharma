@@ -34,10 +34,12 @@ import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { statsApi } from "@/api/stats";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { toast } from "sonner";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import { appEvents, useAppEvent } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
+import { useOrganization } from "@/hooks/useOrganization";
 import { localRead } from "@/lib/localRead";
 import { DrugSearchPanel } from "@/components/pos/DrugSearchPanel";
 import { CartPanel } from "@/components/pos/CartPanel";
@@ -73,7 +75,7 @@ export default function POSPage() {
                 setTodaySales(total);
             }
         } catch (error) {
-            console.error("Failed to fetch today's sales:", error);
+            toast.error(parseApiError(error));
         }
     }, [activeBranchId, isOffline]);
 
@@ -83,8 +85,14 @@ export default function POSPage() {
 
     useAppEvent("sales:changed", fetchTodaySales);
 
+    // ── Organization settings ──────────────────────────────────────────────────
+    const { org: posOrg } = useOrganization();
+    const settings = (posOrg?.settings ?? {}) as Record<string, unknown>;
+    const taxInclusive = Boolean(settings.tax_inclusive);
+    const footerMessage = (settings.receipt_footer as string) ?? "";
+
     // ── Cart state ─────────────────────────────────────────────────────────────
-    const cart = useCart();
+    const cart = useCart(taxInclusive);
 
     // ── Contracts ──────────────────────────────────────────────────────────────
     const [contracts, setContracts] = useState<AvailableContract[]>([]);
@@ -226,6 +234,9 @@ export default function POSPage() {
                 cancellation_reason: null,
                 refund_amount: null,
                 refunded_at: null,
+                refunded_by: null,
+                refund_reason: null,
+                refund_reference: null,
                 receipt_printed: false,
                 receipt_emailed: false,
                 sync_status: "pending" as const,
@@ -240,7 +251,9 @@ export default function POSPage() {
                     const discountPct = Number(cart.state.contract?.discount_percentage) || 0;
                     const contractDiscountAmt = parseFloat(((lineSubtotal * discountPct) / 100).toFixed(2)) || 0;
                     const taxRate = Number(item.drug.tax_rate) || 0;
-                    const taxAmt = parseFloat(((lineSubtotal * taxRate) / 100).toFixed(2)) || 0;
+                    const taxAmt = taxInclusive
+                        ? parseFloat(((lineSubtotal * taxRate) / (100 + taxRate)).toFixed(2)) || 0
+                        : parseFloat(((lineSubtotal * taxRate) / 100).toFixed(2)) || 0;
                     return {
                         id: crypto.randomUUID(),
                         sale_id: saleId,
@@ -263,7 +276,9 @@ export default function POSPage() {
                         total_discount_amount: contractDiscountAmt,
                         tax_rate: item.drug.tax_rate,
                         tax_amount: taxAmt,
-                        total_price: lineSubtotal - contractDiscountAmt + taxAmt,
+                        total_price: taxInclusive
+                            ? lineSubtotal - contractDiscountAmt
+                            : lineSubtotal - contractDiscountAmt + taxAmt,
                         applied_contract_id: payload.price_contract_id,
                         applied_contract_name: cart.state.contract?.name ?? null,
                         insurance_covered: false,
@@ -444,6 +459,7 @@ export default function POSPage() {
                         totals={cart.totals}
                         validationErrors={cart.validationErrors}
                         isSubmitting={isSubmitting}
+                        taxInclusive={taxInclusive}
                         onSetQuantity={cart.setQuantity}
                         onRemoveItem={cart.removeItem}
                         onSetPrescriptionVerified={cart.setPrescriptionVerified}
@@ -471,6 +487,7 @@ export default function POSPage() {
                         result={successResult}
                         onNewSale={handleNewSale}
                         onClose={handleNewSale}
+                        footerMessage={footerMessage}
                     />
                 )}
             </AnimatePresence>

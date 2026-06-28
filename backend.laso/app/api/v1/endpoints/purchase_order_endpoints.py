@@ -106,7 +106,10 @@ async def get_supplier(
     if not supplier:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Supplier not found")
     if supplier.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This supplier belongs to a different organization"
+        )
     return supplier
 
 
@@ -129,7 +132,10 @@ async def update_supplier(
     """
     supplier = await PurchaseOrderService.get_supplier(db, supplier_id)
     if supplier.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This supplier belongs to a different organization"
+        )
 
     for field, value in update_data.model_dump(exclude_unset=True).items():
         setattr(supplier, field, value)
@@ -300,7 +306,10 @@ async def get_purchase_order(
     po = await PurchaseOrderService.get_purchase_order(db, po_id, include_details=True)
 
     if po.organization_id != current_user.organization_id:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This purchase order belongs to a different organization"
+        )
 
     return await PurchaseOrderService._build_po_with_details(db, po)
 

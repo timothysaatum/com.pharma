@@ -18,6 +18,7 @@ import { contractsApi, type ContractResponse } from "@/api/contracts";
 import { InsuranceProviderSelector } from "@/components/contracts/InsuranceProviderSelector";
 import { useAuthStore } from "@/stores/authStore";
 import { isOfflineError, parseApiError } from "@/api/client";
+import { toast } from "sonner";
 import { writeLocal } from "@/lib/localWrite";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -100,7 +101,7 @@ function CorporateContractSelector({
             });
             setContracts(result.contracts);
         } catch (err) {
-            console.error("Failed to load corporate contracts:", err);
+            toast.error("Failed to load corporate contracts. " + parseApiError(err));
             setContracts([]);
         } finally {
             setLoading(false);

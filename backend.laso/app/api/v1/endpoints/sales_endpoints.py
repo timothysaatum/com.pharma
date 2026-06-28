@@ -101,7 +101,7 @@ async def list_sales(
     branch_id: Optional[uuid.UUID] = Query(None),
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
-    sale_status: Optional[str] = Query(None, alias="status", pattern="^(draft|completed|cancelled|refunded)$"),
+    sale_status: Optional[str] = Query(None, alias="status", pattern="^(draft|completed|cancelled|refunded|partially_refunded)$"),
     payment_status: Optional[str] = Query(None, pattern="^(pending|completed|partial|refunded|cancelled)$"),
     payment_method: Optional[str] = Query(None),
     customer_id: Optional[uuid.UUID] = Query(None),
@@ -248,7 +248,7 @@ async def get_sale(
     if sale.organization_id != current_user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="This sale belongs to a different organization"
         )
 
     if not current_user.is_super_admin and not current_user.has_branch_access(
@@ -346,7 +346,7 @@ async def cancel_sale(
     if sale.organization_id != current_user.organization_id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Access denied"
+            detail="This sale belongs to a different organization"
         )
     
     # Branch access check
@@ -435,9 +435,19 @@ async def get_receipt(
     )
     branch = result.scalar_one()
     
+    is_refunded = sale_details.status in ("refunded", "partially_refunded")
+
     receipt = {
         "receipt_number": sale_details.sale_number,
         "receipt_date": sale_details.created_at,
+        "status": sale_details.status,
+        "refund_status": {
+            "is_refunded": is_refunded,
+            "refund_amount": float(sale_details.refund_amount or 0),
+            "refunded_at": sale_details.refunded_at.isoformat() if sale_details.refunded_at else None,
+            "refund_reason": sale_details.refund_reason if is_refunded else None,
+            "refund_reference": sale_details.refund_reference if is_refunded else None,
+        } if is_refunded else None,
         "organization": {
             "name": organization.name,
             "tax_id": getattr(organization, 'tax_id', None),
@@ -496,6 +506,7 @@ async def get_receipt(
             "insurance_covered": float(sale_details.insurance_covered_amount or 0),
             "verified": sale_details.insurance_verified,
         } if sale_details.insurance_claim_number else None,
+        "footer_message": organization.settings.get("receipt_footer", ""),
     }
     
     return receipt

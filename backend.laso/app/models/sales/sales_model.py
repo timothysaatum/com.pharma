@@ -263,6 +263,19 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     
     refund_amount: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
     refunded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    refunded_by: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey('users.id', ondelete='SET NULL'),
+        comment="User who processed the refund"
+    )
+    refund_reason: Mapped[Optional[str]] = mapped_column(
+        Text,
+        comment="Reason for the refund"
+    )
+    refund_reference: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        comment="Unique refund transaction reference"
+    )
     
     # ==================== RECEIPT TRACKING ====================
     
@@ -336,7 +349,7 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
             name='check_payment_status'
         ),
         CheckConstraint(
-            "status IN ('draft', 'completed', 'cancelled', 'refunded')",
+            "status IN ('draft', 'completed', 'cancelled', 'refunded', 'partially_refunded')",
             name='check_sale_status'
         ),
         CheckConstraint("subtotal >= 0", name='check_subtotal'),

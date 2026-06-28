@@ -99,6 +99,14 @@ export interface CancelSaleRequest {
 export interface ReceiptData {
     receipt_number: string;
     receipt_date: string;
+    status?: string;
+    refund_status?: {
+        is_refunded: boolean;
+        refund_amount: number;
+        refunded_at: string | null;
+        refund_reason: string | null;
+        refund_reference: string | null;
+    } | null;
     organization: {
         name: string;
         tax_id: string | null;

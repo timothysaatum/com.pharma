@@ -30,6 +30,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { salesApi } from "@/api/sales";
 import { statsApi } from "@/api/stats";
 import { isBackendReachable, parseApiError, isOfflineError } from "@/api/client";
+import { toast } from "sonner";
 import { localRead } from "@/lib/localRead";
 import { cacheSales } from "@/lib/localDb";
 import { appEvents } from "@/lib/events";
@@ -50,6 +51,7 @@ const STATUS_OPTIONS = [
     { value: "draft", label: "Draft" },
     { value: "cancelled", label: "Cancelled" },
     { value: "refunded", label: "Refunded" },
+    { value: "partially_refunded", label: "Partially Refunded" },
 ];
 
 const PAYMENT_OPTIONS = [
@@ -67,6 +69,7 @@ const STATUS_CONFIG: Record<string, { label: string; icon: React.ElementType; cl
     draft: { label: "Draft", icon: Clock, cls: "bg-slate-50 text-slate-600 border-slate-200" },
     cancelled: { label: "Cancelled", icon: XCircle, cls: "bg-red-50 text-red-600 border-red-100" },
     refunded: { label: "Refunded", icon: RotateCcw, cls: "bg-amber-50 text-amber-700 border-amber-100" },
+    partially_refunded: { label: "Partially Refunded", icon: RotateCcw, cls: "bg-orange-50 text-orange-700 border-orange-100" },
 };
 
 const PAYMENT_ICON: Record<string, React.ElementType> = {
@@ -367,11 +370,19 @@ function SaleDetailPanel({
 	    ${receiptLeader(`Paid (${PAYMENT_LABEL[receipt.payment_method] ?? receipt.payment_method})`, `₵${Number(receipt.amount_paid).toFixed(2)}`, "muted small")}
 	    ${receipt.change > 0 ? receiptLeader("Change", `₵${Number(receipt.change).toFixed(2)}`, "emerald semibold") : ""}
 	  </div>
-	  ${receipt.contract ? `<div class="section small center muted"><p>${escapeReceiptHtml(receipt.contract.name)} — ${receipt.contract.discount_percentage}% discount</p></div>` : ""}
-	  <div class="center muted small" style="margin-top:8px">
-	    ${receipt.cashier ? `<p>Served by: ${escapeReceiptHtml(receipt.cashier)}</p>` : ""}
-	    <p style="margin-top:6px;font-weight:600;color:#1a1a1a">Thank you for your purchase!</p>
-	  </div>
+ 	  ${receipt.contract ? `<div class="section small center muted"><p>${escapeReceiptHtml(receipt.contract.name)} — ${receipt.contract.discount_percentage}% discount</p></div>` : ""}
+ 	  ${receipt.refund_status ? `
+ 	  <div class="section">
+ 	    <div class="bold center" style="color:#d97706;margin-bottom:6px;">REFUNDED</div>
+ 	    ${receiptLeader("Refund Amount", `₵${Number(receipt.refund_status.refund_amount).toFixed(2)}`, "semibold")}
+ 	    ${receipt.refund_status.refunded_at ? receiptLeader("Refunded At", new Date(receipt.refund_status.refunded_at).toLocaleString("en-GH"), "muted small") : ""}
+ 	    ${receipt.refund_status.refund_reference ? receiptLeader("Ref. No.", receipt.refund_status.refund_reference, "muted small") : ""}
+ 	    ${receipt.refund_status.refund_reason ? receiptLeader("Reason", receipt.refund_status.refund_reason, "muted small") : ""}
+ 	  </div>` : ""}
+ 	  <div class="center muted small" style="margin-top:8px">
+ 	    ${receipt.cashier ? `<p>Served by: ${escapeReceiptHtml(receipt.cashier)}</p>` : ""}
+ 	    <p style="margin-top:6px;font-weight:600;color:#1a1a1a">Thank you for your purchase!</p>
+ 	  </div>
 	  </div>
 	</body>
 	</html>`;
@@ -710,7 +721,7 @@ function SaleDetailPanel({
                                 <Receipt className="w-4 h-4" />
                                 View Receipt
                             </button>
-                            {canRefund && sale.status === "completed" && (
+                            {canRefund && (sale.status === "completed" || sale.status === "partially_refunded") && (
                                 <button
                                     type="button"
                                     onClick={() => setRefundOpen(true)}
@@ -798,6 +809,32 @@ function SaleDetailPanel({
                             <div className="text-center text-slate-400 border-b border-dashed border-slate-200 pb-3">
                                 <p>Contract: {receipt.contract.name}</p>
                                 <p>Discount: {receipt.contract.discount_percentage}%</p>
+                            </div>
+                        )}
+
+                        {/* Refund status */}
+                        {receipt.refund_status && (
+                            <div className="space-y-1 border-b border-dashed border-slate-200 pb-3">
+                                <p className="font-bold text-amber-600 text-center">REFUNDED</p>
+                                <div className="flex justify-between text-amber-700">
+                                    <span>Refund Amount</span><span>{fmtGHS(receipt.refund_status.refund_amount)}</span>
+                                </div>
+                                {receipt.refund_status.refunded_at && (
+                                    <div className="flex justify-between text-slate-500">
+                                        <span>Refunded At</span><span>{fmtDateTime(receipt.refund_status.refunded_at)}</span>
+                                    </div>
+                                )}
+                                {receipt.refund_status.refund_reference && (
+                                    <div className="flex justify-between text-slate-500">
+                                        <span>Ref. No.</span><span className="font-mono">{receipt.refund_status.refund_reference}</span>
+                                    </div>
+                                )}
+                                {receipt.refund_status.refund_reason && (
+                                    <div className="text-xs text-slate-500 mt-1">
+                                        <p className="font-semibold">Reason:</p>
+                                        <p>{receipt.refund_status.refund_reason}</p>
+                                    </div>
+                                )}
                             </div>
                         )}
 
@@ -941,7 +978,7 @@ export default function SalesHistoryPage() {
                     }
                 } catch (e) {
                     if ((e as any)?.code !== "ERR_CANCELED") {
-                        console.error("Failed to fetch sales summary:", e);
+                        toast.error("Failed to load sales summary. " + parseApiError(e));
                     }
                     return null;
                 }

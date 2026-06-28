@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
-import { isOfflineError } from "@/api/client";
+import { isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { DrugCategory, DrugCategoryTree } from "@/types";
 
@@ -122,14 +122,14 @@ export function useCategories() {
                         })
                         .catch(() => {
                             if (mounted.current) {
-                                setError(err?.message ?? "Failed to load categories");
-                                setIsLoading(false);
-                            }
-                        });
+                    setError(parseApiError(err));
+                    setIsLoading(false);
+                }
+            });
                     return;
                 }
                 if (mounted.current) {
-                    setError(err?.message ?? "Failed to load categories");
+                    setError(parseApiError(err));
                     setIsLoading(false);
                 }
             });
@@ -192,7 +192,7 @@ export function useCategoryTree() {
             .catch((err) => {
                 treeInflight = null;
                 if (mounted.current) {
-                    setError(err?.message ?? "Failed to load category tree");
+                    setError(parseApiError(err));
                     setIsLoading(false);
                 }
             });
@@ -231,18 +231,18 @@ export function useCategoryTree() {
                         })
                         .catch(() => {
                             if (mounted.current) {
-                                setError(err?.message ?? "Failed to load category tree");
+                                setError(parseApiError(err));
                                 setIsLoading(false);
                             }
                         });
                     return;
                 }
                 if (mounted.current) {
-                    setError(err?.message ?? "Failed to load category tree");
+                    setError(parseApiError(err));
                     setIsLoading(false);
                 }
             });
-    }
+        }
 
     return { tree, isLoading, error, invalidate };
 }

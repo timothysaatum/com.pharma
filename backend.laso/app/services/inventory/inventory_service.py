@@ -2134,70 +2134,124 @@ class InventoryService:
             )
 
         elif quantity_change < 0:
-            # For deductions (damage/theft/correction), deduct FEFO
-            # For expired write-offs, deduct from already-expired batches
+            # For deductions (damage/theft/correction), deduct from non-expired batches FEFO.
+            # For expired write-offs, deduct from already-expired batches first, then
+            # fall through to non-expired batches — the adjustment itself is the act
+            # of marking stock as unusable, regardless of the printed expiry date.
             qty_to_deduct = abs(quantity_change)
             running_inventory_quantity = previous_inventory_quantity
-            expiry_condition = (
-                DrugBatch.expiry_date <= date.today()
-                if adjustment_type == "expired"
-                else DrugBatch.expiry_date > date.today()
-            )
-            batch_res = await db.execute(
-                select(DrugBatch)
-                .where(
-                    DrugBatch.branch_id == branch_id,
-                    DrugBatch.drug_id == drug_id,
-                    DrugBatch.remaining_quantity > 0,
-                    expiry_condition,
-                )
-                .order_by(DrugBatch.expiry_date.asc())
-                .with_for_update()
-            )
-            for batch in batch_res.scalars().all():
-                if qty_to_deduct <= 0:
-                    break
-                take = min(batch.remaining_quantity, qty_to_deduct)
-                previous_batch_quantity = batch.remaining_quantity
-                movement_quantity_before = running_inventory_quantity
-                running_inventory_quantity -= take
-                batch.remaining_quantity -= take
-                batch.updated_at = datetime.now(timezone.utc)
-                batch.mark_as_pending_sync()
-                qty_to_deduct -= take
 
-                movement_type = (
-                    "transfer_out"
-                    if adjustment_type == "transfer"
-                    else adjustment_type
+            # Phase 1 — expired batches only (for "expired" adjustments)
+            if adjustment_type == "expired":
+                batch_res = await db.execute(
+                    select(DrugBatch)
+                    .where(
+                        DrugBatch.branch_id == branch_id,
+                        DrugBatch.drug_id == drug_id,
+                        DrugBatch.remaining_quantity > 0,
+                        DrugBatch.expiry_date <= date.today(),
+                    )
+                    .order_by(DrugBatch.expiry_date.asc())
+                    .with_for_update()
                 )
-                await InventoryService._record_inventory_movement(
-                    db=db,
-                    branch_id=branch_id,
-                    drug_id=drug_id,
-                    movement_type=movement_type,
-                    quantity_change=-take,
-                    quantity_before=movement_quantity_before,
-                    quantity_after=running_inventory_quantity,
-                    batch_id=batch.id,
-                    batch_quantity_before=previous_batch_quantity,
-                    batch_quantity_after=batch.remaining_quantity,
-                    unit_cost=(
-                        Decimal(str(batch.cost_price))
-                        if batch.cost_price is not None
-                        else None
-                    ),
-                    unit_price=(
-                        Decimal(str(batch.selling_price))
-                        if batch.selling_price is not None
-                        else None
-                    ),
-                    source_type="stock_adjustment",
-                    source_id=adjustment.id,
-                    reference_number=batch.batch_number,
-                    reason=reason,
-                    created_by=adjusted_by,
+                for batch in batch_res.scalars().all():
+                    if qty_to_deduct <= 0:
+                        break
+                    take = min(batch.remaining_quantity, qty_to_deduct)
+                    previous_batch_quantity = batch.remaining_quantity
+                    movement_quantity_before = running_inventory_quantity
+                    running_inventory_quantity -= take
+                    batch.remaining_quantity -= take
+                    batch.updated_at = datetime.now(timezone.utc)
+                    batch.mark_as_pending_sync()
+                    qty_to_deduct -= take
+
+                    await InventoryService._record_inventory_movement(
+                        db=db,
+                        branch_id=branch_id,
+                        drug_id=drug_id,
+                        movement_type="expired",
+                        quantity_change=-take,
+                        quantity_before=movement_quantity_before,
+                        quantity_after=running_inventory_quantity,
+                        batch_id=batch.id,
+                        batch_quantity_before=previous_batch_quantity,
+                        batch_quantity_after=batch.remaining_quantity,
+                        unit_cost=(
+                            Decimal(str(batch.cost_price))
+                            if batch.cost_price is not None
+                            else None
+                        ),
+                        unit_price=(
+                            Decimal(str(batch.selling_price))
+                            if batch.selling_price is not None
+                            else None
+                        ),
+                        source_type="stock_adjustment",
+                        source_id=adjustment.id,
+                        reference_number=batch.batch_number,
+                        reason=reason,
+                        created_by=adjusted_by,
+                    )
+
+            # Phase 2 — non-expired batches (always checked for damage/theft/correction;
+            # also checked as fallback for expired when expired batches are insufficient)
+            if qty_to_deduct > 0:
+                batch_res = await db.execute(
+                    select(DrugBatch)
+                    .where(
+                        DrugBatch.branch_id == branch_id,
+                        DrugBatch.drug_id == drug_id,
+                        DrugBatch.remaining_quantity > 0,
+                        DrugBatch.expiry_date > date.today(),
+                    )
+                    .order_by(DrugBatch.expiry_date.asc())
+                    .with_for_update()
                 )
+                for batch in batch_res.scalars().all():
+                    if qty_to_deduct <= 0:
+                        break
+                    take = min(batch.remaining_quantity, qty_to_deduct)
+                    previous_batch_quantity = batch.remaining_quantity
+                    movement_quantity_before = running_inventory_quantity
+                    running_inventory_quantity -= take
+                    batch.remaining_quantity -= take
+                    batch.updated_at = datetime.now(timezone.utc)
+                    batch.mark_as_pending_sync()
+                    qty_to_deduct -= take
+
+                    movement_type = (
+                        "transfer_out"
+                        if adjustment_type == "transfer"
+                        else adjustment_type
+                    )
+                    await InventoryService._record_inventory_movement(
+                        db=db,
+                        branch_id=branch_id,
+                        drug_id=drug_id,
+                        movement_type=movement_type,
+                        quantity_change=-take,
+                        quantity_before=movement_quantity_before,
+                        quantity_after=running_inventory_quantity,
+                        batch_id=batch.id,
+                        batch_quantity_before=previous_batch_quantity,
+                        batch_quantity_after=batch.remaining_quantity,
+                        unit_cost=(
+                            Decimal(str(batch.cost_price))
+                            if batch.cost_price is not None
+                            else None
+                        ),
+                        unit_price=(
+                            Decimal(str(batch.selling_price))
+                            if batch.selling_price is not None
+                            else None
+                        ),
+                        source_type="stock_adjustment",
+                        source_id=adjustment.id,
+                        reference_number=batch.batch_number,
+                        reason=reason,
+                        created_by=adjusted_by,
+                    )
 
             if qty_to_deduct > 0:
                 raise HTTPException(

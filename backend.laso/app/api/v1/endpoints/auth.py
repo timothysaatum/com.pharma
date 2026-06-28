@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.middleware.rate_limit import rate_limit
 from app.schemas.user_schema import (
     UserCreate, UserResponse, LoginRequest, TokenResponse,
-    RefreshTokenRequest, PasswordChange,
+    RefreshTokenRequest, PasswordChange, ForcePasswordChange,
     MfaSetupResponse, MfaVerifyRequest, MfaDisableRequest,
 )
 from app.models.user.user_model import User
@@ -168,13 +168,16 @@ async def logout_all_sessions(
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Get current user information
     
     - **Requires**: Valid access token
-    - **Returns**: Current user details
+    - **Returns**: Current user details (including password_change_required flag)
+    - **Note**: Uses get_current_user (not get_current_active_user) so the
+      password_change_required field is available even when the user must
+      change their password.
     """
     return current_user
 
@@ -204,6 +207,38 @@ async def change_password(
     return {
         "detail": "PASSWORD_CHANGED",
         "message": "Password changed successfully. All sessions have been revoked. Please log in again.",
+    }
+
+
+@router.post("/force-change-password")
+async def force_change_password(
+    password_data: ForcePasswordChange,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Force a password change without requiring the old password.
+    Used for first-login password change.
+
+    - **Requires**: Valid access token (user must have must_change_password=True)
+    - **Action**: Updates password, keeps current session active
+    - **Returns**: 200 on success
+    """
+    if not current_user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password change is not required for this user",
+        )
+
+    await AuthService.force_change_password(
+        db,
+        current_user,
+        password_data.new_password
+    )
+
+    return {
+        "detail": "PASSWORD_CHANGED",
+        "message": "Password changed successfully.",
     }
 
 

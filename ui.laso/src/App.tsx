@@ -20,6 +20,7 @@ const UsersPage = lazy(() => import("@/pages/UsersPage"));
 const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AuditLogPage = lazy(() => import("@/pages/AuditLogPage"));
+const ChangePasswordPage = lazy(() => import("@/pages/ChangePasswordPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -45,6 +46,9 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+  if (setupState === "needs_pw_change") {
+    return <Navigate to="/change-password" replace />;
   }
   if (setupState !== "ready") {
     return <Navigate to="/setup" replace />;
@@ -101,6 +105,17 @@ function RequireUnauthenticated({ children }: { children: React.ReactNode }) {
   if (isAuthenticated && setupState === "ready") {
     return <Navigate to={getHomePath(user)} replace />;
   }
+  return <>{children}</>;
+}
+
+/**
+ * Guards /change-password — only allows users who must change their password.
+ * Redirects to /login if not authenticated, or to home if no password change needed.
+ */
+function RequirePasswordChange({ children }: { children: React.ReactNode }) {
+  const { isAuthenticated, setupState } = useAuthStore();
+  if (!isAuthenticated) return <Navigate to="/login" replace />;
+  if (setupState === "ready" || setupState === null) return <Navigate to={getHomePath(useAuthStore.getState().user)} replace />;
   return <>{children}</>;
 }
 
@@ -256,6 +271,20 @@ function AppRoutes() {
             <RequireSetupAccess>
               <SetupRequiredPage />
             </RequireSetupAccess>
+          }
+        />
+
+        {/*
+         * /change-password — shown when the user must change password
+         * on first login. RequireAuth redirects here; after the password
+         * is changed the user is redirected to their home page.
+         */}
+        <Route
+          path="/change-password"
+          element={
+            <RequirePasswordChange>
+              <ChangePasswordPage />
+            </RequirePasswordChange>
           }
         />
 

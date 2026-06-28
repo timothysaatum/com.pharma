@@ -21,6 +21,7 @@ interface SaleSuccessModalProps {
     result: ProcessSaleResponse;
     onNewSale: () => void;
     onClose: () => void;
+    footerMessage?: string;
 }
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -64,7 +65,7 @@ const receiptLine = (label: string, value: string, className = "") => `
     </div>
 `;
 
-export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModalProps) {
+export function SaleSuccessModal({ result, onNewSale, onClose, footerMessage }: SaleSuccessModalProps) {
     const { sale } = result;
     const change = sale.change_amount ?? 0;
     const branchName = sale.branch_name ?? "Branch";
@@ -123,7 +124,7 @@ export function SaleSuccessModal({ result, onNewSale, onClose }: SaleSuccessModa
         ${receiptLine("Change", `₵${Number(change).toFixed(2)}`)}
         ${receiptLine("Payment", PAYMENT_METHOD_LABELS[sale.payment_method] ?? sale.payment_method)}
     </div>
-    <div class="section small center">Thank you for shopping with us.</div>
+    <div class="section small center">${escapeHtml(footerMessage ?? "Thank you for shopping with us.")}</div>
 </div>
 </body>
 </html>`;

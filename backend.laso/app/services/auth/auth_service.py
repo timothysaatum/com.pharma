@@ -84,6 +84,7 @@ class AuthService:
             assigned_branches=user_data.assigned_branches or [],
             password_hash=hash_password(user_data.password),
             is_active=True,
+            must_change_password=True,
             created_at=datetime.now(timezone.utc),
             updated_at=datetime.now(timezone.utc)
         )
@@ -514,6 +515,7 @@ class AuthService:
         # Update password
         user.password_hash = hash_password(new_password)
         user.password_changed_at = datetime.now(timezone.utc)
+        user.must_change_password = False
         user.updated_at = datetime.now(timezone.utc)
         
         # Revoke all existing sessions for security
@@ -533,6 +535,93 @@ class AuthService:
         )
         await db.commit()
     
+    @staticmethod
+    async def force_change_password(
+        db: AsyncSession,
+        user: User,
+        new_password: str
+    ) -> None:
+        """
+        Force a password change without requiring the old password.
+        Used for first-login password change.
+
+        This method does NOT revoke sessions so the user stays logged in.
+        """
+        # Validate new password strength
+        is_valid, error_msg = SecurityUtils.validate_password_strength(new_password)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg
+            )
+
+        # Update password
+        user.password_hash = hash_password(new_password)
+        user.password_changed_at = datetime.now(timezone.utc)
+        user.must_change_password = False
+        user.updated_at = datetime.now(timezone.utc)
+
+        await db.commit()
+
+        await AuditService.log(
+            db, user.organization_id,
+            action="password_change",
+            user_id=user.id,
+            entity_type="user",
+            entity_id=user.id,
+            changes={"password_changed_at": str(user.password_changed_at)},
+            context_metadata={"forced": True},
+        )
+        await db.commit()
+
+    @staticmethod
+    async def admin_reset_password(
+        db: AsyncSession,
+        target_user: User,
+        new_password: str,
+        resetter: User
+    ) -> None:
+        """
+        Admin/manager resets another user's password.
+        The target user must change password on next login.
+
+        Args:
+            db: Async database session
+            target_user: The user whose password is being reset
+            new_password: The new password (will be validated)
+            resetter: The admin/manager performing the reset
+        """
+        # Validate new password strength
+        is_valid, error_msg = SecurityUtils.validate_password_strength(new_password)
+        if not is_valid:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=error_msg
+            )
+
+        # Update password and force change
+        target_user.password_hash = hash_password(new_password)
+        target_user.password_changed_at = datetime.now(timezone.utc)
+        target_user.must_change_password = True
+        target_user.updated_at = datetime.now(timezone.utc)
+
+        # Revoke all sessions so the user must log in again
+        from app.services.auth.auth_service import AuthService as AS
+        await AS._revoke_all_sessions(db, target_user)
+
+        await db.commit()
+
+        await AuditService.log(
+            db, resetter.organization_id,
+            action="password_reset",
+            user_id=resetter.id,
+            entity_type="user",
+            entity_id=target_user.id,
+            changes={"password_changed_at": str(target_user.password_changed_at)},
+            context_metadata={"reset_by": str(resetter.id)},
+        )
+        await db.commit()
+
     @staticmethod
     async def _cleanup_old_sessions(db: AsyncSession, user_id: uuid.UUID) -> None:
         """

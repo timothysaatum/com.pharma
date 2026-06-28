@@ -501,7 +501,7 @@ class SaleResponse(SaleBase, TimestampSchema, SyncSchema):
     
     status: str = Field(
         default='completed',
-        pattern="^(draft|completed|cancelled|refunded)$"
+        pattern="^(draft|completed|cancelled|refunded|partially_refunded)$"
     )
     
     cancelled_at: Optional[datetime] = None
@@ -511,6 +511,8 @@ class SaleResponse(SaleBase, TimestampSchema, SyncSchema):
     refund_amount: Optional[Decimal] = None
     refunded_at: Optional[datetime] = None
     refunded_by: Optional[uuid.UUID] = None
+    refund_reason: Optional[str] = None
+    refund_reference: Optional[str] = None
     
     # ============================================
     # COMPUTED PROPERTIES
@@ -910,7 +912,7 @@ class SaleFilters(BaseSchema):
     # Status filters
     status: Optional[str] = Field(
         None,
-        pattern="^(draft|completed|cancelled|refunded)$"
+        pattern="^(draft|completed|cancelled|refunded|partially_refunded)$"
     )
     
     payment_status: Optional[str] = Field(

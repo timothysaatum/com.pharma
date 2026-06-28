@@ -217,13 +217,13 @@ class OrganizationOnboardingService:
         except (IntegrityError, DataError):
             await self.db.rollback()
             raise
-        except Exception:
+        except Exception as exc:
             await self.db.rollback()
             logger.exception("Organization onboarding failed")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to onboard organization",
-            )
+                detail=f"Failed to onboard organization: {exc}",
+            ) from exc
     
     async def _check_organization_exists(self, name: str) -> Optional[Organization]:
         """Check if organization with name already exists"""

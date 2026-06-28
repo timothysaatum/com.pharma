@@ -9,6 +9,7 @@ import { prescriptionsApi } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { useAuthStore } from "@/stores/authStore";
 import type { Prescription, PrescriptionMedication, PrescriptionStatus, Drug } from "@/types";
 
 const STATUS_OPTIONS: Array<{ value: "" | PrescriptionStatus; label: string }> = [
@@ -67,9 +68,10 @@ function StatusBadge({ status }: { status: string }) {
 }
 
 export default function PrescriptionsPage() {
+  const { activeBranchId } = useAuthStore();
   const [items, setItems] = useState<PrescriptionRow[]>([]);
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState<"" | PrescriptionStatus>("");
+  const [status, setStatus] = useState<"" | PrescriptionStatus>("active");
   const [includeExpired, setIncludeExpired] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -114,8 +116,9 @@ export default function PrescriptionsPage() {
       search: search.trim(),
       status_filter: status,
       include_expired: includeExpired,
+      branch_id: activeBranchId ?? undefined,
     }),
-    [includeExpired, search, status]
+    [activeBranchId, includeExpired, search, status]
   );
 
   const load = useCallback(async () => {
@@ -430,6 +433,7 @@ export default function PrescriptionsPage() {
       const data = {
         prescription_number: prescriptionNumber.trim(),
         customer_id: selectedCustomer.id,
+        branch_id: activeBranchId ?? undefined,
         prescriber_name: prescriberName.trim(),
         prescriber_license: prescriberLicense.trim(),
         prescriber_phone: prescriberPhone.trim() || null,
@@ -452,6 +456,7 @@ export default function PrescriptionsPage() {
           { id: string } = {
           ...data,
           id,
+          branch_id: activeBranchId ?? "",
           organization_id: "",
           prescriber_address: null,
           diagnosis: null,

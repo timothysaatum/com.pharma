@@ -154,9 +154,17 @@ async def get_current_active_user(
     current_user: User = Depends(get_current_user)
 ) -> User:
     """
-    Get current user and ensure they're active
-    (Alias for clarity in endpoints)
+    Get current user and ensure they're active and allowed to access the app.
+
+    Blocks users who must change their password first.
+    The /auth/force-change-password endpoint uses get_current_user directly
+    to allow through users in this state.
     """
+    if current_user.must_change_password:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="PASSWORD_CHANGE_REQUIRED",
+        )
     return current_user
 
 

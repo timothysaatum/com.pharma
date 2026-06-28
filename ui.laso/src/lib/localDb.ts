@@ -79,6 +79,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 10) await migrate_v10(db);
       if (user_version < 11) await migrate_v11(db);
       if (user_version < 12) await migrate_v12(db);
+      if (user_version < 13) await migrate_v13(db);
       await ensureBranchInventorySchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
@@ -451,6 +452,7 @@ async function migrate_v10(db: Database): Promise<void> {
     CREATE TABLE IF NOT EXISTS prescriptions (
       id                    TEXT PRIMARY KEY,
       organization_id       TEXT NOT NULL,
+      branch_id             TEXT NOT NULL DEFAULT '',
       prescription_number   TEXT NOT NULL UNIQUE,
       customer_id           TEXT NOT NULL,
       prescriber_name       TEXT NOT NULL,
@@ -523,6 +525,15 @@ async function migrate_v12(db: Database): Promise<void> {
     "CREATE INDEX IF NOT EXISTS idx_sync_queue_next_attempt ON sync_queue(next_attempt_at)"
   );
   await db.execute("PRAGMA user_version = 12");
+}
+
+async function migrate_v13(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE prescriptions ADD COLUMN branch_id TEXT NOT NULL DEFAULT ''");
+  } catch {
+    // column already exists
+  }
+  await db.execute("PRAGMA user_version = 13");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {

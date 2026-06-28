@@ -91,4 +91,13 @@ export const usersApi = {
     remove(userId: string): Promise<void> {
         return del<void>(`/users/${userId}`);
     },
+
+    /**
+     * POST /users/:id/reset-password
+     * Admin/manager resets a staff member's password.
+     * Forces the user to change password on next login.
+     */
+    resetPassword(userId: string, data: { new_password: string }): Promise<UserResponse> {
+        return post<UserResponse>(`/users/${userId}/reset-password`, data);
+    },
 };

@@ -7,7 +7,7 @@ import uuid
 
 from app.core.deps import get_db, require_permission, get_client_ip, get_user_agent
 from app.models.user.user_model import User, Role, Permission
-from app.schemas.user_schema import UserCreate, UserUpdate, UserResponse
+from app.schemas.user_schema import UserCreate, UserUpdate, UserResponse, AdminPasswordReset
 from app.services.auth.auth_service import AuthService
 from app.services.audit_service import AuditService
 from app.utils.pagination import PaginatedResponse
@@ -25,7 +25,10 @@ def _shares_branch(user: User, branch_ids: set[str]) -> bool:
 def _ensure_manager_can_manage_user(current_user: User, user: User) -> None:
     manager_branch_ids = _branch_id_set(current_user.assigned_branches)
     if user.is_super_admin or not _shares_branch(user, manager_branch_ids):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permission denied")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You cannot manage this user. You must share at least one branch with the user.",
+        )
 
 
 def _ensure_manager_branch_assignment(current_user: User, assigned_branches) -> None:
@@ -190,6 +193,19 @@ async def create_user(
         _ensure_manager_branch_assignment(current_user, user_data.assigned_branches)
 
     user = await AuthService.create_user(db, user_data)
+
+    # Assign roles if provided
+    role_ids = user_data.role_ids
+    if role_ids:
+        result = await db.execute(
+            select(Role).where(
+                Role.organization_id == current_user.organization_id,
+                Role.id.in_(role_ids)
+            )
+        )
+        user.roles = list(result.scalars().all())
+        await db.commit()
+
     # Reload with roles
     result = await db.execute(
         select(User).where(User.id == user.id).options(selectinload(User.roles))
@@ -390,6 +406,52 @@ async def unlock_user(
     )
     await db.commit()
 
+    return UserResponse.model_validate(user)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin / Manager — Reset user password
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/{user_id}/reset-password", response_model=UserResponse)
+async def reset_user_password(
+    request: Request,
+    user_id: uuid.UUID,
+    reset_data: AdminPasswordReset,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.MANAGE_USERS)),
+):
+    """
+    Admin or manager resets a staff member's password.
+    The user will be forced to change their password on next login.
+    All active sessions are revoked.
+    """
+    from datetime import datetime, timezone
+    from app.services.auth.auth_service import AuthService as AS
+
+    result = await db.execute(
+        select(User).where(
+            User.id == user_id,
+            User.organization_id == current_user.organization_id,
+            User.deleted_at.is_(None),
+        ).options(selectinload(User.roles))
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    if user.id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use /auth/change-password to change your own password",
+        )
+
+    _enforce_branch_scope(current_user, user)
+
+    await AS.admin_reset_password(db, user, reset_data.new_password, current_user)
+
+    await db.refresh(user)
     return UserResponse.model_validate(user)
 
 
