@@ -673,6 +673,192 @@ class TestProcessSale:
 
         assert "Split payment total" in str(exc.value)
 
+    async def test_process_sale_rx_drug_with_insufficient_stock_reports_both_errors(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """An Rx-only drug with low stock AND no Rx reports BOTH errors."""
+        org, branch, user, drugs, customer = setup_test_data
+        drugs[0].requires_prescription = True
+
+        inventory = BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drugs[0].id,
+            quantity=1,
+            reserved_quantity=0,
+            selling_price=Decimal("50.00"),
+        )
+        batch = DrugBatch(
+            id=uuid.uuid4(),
+            drug_id=drugs[0].id,
+            branch_id=branch.id,
+            batch_number="BOTH-ERR",
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=1,
+            remaining_quantity=1,
+        )
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-BOTH",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add_all([inventory, batch, contract])
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=5)],
+            payment_method="cash",
+            amount_paid=Decimal("250.00"),
+        )
+
+        with pytest.raises(Exception) as exc:
+            await SalesService.process_sale(db, sale_data, user)
+
+        err_str = str(exc.value)
+        assert "Insufficient stock" in err_str, (
+            "Should report stock error even when Rx is also missing"
+        )
+        assert "requires a valid prescription" in err_str, (
+            "Should also report prescription error"
+        )
+
+    async def test_process_sale_multiple_items_collect_all_errors(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Multiple items with different issues should report ALL errors."""
+        org, branch, user, drugs, customer = setup_test_data
+        drugs[0].requires_prescription = True  # Rx-only, no Rx → error
+        # drug[1] is not Rx-only, but has no stock → error
+
+        inventory_0 = BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drugs[0].id,
+            quantity=10,
+            reserved_quantity=0,
+            selling_price=Decimal("50.00"),
+        )
+        batch_0 = DrugBatch(
+            id=uuid.uuid4(),
+            drug_id=drugs[0].id,
+            branch_id=branch.id,
+            batch_number="MULTI-0",
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=10,
+            remaining_quantity=10,
+        )
+        # drug[1] has inventory but very low qty
+        inventory_1 = BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drugs[1].id,
+            quantity=2,
+            reserved_quantity=0,
+            selling_price=Decimal("30.00"),
+        )
+        batch_1 = DrugBatch(
+            id=uuid.uuid4(),
+            drug_id=drugs[1].id,
+            branch_id=branch.id,
+            batch_number="MULTI-1",
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=2,
+            remaining_quantity=2,
+        )
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-MULTI-ERR",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add_all([inventory_0, batch_0, inventory_1, batch_1, contract])
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[
+                SaleItemCreate(drug_id=drugs[0].id, quantity=3),
+                SaleItemCreate(drug_id=drugs[1].id, quantity=5),
+            ],
+            payment_method="cash",
+            amount_paid=Decimal("300.00"),
+        )
+
+        with pytest.raises(Exception) as exc:
+            await SalesService.process_sale(db, sale_data, user)
+
+        err_str = str(exc.value)
+        assert "requires a valid prescription" in err_str, (
+            "Item 0 (Rx-only) should report prescription error"
+        )
+        assert "Insufficient stock" in err_str, (
+            "Item 1 should report insufficient stock error"
+        )
+
+    async def test_process_sale_stock_validated_before_rx_gate(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Rx drug that has neither stock nor Rx gets BOTH errors, not just Rx."""
+        org, branch, user, drugs, customer = setup_test_data
+        drugs[0].requires_prescription = True
+
+        # Intentionally NO inventory and NO batch for this drug
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-NO-INV",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(contract)
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=3)],
+            payment_method="cash",
+            amount_paid=Decimal("150.00"),
+        )
+
+        with pytest.raises(Exception) as exc:
+            await SalesService.process_sale(db, sale_data, user)
+
+        err_str = str(exc.value)
+        assert "No inventory record" in err_str, (
+            "Stock validation should run (no inventory record)"
+        )
+        assert "requires a valid prescription" in err_str, (
+            "Prescription validation should also run"
+        )
+
 
 @pytest.mark.asyncio
 class TestRefundSale:

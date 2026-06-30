@@ -295,3 +295,18 @@ class OrganizationSettingsUpdate(BaseSchema):
             }
         }
     }
+
+
+class OrganizationSettingsResponse(BaseSchema):
+    """Typed organization settings returned by GET /settings"""
+    currency: Optional[str] = None
+    timezone: Optional[str] = None
+    date_format: Optional[str] = None
+    time_format: Optional[str] = None
+    tax_inclusive: Optional[bool] = None
+    low_stock_threshold: Optional[int] = None
+    enable_loyalty_program: bool = False
+    enable_prescriptions: Optional[bool] = None
+    enable_batch_tracking: Optional[bool] = None
+    auto_generate_sku: Optional[bool] = None
+    receipt_footer: Optional[str] = None

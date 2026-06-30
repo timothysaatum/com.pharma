@@ -24,7 +24,7 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
 from fastapi import HTTPException, status
@@ -161,6 +161,114 @@ def _validate_prescription_sale_items(
                 ),
             )
 
+def _validate_stock_and_prescription_items(
+    *,
+    sale_items: List[SaleItemCreate],
+    drugs: Dict[uuid.UUID, Drug],
+    prescription: Optional[Prescription],
+    inventories: Dict[uuid.UUID, BranchInventory],
+    batch_available_by_drug: Dict[uuid.UUID, int],
+) -> None:
+    """
+    Combined stock + prescription validation for ALL items.
+
+    Runs stock checks (inventory exists, qty <= available, qty <= batch
+    available) and prescription checks (Rx-only drugs have valid Rx) for
+    every item, collecting ALL errors before raising.
+
+    Both checks run per-item so the user gets a single response listing every
+    failing item (e.g. ``Drug A: insufficient stock; Drug B: prescription
+    required``).
+    """
+    rx_limits = _prescription_drug_limits(prescription) if prescription else {}
+    errors: List[Dict[str, Any]] = []
+
+    for item in sale_items:
+        drug = drugs[item.drug_id]
+
+        # --- Stock validation ---
+        inventory = inventories.get(item.drug_id)
+        if not inventory:
+            errors.append({
+                "drug_id": str(item.drug_id),
+                "drug_name": drug.name,
+                "error": (
+                    f"No inventory record for '{drug.name}' at this branch. "
+                    "Stock must be received first."
+                ),
+                "error_type": "no_inventory",
+            })
+        else:
+            available = inventory.quantity - inventory.reserved_quantity
+            if available < item.quantity:
+                errors.append({
+                    "drug_id": str(item.drug_id),
+                    "drug_name": drug.name,
+                    "error": (
+                        f"Insufficient stock for '{drug.name}'. "
+                        f"Available: {available}, Requested: {item.quantity}."
+                    ),
+                    "error_type": "insufficient_stock",
+                })
+
+            batch_available = batch_available_by_drug.get(item.drug_id, 0)
+            if batch_available < item.quantity:
+                errors.append({
+                    "drug_id": str(item.drug_id),
+                    "drug_name": drug.name,
+                    "error": (
+                        f"Insufficient non-expired batch stock for "
+                        f"'{drug.name}'. Available in batches: "
+                        f"{batch_available}, Requested: {item.quantity}."
+                    ),
+                    "error_type": "insufficient_batch_stock",
+                })
+
+        # --- Prescription validation ---
+        if drug.requires_prescription:
+            if not prescription:
+                errors.append({
+                    "drug_id": str(item.drug_id),
+                    "drug_name": drug.name,
+                    "error": (
+                        f"'{drug.name}' requires a valid prescription. "
+                        "Provide a prescription_id or remove this item."
+                    ),
+                    "error_type": "prescription_required",
+                })
+            elif item.drug_id not in rx_limits:
+                errors.append({
+                    "drug_id": str(item.drug_id),
+                    "drug_name": drug.name,
+                    "error": (
+                        f"Prescription {prescription.prescription_number} does "
+                        f"not include '{drug.name}'."
+                    ),
+                    "error_type": "prescription_drug_mismatch",
+                })
+            else:
+                allowed_quantity = rx_limits[item.drug_id]
+                if allowed_quantity is not None and item.quantity > allowed_quantity:
+                    errors.append({
+                        "drug_id": str(item.drug_id),
+                        "drug_name": drug.name,
+                        "error": (
+                            f"Requested quantity for '{drug.name}' exceeds the "
+                            f"prescribed quantity ({allowed_quantity})."
+                        ),
+                        "error_type": "prescription_quantity_exceeded",
+                    })
+
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "message": f"Sale validation failed for {len(errors)} item(s).",
+                "errors": errors,
+            },
+        )
+
+
 # Sub-module imports
 from app.services.sales.validators.sale_validators import (
     check_customer_allergies,
@@ -211,23 +319,24 @@ class SalesService:
          2  Load and validate customer (org-scoped, active only).
          3  Load and validate prescription (org-scoped, active + non-expired).
          4  Load and validate all drugs (org-scoped, active only).
-         5  SAFETY: allergy check against customer profile.
-         6  Gate: every prescription-only drug must have a valid prescription.
-         7  Load and validate PriceContract; load per-drug overrides.
-         8  Load FEFO batches; resolve unit prices (branch price → batch price → drug price).
-         9  Reserve inventory with row-level locks (rollback-safe accumulator).
-        10  Compute per-item and sale-level pricing.
-        11  Validate contract purchase limits.
-        12  Validate payment sufficiency.
-        13  Persist Sale record (model-aligned fields only).
-        14  Persist SaleItem records (model-aligned fields only).
-        15  Deduct inventory via FEFO — multi-batch safe with FOR UPDATE locks.
-        16  Write StockAdjustment (type='correction') + system alerts.
-        17  Decrement prescription refills.
-        18  Award loyalty points; recalculate tier.
-        19  Commit.
-        20  Append AuditLog (flush only — no commit).
-        21  Return ProcessSaleResponse.
+ 5  SAFETY: allergy check against customer profile.
+ 6  Pre-load inventory + FEFO batches (row-level locks held from here).
+ 7  Combined stock + prescription validation (collects ALL errors per-item).
+ 8  Load and validate PriceContract; load per-drug overrides.
+ 9  Resolve unit prices from already-loaded data.
+10  Reserve inventory with row-level locks (rollback-safe accumulator).
+11  Compute per-item and sale-level pricing.
+12  Validate contract purchase limits.
+13  Validate payment sufficiency.
+14  Persist Sale record (model-aligned fields only).
+15  Persist SaleItem records (model-aligned fields only).
+16  Deduct inventory via FEFO — multi-batch safe with FOR UPDATE locks.
+17  Write StockAdjustment (type='correction') + system alerts.
+18  Decrement prescription refills.
+19  Award loyalty points; recalculate tier.
+20  Commit.
+21  Append AuditLog (flush only — no commit).
+22  Return ProcessSaleResponse.
         """
         async with db.begin_nested():  # savepoint — full rollback on any exception
 
@@ -396,38 +505,7 @@ class SalesService:
                 )
 
             # ------------------------------------------------------------------
-            # 6. Prescription gate — every Rx-only drug must have a valid Rx
-            # ------------------------------------------------------------------
-            _validate_prescription_sale_items(
-                sale_items=sale_data.items,
-                drugs=drugs,
-                prescription=prescription,
-            )
-
-            # ------------------------------------------------------------------
-            # 7. Contract — load, validate, fetch per-drug overrides
-            # ------------------------------------------------------------------
-            contract, contract_items, verification_confirmed = await load_and_validate_contract(
-                db=db,
-                contract_id=sale_data.price_contract_id,
-                branch_id=sale_data.branch_id,
-                drug_ids=drug_ids,
-                user=user,
-                insurance_verified=getattr(sale_data, "insurance_verified", False),
-                contract_verification_token=getattr(
-                    sale_data, "contract_verification_token", None
-                ),
-                insurance_preauth_number=getattr(
-                    sale_data, "insurance_preauth_number", None
-                ),
-                customer_id=sale_data.customer_id,
-            )
-
-            # ------------------------------------------------------------------
-            # 8. FEFO batches + unit price resolution
-            #
-            # Priority: BranchInventory.selling_price → DrugBatch.selling_price → Drug.unit_price
-            # cost_price is NEVER used — it is the pharmacy's acquisition cost.
+            # 6. Pre-load inventory + FEFO batches (row-level locks held from here)
             # ------------------------------------------------------------------
             fefo_batches: Dict[uuid.UUID, List[DrugBatch]] = await load_fefo_batches(
                 db=db,
@@ -457,6 +535,42 @@ class SalesService:
                 for drug_id, batches in fefo_batches.items()
             }
 
+            # ------------------------------------------------------------------
+            # 7. Combined stock + prescription validation (collects ALL errors)
+            # ------------------------------------------------------------------
+            _validate_stock_and_prescription_items(
+                sale_items=sale_data.items,
+                drugs=drugs,
+                prescription=prescription,
+                inventories=inventories,
+                batch_available_by_drug=batch_available_by_drug,
+            )
+
+            # ------------------------------------------------------------------
+            # 8. Contract — load, validate, fetch per-drug overrides
+            # ------------------------------------------------------------------
+            contract, contract_items, verification_confirmed = await load_and_validate_contract(
+                db=db,
+                contract_id=sale_data.price_contract_id,
+                branch_id=sale_data.branch_id,
+                drug_ids=drug_ids,
+                user=user,
+                insurance_verified=getattr(sale_data, "insurance_verified", False),
+                contract_verification_token=getattr(
+                    sale_data, "contract_verification_token", None
+                ),
+                insurance_preauth_number=getattr(
+                    sale_data, "insurance_preauth_number", None
+                ),
+                customer_id=sale_data.customer_id,
+            )
+
+            # ------------------------------------------------------------------
+            # 9. Unit price resolution (inventory + batches already loaded)
+            #
+            # Priority: BranchInventory.selling_price → DrugBatch.selling_price → Drug.unit_price
+            # cost_price is NEVER used — it is the pharmacy's acquisition cost.
+            # ------------------------------------------------------------------
             resolved_prices: Dict[uuid.UUID, Decimal] = {
                 item.drug_id: resolve_unit_price(
                     drug=drugs[item.drug_id],
@@ -467,7 +581,7 @@ class SalesService:
             }
 
             # ------------------------------------------------------------------
-            # 9. Reserve inventory — row-level locks; rollback-safe accumulator
+            # 10. Reserve inventory — row-level locks; rollback-safe accumulator
             # ------------------------------------------------------------------
             reservations: List[Tuple[BranchInventory, int]] = []
             try:
@@ -517,7 +631,7 @@ class SalesService:
                 raise
 
             # ------------------------------------------------------------------
-            # 10. Per-item pricing
+            # 11. Per-item pricing
             # ------------------------------------------------------------------
             tax_inclusive = bool(organization.settings.get("tax_inclusive", False))
 
@@ -545,7 +659,7 @@ class SalesService:
             new_loyalty_tier_value = None
 
             # ------------------------------------------------------------------
-            # 11. Contract purchase limits
+            # 12. Contract purchase limits
             # ------------------------------------------------------------------
             if contract.minimum_purchase_amount and total_amount < _d(contract.minimum_purchase_amount):
                 raise HTTPException(
@@ -576,7 +690,7 @@ class SalesService:
                 insurance_covered_amount = _r2(total_amount - patient_copay_amount)
 
             # ------------------------------------------------------------------
-            # 12. Payment
+            # 13. Payment
             # ------------------------------------------------------------------
             amount_due = (
                 patient_copay_amount
@@ -638,7 +752,7 @@ class SalesService:
             change_amount = _r2(amount_paid - amount_due)
 
             # ------------------------------------------------------------------
-            # 13. Persist Sale — only model-defined fields
+            # 14. Persist Sale — only model-defined fields
             # ------------------------------------------------------------------
             sale_number = await generate_sale_number(db, branch.code)
 
@@ -715,7 +829,7 @@ class SalesService:
             await db.flush()  # materialise sale.id for FK references below
 
             # ------------------------------------------------------------------
-            # 14. Persist SaleItems — only model-defined fields
+            # 15. Persist SaleItems — only model-defined fields
             # ------------------------------------------------------------------
             created_items: List[Tuple[SaleItem, SaleItemCreate]] = []
 
@@ -750,7 +864,7 @@ class SalesService:
             await db.flush()
 
             # ------------------------------------------------------------------
-            # 15. FEFO inventory deduction — multi-batch safe
+            # 16. FEFO inventory deduction — multi-batch safe
             #
             # Iterates FEFO-ordered batches under FOR UPDATE lock, spilling into
             # subsequent batches when the primary batch is exhausted.
@@ -872,7 +986,7 @@ class SalesService:
                 inventory_updated += 1
 
                 # ------------------------------------------------------------------
-                # 16. StockAdjustment + system alerts
+                # 17. StockAdjustment + system alerts
                 #     'correction' is the model-valid type for sale-driven deductions
                 # ------------------------------------------------------------------
                 db.add(
@@ -959,7 +1073,7 @@ class SalesService:
                     )
 
             # ------------------------------------------------------------------
-            # 17. Prescription refill decrement
+            # 18. Prescription refill decrement
             # ------------------------------------------------------------------
             if prescription:
                 prescription.refills_remaining -= 1
@@ -973,7 +1087,7 @@ class SalesService:
                 prescription.mark_as_pending_sync()
 
             # ------------------------------------------------------------------
-            # 18. Loyalty points + tier recalculation
+            # 19. Loyalty points + tier recalculation
             #     Only award points when the loyalty program is enabled.
             #     Also increment denormalized purchase counters so
             #     CustomerService._build_with_details always has fresh data
@@ -1044,12 +1158,12 @@ class SalesService:
             contract.mark_as_pending_sync()
 
         # ----------------------------------------------------------------------
-        # 19. Commit — outside the savepoint context
+        # 20. Commit — outside the savepoint context
         # ----------------------------------------------------------------------
         await db.commit()
 
         # ----------------------------------------------------------------------
-        # 20. Audit log — persisted separately so it cannot roll back the sale
+        # 21. Audit log — persisted separately so it cannot roll back the sale
         # ----------------------------------------------------------------------
         try:
             await create_audit_log(
@@ -1077,7 +1191,7 @@ class SalesService:
             await db.rollback()
 
         # ----------------------------------------------------------------------
-        # 21. Build and return response
+        # 22. Build and return response
         # ----------------------------------------------------------------------
         await db.refresh(sale)
         sale_with_details = await build_sale_with_details(db, sale)

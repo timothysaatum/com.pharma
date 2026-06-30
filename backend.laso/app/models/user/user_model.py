@@ -254,13 +254,13 @@ class User(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
             raise ValueError("Invalid email format")
         return email.lower()
     
-    def set_password(self, password: str):
+    def set_password(self, password: str, require_change: bool = False):
         """Hash and set password using Argon2"""
         if len(password) < 8:
             raise ValueError("Password must be at least 8 characters")
         self.password_hash = pwd_context.hash(password)
         self.password_changed_at = datetime.now(timezone.utc)
-        self.must_change_password = False
+        self.must_change_password = require_change
     
     def verify_password(self, password: str) -> bool:
         """Verify password against hash"""

@@ -229,9 +229,9 @@ class SaleCreate(SaleBase):
     # PRICING CONTRACT (REQUIRED)
     # ============================================
     
-    price_contract_id: uuid.UUID = Field(
-        ...,
-        description="REQUIRED: Price contract selected by cashier"
+    price_contract_id: Optional[uuid.UUID] = Field(
+        None,
+        description="Optional: Price contract selected by cashier. Null for walk-in sales without contract."
     )
     
     contract_verification_token: Optional[str] = Field(

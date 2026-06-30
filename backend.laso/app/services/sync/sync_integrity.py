@@ -232,7 +232,7 @@ class SyncIntegrityService:
             
             # Check 7: Invalid financial amounts
             if sale.total_amount is not None:
-                expected_total = (sale.subtotal or 0) - (sale.discount_amount or 0) + (sale.tax_amount or 0)
+                expected_total = float(sale.subtotal or 0) - float(sale.discount_amount or 0) + float(sale.tax_amount or 0)
                 # Allow for small floating point discrepancies (< $0.01)
                 if abs(float(sale.total_amount) - expected_total) > 0.01:
                     issues.append(SyncIntegrityIssue(

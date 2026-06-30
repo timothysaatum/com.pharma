@@ -425,7 +425,7 @@ class OrganizationOnboardingService:
             is_active=True,
             assigned_branches=[]  # Will be updated after branch creation
         )
-        admin.set_password(admin_data["password"])
+        admin.set_password(admin_data["password"], require_change=True)
         self.db.add(admin)
         await self.db.flush()
         
@@ -475,22 +475,10 @@ class OrganizationOnboardingService:
         created_branches = []
         
         for idx, branch_data in enumerate(branches_data):
-            # Generate branch code
-            branch_code = await self._generate_branch_code(organization_id)
-            
-            # Default operating hours if not provided
-            default_hours = {
-                "monday": {"open": "09:00", "close": "18:00"},
-                "tuesday": {"open": "09:00", "close": "18:00"},
-                "wednesday": {"open": "09:00", "close": "18:00"},
-                "thursday": {"open": "09:00", "close": "18:00"},
-                "friday": {"open": "09:00", "close": "18:00"},
-                "saturday": {"open": "09:00", "close": "14:00"},
-                "sunday": {"closed": True}
-            }
-            
-            # Now branch_data is a BranchCreate object, so model_dump() works
             data = branch_data.model_dump()
+            
+            # Use provided branch code or generate one
+            branch_code = data.get("code") or await self._generate_branch_code(organization_id)
             
             branch = Branch(
                 organization_id=organization_id,
@@ -501,7 +489,7 @@ class OrganizationOnboardingService:
                 address=data.get("address"),
                 manager_id=manager_id,
                 is_active=True,
-                operating_hours=data.get("operating_hours", default_hours),
+                operating_hours=data.get("operating_hours"),
             )
             
             self.db.add(branch)

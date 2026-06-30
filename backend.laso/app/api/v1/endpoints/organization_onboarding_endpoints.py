@@ -17,6 +17,7 @@ from app.core.deps import (
     get_client_ip,
     get_user_agent,
 )
+from app.models.system_md.sys_models import AuditLog
 from app.models.user.user_model import User
 from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.services.org.organization_onboarding_service import OrganizationOnboardingService
@@ -26,7 +27,8 @@ from app.schemas.organization_onboarding_schemas import (
     SubscriptionUpdateRequest,
     OrganizationActivationRequest,
     OrganizationStatsResponse,
-    OrganizationSettingsUpdate
+    OrganizationSettingsUpdate,
+    OrganizationSettingsResponse,
 )
 from app.schemas.organization import OrganizationResponse, OrganizationUpdate
 from app.utils.pagination import PaginatedResponse, Paginator, PaginationParams
@@ -104,10 +106,11 @@ async def onboard_organization(
         branches_data = [
             {
                 "name": branch.name,
+                "code": branch.code,
                 "phone": branch.phone,
                 "email": branch.email,
                 "address": branch.address,
-                "operating_hours": branch.operating_hours
+                "operating_hours": branch.operating_hours.model_dump() if branch.operating_hours else None
             }
             for branch in onboarding_data.branches
         ]
@@ -353,27 +356,21 @@ async def update_subscription(
     return organization
 
 
-@router.patch(
+@router.get(
     "/{organization_id}/settings",
-    response_model=OrganizationResponse,
-    summary="Update organization settings",
-    description="Update organization-specific settings. **Requires manage_organization permission**",
-    dependencies=[Depends(require_permission("manage_organization"))]
+    response_model=OrganizationSettingsResponse,
+    summary="Get organization settings",
+    description="Get typed organization settings including enable_loyalty_program and other preferences",
 )
-async def update_organization_settings(
+async def get_organization_settings(
     organization_id: uuid.UUID,
-    settings_data: OrganizationSettingsUpdate,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(get_current_user),
 ):
     """
-    Update organization settings
+    Get organization settings
 
-    - **currency**: Currency code
-    - **timezone**: Timezone
-    - **low_stock_threshold**: Low stock alert threshold
-    - **enable_loyalty_program**: Enable/disable loyalty program
-    - And more...
+    Users can only view their own organization's settings unless they are super_admin.
     """
     # Check authorization
     if not current_user.is_super_admin:
@@ -395,13 +392,85 @@ async def update_organization_settings(
             detail="Organization not found"
         )
 
-    # Update settings
-    current_settings = organization.settings or {}
+    settings = organization.settings or {}
+    return OrganizationSettingsResponse(**settings)
+
+
+@router.patch(
+    "/{organization_id}/settings",
+    response_model=OrganizationResponse,
+    summary="Update organization settings",
+    description="Update organization-specific settings. **Requires manage_organization permission**",
+    dependencies=[Depends(require_permission("manage_organization"))]
+)
+async def update_organization_settings(
+    organization_id: uuid.UUID,
+    settings_data: OrganizationSettingsUpdate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update organization settings
+
+    - **currency**: Currency code
+    - **timezone**: Timezone
+    - **low_stock_threshold**: Low stock alert threshold
+    - **enable_loyalty_program**: Enable/disable loyalty program
+    - And more...
+
+    Only fields provided in the request body are updated (partial merge).
+    An audit log entry is created recording the changed keys.
+    """
+    # Check authorization
+    if not current_user.is_super_admin:
+        if current_user.organization_id != organization_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Access denied to this organization"
+            )
+
+    # Get organization
+    result = await db.execute(
+        select(Organization).where(Organization.id == organization_id)
+    )
+    organization = result.scalar_one_or_none()
+
+    if not organization:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Organization not found"
+        )
+
+    # Update settings — copy first so SQLAlchemy detects the new dict reference
+    current_settings = dict(organization.settings or {})
+    old_settings = dict(current_settings)  # snapshot before mutation
     update_dict = settings_data.model_dump(exclude_unset=True)
 
-    # Merge new settings with existing
+    # Merge new settings with existing (partial update — only provided fields change)
     current_settings.update(update_dict)
     organization.settings = current_settings
+
+    # Audit log: record per-key old/new values
+    changes = {
+        key: {
+            "old": old_settings.get(key),
+            "new": current_settings[key],
+        }
+        for key in update_dict
+    }
+    from datetime import datetime, timezone
+    db.add(
+        AuditLog(
+            id=uuid.uuid4(),
+            organization_id=organization.id,
+            user_id=current_user.id,
+            action="organization_settings_updated",
+            entity_type="Organization",
+            entity_id=organization.id,
+            changes=changes,
+            created_at=datetime.now(timezone.utc),
+        )
+    )
 
     await db.commit()
     await db.refresh(organization)

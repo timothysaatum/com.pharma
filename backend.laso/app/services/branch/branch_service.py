@@ -139,13 +139,15 @@ class BranchService:
 
             # ── Auto-assign new branch to all super_admin and org-wide admin users ──────
             # Org-wide admins (no assigned_branches) must see every branch.
+            # assigned_branches is a custom ARRAY → JSON text column, so we compare
+            # against the serialized empty-array string instead of pg array_length.
             result = await db.execute(
                 select(User).where(
                     User.organization_id == branch_data.organization_id,
                     or_(
                         User.is_super_admin == True,
                         User.assigned_branches.is_(None),
-                        func.array_length(User.assigned_branches, 1).is_(None),
+                        User.assigned_branches == "[]",
                     ),
                     User.is_active == True,
                     User.is_deleted == False,

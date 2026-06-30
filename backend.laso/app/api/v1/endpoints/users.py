@@ -194,6 +194,12 @@ async def create_user(
 
     user = await AuthService.create_user(db, user_data)
 
+    # Eager-load roles to avoid greenlet error on lazy access after commit
+    result = await db.execute(
+        select(User).where(User.id == user.id).options(selectinload(User.roles))
+    )
+    user = result.scalar_one()
+
     # Assign roles if provided
     role_ids = user_data.role_ids
     if role_ids:
@@ -206,11 +212,12 @@ async def create_user(
         user.roles = list(result.scalars().all())
         await db.commit()
 
-    # Reload with roles
-    result = await db.execute(
-        select(User).where(User.id == user.id).options(selectinload(User.roles))
-    )
-    user = result.scalar_one()
+        # Reload with updated roles
+        result = await db.execute(
+            select(User).where(User.id == user.id).options(selectinload(User.roles))
+        )
+        user = result.scalar_one()
+
     return UserResponse.model_validate(user)
 
 
