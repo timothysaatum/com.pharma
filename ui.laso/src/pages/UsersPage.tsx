@@ -19,7 +19,7 @@ import { rolesApi } from "@/api/roles";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
-import type { UserResponse, BranchListItem, Role, AdminPasswordReset } from "@/types";
+import type { UserResponse, BranchListItem, Role } from "@/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Zod schemas
