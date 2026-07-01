@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
+import { createPortal } from "react-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -489,6 +490,8 @@ function ActionMenu({
 }) {
     const [open, setOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
+    const buttonRef = useRef<HTMLButtonElement>(null);
+    const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
     const isSelf = user.id === currentUser.id;
     const canManageUser = !user.is_super_admin && (
         currentUser.is_super_admin ||
@@ -500,66 +503,128 @@ function ActionMenu({
     );
     const isLocked = !!user.account_locked_until;
 
+    const positionMenu = useCallback((menuHeight = 220) => {
+        const trigger = buttonRef.current;
+        if (!trigger) return;
+
+        const rect = trigger.getBoundingClientRect();
+        const menuWidth = 192;
+        const viewportPadding = 8;
+        const gap = 4;
+        const spaceBelow = window.innerHeight - rect.bottom;
+        const openUpward =
+            spaceBelow < menuHeight + gap &&
+            rect.top > menuHeight + gap;
+
+        setMenuPosition({
+            top: openUpward
+                ? Math.max(viewportPadding, rect.top - menuHeight - gap)
+                : Math.max(
+                    viewportPadding,
+                    Math.min(
+                        rect.bottom + gap,
+                        window.innerHeight - menuHeight - viewportPadding,
+                    ),
+                ),
+            left: Math.min(
+                window.innerWidth - menuWidth - viewportPadding,
+                Math.max(viewportPadding, rect.right - menuWidth),
+            ),
+        });
+    }, []);
+
+    useLayoutEffect(() => {
+        if (open && menuRef.current) {
+            positionMenu(menuRef.current.offsetHeight);
+        }
+    }, [open, positionMenu]);
+
     useEffect(() => {
         if (!open) return;
         const handler = (e: MouseEvent) => {
-            if (menuRef.current && !menuRef.current.contains(e.target as Node)) setOpen(false);
+            const target = e.target as Node;
+            if (
+                !menuRef.current?.contains(target) &&
+                !buttonRef.current?.contains(target)
+            ) {
+                setOpen(false);
+            }
         };
+        const closeMenu = () => setOpen(false);
         document.addEventListener("mousedown", handler);
-        return () => document.removeEventListener("mousedown", handler);
+        window.addEventListener("resize", closeMenu);
+        window.addEventListener("scroll", closeMenu, true);
+        return () => {
+            document.removeEventListener("mousedown", handler);
+            window.removeEventListener("resize", closeMenu);
+            window.removeEventListener("scroll", closeMenu, true);
+        };
     }, [open]);
 
     return (
-        <div className="relative" ref={menuRef}>
+        <div className="relative">
             <button
-                onClick={() => setOpen((v) => !v)}
+                ref={buttonRef}
+                onClick={() => {
+                    if (!open) positionMenu();
+                    setOpen((value) => !value);
+                }}
+                aria-haspopup="menu"
+                aria-expanded={open}
+                aria-label={`Actions for ${user.full_name}`}
                 className="w-7 h-7 flex items-center justify-center rounded-lg text-ink-muted hover:text-ink hover:bg-slate-100 transition-colors"
             >
                 <MoreVertical className="w-4 h-4" />
             </button>
-            <AnimatePresence>
-                {open && (
-                    <motion.div
-                        initial={{ opacity: 0, scale: 0.95, y: -4 }}
-                        animate={{ opacity: 1, scale: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
-                        transition={{ duration: 0.12 }}
-                        className="absolute right-0 top-8 z-20 w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-1 overflow-hidden"
-                    >
-                        <MenuItem icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => { onEdit(); setOpen(false); }}>
-                            Edit details
-                        </MenuItem>
-                        {canManageUser && !isSelf && (
-                            <>
-                                <MenuItem
-                                    icon={user.is_active
-                                        ? <ShieldOff className="w-3.5 h-3.5" />
-                                        : <Shield className="w-3.5 h-3.5" />}
-                                    onClick={() => { onToggleActive(); setOpen(false); }}
-                                >
-                                    {user.is_active ? "Deactivate" : "Activate"}
-                                </MenuItem>
-                                {isLocked && (
-                                    <MenuItem icon={<KeyRound className="w-3.5 h-3.5" />} onClick={() => { onUnlock(); setOpen(false); }}>
-                                        Unlock account
+            {createPortal(
+                <AnimatePresence>
+                    {open && (
+                        <motion.div
+                            ref={menuRef}
+                            role="menu"
+                            initial={{ opacity: 0, scale: 0.95, y: -4 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            transition={{ duration: 0.12 }}
+                            style={menuPosition}
+                            className="fixed z-[100] w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-1 overflow-hidden"
+                        >
+                            <MenuItem icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => { onEdit(); setOpen(false); }}>
+                                Edit details
+                            </MenuItem>
+                            {canManageUser && !isSelf && (
+                                <>
+                                    <MenuItem
+                                        icon={user.is_active
+                                            ? <ShieldOff className="w-3.5 h-3.5" />
+                                            : <Shield className="w-3.5 h-3.5" />}
+                                        onClick={() => { onToggleActive(); setOpen(false); }}
+                                    >
+                                        {user.is_active ? "Deactivate" : "Activate"}
                                     </MenuItem>
-                                )}
-                                <MenuItem icon={<KeyRound className="w-3.5 h-3.5" />} onClick={() => { onResetPassword(); setOpen(false); }}>
-                                    Reset Password
-                                </MenuItem>
-                                <div className="h-px bg-slate-100 my-1" />
-                                <MenuItem
-                                    icon={<Trash2 className="w-3.5 h-3.5" />}
-                                    onClick={() => { onDelete(); setOpen(false); }}
-                                    danger
-                                >
-                                    Delete user
-                                </MenuItem>
-                            </>
-                        )}
-                    </motion.div>
-                )}
-            </AnimatePresence>
+                                    {isLocked && (
+                                        <MenuItem icon={<KeyRound className="w-3.5 h-3.5" />} onClick={() => { onUnlock(); setOpen(false); }}>
+                                            Unlock account
+                                        </MenuItem>
+                                    )}
+                                    <MenuItem icon={<KeyRound className="w-3.5 h-3.5" />} onClick={() => { onResetPassword(); setOpen(false); }}>
+                                        Reset Password
+                                    </MenuItem>
+                                    <div className="h-px bg-slate-100 my-1" />
+                                    <MenuItem
+                                        icon={<Trash2 className="w-3.5 h-3.5" />}
+                                        onClick={() => { onDelete(); setOpen(false); }}
+                                        danger
+                                    >
+                                        Delete user
+                                    </MenuItem>
+                                </>
+                            )}
+                        </motion.div>
+                    )}
+                </AnimatePresence>,
+                document.body,
+            )}
         </div>
     );
 }
@@ -577,6 +642,8 @@ function MenuItem({
 }) {
     return (
         <button
+            type="button"
+            role="menuitem"
             onClick={onClick}
             className={`w-full flex items-center gap-2.5 px-3 py-2 text-xs font-medium transition-colors ${danger
                 ? "text-red-500 hover:bg-red-50"
