@@ -17,6 +17,7 @@ from app.models.user.user_model import User
 from app.models.pricing.pricing_model import PriceContract, PriceContractItem
 from app.schemas.sales_schemas import SaleCreate, SaleItemCreate
 from app.services.sales.sales_service import SalesService
+from app.services.contracts.contract_verification_tokens import create_contract_verification_token
 
 
 @pytest.mark.asyncio
@@ -75,9 +76,20 @@ class TestPriceContractsIntegration:
         contract.copay_percentage = 20.00
         await db.commit()
 
+        # Generate a contract verification token (required for insurance contracts)
+        token, _ = create_contract_verification_token(
+            organization_id=org.id,
+            contract_id=contract.id,
+            branch_id=branch.id,
+            customer_id=customer.id,
+            drug_ids=[drugs[0].id],
+            user_id=user.id,
+        )
+
         sale_data = SaleCreate(
             branch_id=branch.id,
             price_contract_id=contract.id,
+            contract_verification_token=token,
             customer_id=customer.id,
             items=[
                 SaleItemCreate(

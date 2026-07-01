@@ -307,7 +307,7 @@ class ReportsService:
         stmt = (
             select(
                 Customer.id,
-                func.concat(Customer.first_name, " ", Customer.last_name).label("customer_name"),
+                (Customer.first_name + " " + Customer.last_name).label("customer_name"),
                 Customer.phone,
                 Customer.loyalty_tier,
                 Customer.loyalty_points,

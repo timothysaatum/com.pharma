@@ -147,7 +147,7 @@ async def list_customers(
         pattern="^(asc|desc)$",
         description="Sort direction",
     ),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -221,7 +221,7 @@ async def search_customers_quick(
         le=50,
         description="Maximum results to return (default: 10, max: 50)",
     ),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -256,7 +256,7 @@ async def search_customers_quick(
 )
 async def get_customer(
     customer_id: uuid.UUID,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("manage_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """

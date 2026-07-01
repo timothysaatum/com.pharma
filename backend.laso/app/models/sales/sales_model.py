@@ -7,6 +7,7 @@ from app.models.db_types import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime, date
+from decimal import Decimal
 import uuid
 
 from app.models.core.mixins import SoftDeleteMixin, SyncTrackingMixin, TimestampMixin
@@ -77,27 +78,27 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     
     # ==================== FINANCIAL DETAILS ====================
     
-    subtotal: Mapped[float] = mapped_column(
+    subtotal: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
         comment="Sum of all items at base prices (before contract discount and tax)"
     )
     
-    discount_amount: Mapped[float] = mapped_column(
+    discount_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         default=0,
         nullable=False,
         comment="Total discount from applied contract only"
     )
     
-    tax_amount: Mapped[float] = mapped_column(
+    tax_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         default=0,
         nullable=False,
         comment="Total tax charged"
     )
     
-    total_amount: Mapped[float] = mapped_column(
+    total_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
         index=True,
@@ -261,7 +262,7 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     )
     cancellation_reason: Mapped[Optional[str]] = mapped_column(Text)
     
-    refund_amount: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+    refund_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
     refunded_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     refunded_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
@@ -436,27 +437,27 @@ class SaleItem(Base, TimestampMixin):
         comment="Cumulative units refunded from this sale line"
     )
     
-    unit_price: Mapped[float] = mapped_column(
+    unit_price: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
         comment="Base unit price from drug catalog (before discount)"
     )
     
-    subtotal: Mapped[float] = mapped_column(
+    subtotal: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
         comment="quantity * unit_price (before discount)"
     )
     
     # Contract-based discount
-    discount_percentage: Mapped[float] = mapped_column(
+    discount_percentage: Mapped[Decimal] = mapped_column(
         Numeric(5, 2),
         default=0,
         nullable=False,
         comment="Discount percentage applied from sale's price contract"
     )
     
-    discount_amount: Mapped[float] = mapped_column(
+    discount_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         default=0,
         nullable=False,
@@ -464,14 +465,14 @@ class SaleItem(Base, TimestampMixin):
     )
     
     # Tax calculation
-    tax_rate: Mapped[float] = mapped_column(
+    tax_rate: Mapped[Decimal] = mapped_column(
         Numeric(5, 2),
         default=0,
         nullable=False,
         comment="Tax rate percentage from drug catalog"
     )
     
-    tax_amount: Mapped[float] = mapped_column(
+    tax_amount: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         default=0,
         nullable=False,
@@ -479,7 +480,7 @@ class SaleItem(Base, TimestampMixin):
     )
     
     # Final price
-    total_price: Mapped[float] = mapped_column(
+    total_price: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
         comment="Final: (subtotal - discount_amount + tax_amount)"
@@ -517,30 +518,27 @@ class SaleItem(Base, TimestampMixin):
             contract: Optional PriceContract to apply discount from
         """
         # Calculate subtotal
-        self.subtotal = float(self.quantity * self.unit_price)
+        self.subtotal = Decimal(str(self.quantity)) * self.unit_price
         
         # Apply contract discount if provided
         if contract:
-            self.discount_percentage = float(contract.discount_percentage)
-            self.discount_amount = round(
-                self.subtotal * (self.discount_percentage / 100), 
-                2
+            self.discount_percentage = Decimal(str(contract.discount_percentage))
+            self.discount_amount = (
+                self.subtotal * self.discount_percentage / Decimal('100')
             )
         else:
-            self.discount_percentage = 0
-            self.discount_amount = 0
+            self.discount_percentage = Decimal('0')
+            self.discount_amount = Decimal('0')
         
         # Calculate tax on discounted price
         discounted_price = self.subtotal - self.discount_amount
-        self.tax_amount = round(
-            discounted_price * (self.tax_rate / 100),
-            2
+        self.tax_amount = (
+            discounted_price * self.tax_rate / Decimal('100')
         )
         
         # Calculate final total
-        self.total_price = round(
-            self.subtotal - self.discount_amount + self.tax_amount,
-            2
+        self.total_price = (
+            self.subtotal - self.discount_amount + self.tax_amount
         )
     
     # ==================== TABLE CONSTRAINTS ====================
@@ -628,8 +626,8 @@ class SaleItemBatchAllocation(Base, TimestampMixin):
         comment="Cumulative units refunded from this batch allocation"
     )
 
-    unit_cost_at_sale: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
-    unit_price_at_sale: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
+    unit_cost_at_sale: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
+    unit_price_at_sale: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
 
     sale_item: Mapped["SaleItem"] = relationship(back_populates="batch_allocations")
 
@@ -695,7 +693,7 @@ class Supplier(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     )
     
     total_orders: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    total_value: Mapped[float] = mapped_column(Numeric(12, 2), default=0, nullable=False)
+    total_value: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0, nullable=False)
     
     # Status
     is_active: Mapped[bool] = mapped_column(

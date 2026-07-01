@@ -120,47 +120,6 @@ def _prescription_drug_limits(
     return limits
 
 
-def _validate_prescription_sale_items(
-    *,
-    sale_items: List[SaleItemCreate],
-    drugs: Dict[uuid.UUID, Drug],
-    prescription: Optional[Prescription],
-) -> None:
-    rx_limits = _prescription_drug_limits(prescription) if prescription else {}
-
-    for item in sale_items:
-        drug = drugs[item.drug_id]
-        if not drug.requires_prescription:
-            continue
-
-        if not prescription:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"'{drug.name}' requires a valid prescription. "
-                    "Provide a prescription_id or remove this item."
-                ),
-            )
-
-        if item.drug_id not in rx_limits:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Prescription {prescription.prescription_number} does not "
-                    f"include '{drug.name}'."
-                ),
-            )
-
-        allowed_quantity = rx_limits[item.drug_id]
-        if allowed_quantity is not None and item.quantity > allowed_quantity:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Requested quantity for '{drug.name}' exceeds the "
-                    f"prescribed quantity ({allowed_quantity})."
-                ),
-            )
-
 def _validate_stock_and_prescription_items(
     *,
     sale_items: List[SaleItemCreate],
@@ -1102,7 +1061,7 @@ class SalesService:
 
                 # Increment denormalized purchase counters
                 customer.total_orders = (customer.total_orders or 0) + 1
-                customer.total_value  = float(_r2(_d(customer.total_value or 0) + total_amount))
+                customer.total_value  = _r2(_d(customer.total_value or 0) + total_amount)
 
                 previous_tier         = customer.loyalty_tier
                 customer.loyalty_points += points_earned
@@ -1145,13 +1104,13 @@ class SalesService:
             # Always increment purchase counters even when loyalty is off
             elif customer:
                 customer.total_orders = (customer.total_orders or 0) + 1
-                customer.total_value  = float(_r2(_d(customer.total_value or 0) + total_amount))
+                customer.total_value  = _r2(_d(customer.total_value or 0) + total_amount)
                 customer.updated_at = datetime.now(timezone.utc)
                 customer.mark_as_pending_sync()
 
             contract.total_transactions = (contract.total_transactions or 0) + 1
-            contract.total_discount_given = float(
-                _r2(_d(contract.total_discount_given or 0) + total_discount)
+            contract.total_discount_given = _r2(
+                _d(contract.total_discount_given or 0) + total_discount
             )
             contract.last_used_at = datetime.now(timezone.utc)
             contract.updated_at = datetime.now(timezone.utc)
@@ -1363,11 +1322,11 @@ class SalesService:
                     for item in refund_data.items_to_refund
                 )
             )
-            if _r2(refund_amount) != expected_refund:
+            if abs(refund_amount - expected_refund) > Decimal('0.005'):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        f"Refund amount must equal the selected item value "
+                        f"Refund amount ({refund_amount}) must equal the selected item value "
                         f"({expected_refund})."
                     ),
                 )
@@ -1376,7 +1335,7 @@ class SalesService:
             is_full_refund = new_refund_total == sale_total
             sale.status        = "refunded" if is_full_refund else "partially_refunded"
             sale.payment_status = "refunded" if is_full_refund else "partial"
-            sale.refund_amount = float(new_refund_total)
+            sale.refund_amount = new_refund_total
             sale.refunded_at   = datetime.now(timezone.utc)
             sale.refunded_by   = user.id
             sale.refund_reason = refund_data.reason

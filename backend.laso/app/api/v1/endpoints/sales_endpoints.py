@@ -9,7 +9,7 @@ from typing import Optional
 from datetime import datetime, timezone
 import uuid
 
-from app.core.deps import get_current_user, get_organization_id, require_permission
+from app.core.deps import get_current_user, get_organization_id, require_any_permission, require_permission
 from app.db.dependencies import get_db
 from app.models.sales.sales_model import Sale
 from app.models.user.user_model import User
@@ -110,7 +110,7 @@ async def list_sales(
     price_contract_id: Optional[uuid.UUID] = Query(None, description="Filter by price contract"),
     contract_type: Optional[str] = Query(None, pattern="^(insurance|corporate|staff|senior_citizen|standard|wholesale|promotional)$"),
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("process_sales", "view_reports")),
     organization_id: uuid.UUID = Depends(get_organization_id)
 ):
     """
@@ -216,7 +216,7 @@ async def list_sales(
 async def get_sale(
     sale_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_any_permission("process_sales", "view_reports"))
 ):
     """
     Get sale by ID with full details
@@ -332,7 +332,10 @@ async def cancel_sale(
     
     result = await db.execute(
         select(Sale)
-        .where(Sale.id == sale_id)
+        .where(
+            Sale.id == sale_id,
+            Sale.organization_id == current_user.organization_id
+        )
         .with_for_update()
     )
     sale = result.scalar_one_or_none()
@@ -341,12 +344,6 @@ async def cancel_sale(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Sale not found"
-        )
-    
-    if sale.organization_id != current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This sale belongs to a different organization"
         )
     
     # Branch access check
@@ -389,6 +386,8 @@ async def cancel_sale(
             detail="Cancellation approver does not have required permissions"
         )
     
+    # restore_inventory from CancelSaleRequest is intentionally unused:
+    # draft sales have no inventory deduction to restore.
     sale.status = 'cancelled'
     sale.cancelled_at = datetime.now(timezone.utc)
     sale.cancelled_by = current_user.id
@@ -412,7 +411,7 @@ async def cancel_sale(
 async def get_receipt(
     sale_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_any_permission("process_sales", "view_reports"))
 ):
     """
     Get receipt data for a sale

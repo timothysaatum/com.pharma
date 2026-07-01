@@ -645,7 +645,7 @@ async def search_customer_prescriptions(
 async def get_prescription(
     prescription_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("manage_prescriptions", "process_sales")),
 ):
     """
     Get prescription details

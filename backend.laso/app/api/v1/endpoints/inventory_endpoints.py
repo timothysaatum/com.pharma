@@ -45,7 +45,7 @@ async def get_branch_inventory(
     search: Optional[str] = Query(None, description="Search drug name or SKU"),
     low_stock_only: bool = Query(False, description="Show only low stock items"),
     drug_type: Optional[str] = Query(None, description="Filter by drug type"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_inventory")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -373,7 +373,7 @@ async def get_drug_batches(
     include_expired: bool = Query(False, description="Include expired batches"),
     include_empty: bool = Query(False, description="Include empty batches"),
     expiring_within_days: Optional[int] = Query(None, ge=1, le=365, description="Show batches expiring within N days"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_inventory")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -509,7 +509,7 @@ async def consume_from_batch(
 @router.get("/low-stock", response_model=LowStockReport)
 async def get_low_stock_report(
     branch_id: Optional[uuid.UUID] = Query(None, description="Filter by branch"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_inventory")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -556,7 +556,7 @@ async def get_low_stock_report(
 async def get_expiring_batches_report(
     branch_id: uuid.UUID = Path(..., description="Filter by branch"),
     days_threshold: int = Query(90, ge=1, le=365, description="Days until expiry threshold"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_inventory")),
     db: AsyncSession = Depends(get_db)
 ):
     """

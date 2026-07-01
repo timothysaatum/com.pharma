@@ -10,7 +10,7 @@ import uuid
 
 from app.core.deps import (
     get_db, get_current_active_user,
-    require_permission, require_role
+    require_any_permission, require_permission, require_role
 )
 from app.models.user.user_model import User
 from app.schemas.branch_schemas import (
@@ -66,7 +66,7 @@ async def list_branches(
     manager_id: Optional[uuid.UUID] = Query(None, description="Filter by manager"),
     state: Optional[str] = Query(None, description="Filter by state"),
     city: Optional[str] = Query(None, description="Filter by city"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_any_permission("manage_branches", "process_sales")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -108,7 +108,7 @@ async def list_branches(
 
 @router.get("/my-branches", response_model=List[BranchListItem])
 async def get_my_branches(
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_any_permission("manage_branches", "process_sales")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -142,7 +142,7 @@ async def get_my_branches(
 @router.get("/{branch_id}", response_model=BranchResponse)
 async def get_branch(
     branch_id: uuid.UUID,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_any_permission("manage_branches", "process_sales")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -181,7 +181,7 @@ async def get_branch(
 @router.get("/code/{code}", response_model=BranchResponse)
 async def get_branch_by_code(
     code: str,
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_any_permission("manage_branches", "process_sales")),
     db: AsyncSession = Depends(get_db)
 ):
     """

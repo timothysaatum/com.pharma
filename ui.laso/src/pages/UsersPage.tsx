@@ -492,6 +492,7 @@ function ActionMenu({
     const isSelf = user.id === currentUser.id;
     const canManageUser = !user.is_super_admin && (
         currentUser.is_super_admin ||
+        currentUser.effective_permissions?.effective_permissions?.includes("manage_users") ||
         (currentUser.assigned_branches?.length ?? 0) === 0 || // Org admin
         user.assigned_branches.some((branchId) =>
             currentUser.assigned_branches.map(String).includes(String(branchId))
@@ -870,7 +871,7 @@ export default function UsersPage() {
 
     if (!currentUser) return null;
 
-    const canCreate = currentUser.is_super_admin || (currentUser.assigned_branches?.length ?? 0) === 0;
+    const canCreate = currentUser.is_super_admin || currentUser.effective_permissions?.effective_permissions?.includes("manage_users") || (currentUser.assigned_branches?.length ?? 0) === 0;
 
     return (
         <div className="flex-1 flex flex-col min-h-0 bg-slate-50">

@@ -108,7 +108,7 @@ async def list_drugs(
     manufacturer: Optional[str] = Query(None, description="Filter by manufacturer"),
     supplier: Optional[str] = Query(None, description="Filter by supplier"),
     branch_id: Optional[uuid.UUID] = Query(None, description="Return branch-effective prices for POS"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -195,7 +195,7 @@ async def create_drug_category(
 @router.get("/categories", response_model=List[DrugCategoryResponse])
 async def list_drug_categories(
     parent_id: Optional[uuid.UUID] = Query(None, description="Filter by parent category"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -217,7 +217,7 @@ async def list_drug_categories(
 
 @router.get("/categories/tree", response_model=List[DrugCategoryTree])
 async def get_category_tree(
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db),
     parent_id: Optional[uuid.UUID] = None
 ):
@@ -342,7 +342,7 @@ async def search_drugs_advanced(
     filters: DrugSearchFilters,
     pagination: PaginationParams = Depends(),
     branch_id: Optional[uuid.UUID] = Query(None, description="Return branch-effective prices for POS"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -383,7 +383,7 @@ async def search_drugs_advanced(
 async def get_drug(
     drug_id: uuid.UUID,
     branch_id: Optional[uuid.UUID] = Query(None, description="Return branch-effective price for POS"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db)
 ):
     """
@@ -423,7 +423,7 @@ async def get_drug(
 async def get_drug_with_inventory(
     drug_id: uuid.UUID,
     branch_id: Optional[uuid.UUID] = Query(None, description="Filter by specific branch"),
-    current_user: User = Depends(get_current_active_user),
+    current_user: User = Depends(require_permission("view_drugs")),
     db: AsyncSession = Depends(get_db)
 ):
     """

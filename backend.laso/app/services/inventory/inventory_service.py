@@ -2057,6 +2057,44 @@ class InventoryService:
         inventory.updated_at = datetime.now(timezone.utc)
         inventory.mark_as_pending_sync()
 
+        # ── Low-stock / out-of-stock alert ──
+        if quantity_change < 0:
+            drug_res = await db.execute(
+                select(Drug).where(Drug.id == drug_id)
+            )
+            item_drug = drug_res.scalar_one_or_none()
+            if item_drug and new_quantity <= item_drug.reorder_level:
+                from app.models.system_md.sys_models import SystemAlert
+                is_oos = new_quantity == 0
+                db.add(
+                    SystemAlert(
+                        id=uuid.uuid4(),
+                        organization_id=item_drug.organization_id,
+                        branch_id=branch_id,
+                        alert_type="out_of_stock" if is_oos else "low_stock",
+                        severity="critical" if is_oos else "high",
+                        title=(
+                            f"Out of Stock: {item_drug.name}"
+                            if is_oos
+                            else f"Low Stock: {item_drug.name}"
+                        ),
+                        message=(
+                            f"{item_drug.name} is now out of stock. "
+                            f"Suggested reorder: {item_drug.reorder_quantity} units."
+                            if is_oos
+                            else (
+                                f"{item_drug.name} is at {new_quantity} units "
+                                f"(reorder level: {item_drug.reorder_level}). "
+                                f"Suggested reorder: {item_drug.reorder_quantity} units."
+                            )
+                        ),
+                        drug_id=drug_id,
+                        is_resolved=False,
+                        created_at=datetime.now(timezone.utc),
+                        updated_at=datetime.now(timezone.utc),
+                    )
+                )
+
         # ── Update batches to maintain parity ──
         if quantity_change > 0:
             # For additions (return/correction), add to the earliest valid batch

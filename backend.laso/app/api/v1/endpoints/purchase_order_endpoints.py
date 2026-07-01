@@ -99,7 +99,7 @@ async def create_supplier(
 async def get_supplier(
     supplier_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_permission("manage_suppliers")),
 ) -> Supplier:
     """Fetch a supplier by ID."""
     supplier = await PurchaseOrderService.get_supplier(db, supplier_id)
@@ -174,6 +174,7 @@ async def delete_supplier(
     "/",
     response_model=PaginatedResponse[SupplierResponse],
     summary="List suppliers",
+    dependencies=[Depends(require_permission("manage_suppliers"))],
 )
 async def list_suppliers(
     pagination: PaginationParams = Depends(PaginationParams),
@@ -256,6 +257,7 @@ async def create_purchase_order(
     "/",
     response_model=PaginatedResponse[PurchaseOrderResponse],
     summary="List purchase orders",
+    dependencies=[Depends(require_any_permission("manage_inventory", "process_sales"))],
 )
 async def list_purchase_orders(
     pagination: PaginationParams = Depends(PaginationParams),
@@ -300,7 +302,7 @@ async def list_purchase_orders(
 async def get_purchase_order(
     po_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("manage_inventory", "process_sales")),
 ) -> PurchaseOrderWithDetails:
     """Fetch a purchase order with full item and supplier details."""
     po = await PurchaseOrderService.get_purchase_order(db, po_id, include_details=True)
@@ -559,7 +561,7 @@ async def remove_purchase_order_item(
 async def list_purchase_order_items(
     po_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("manage_inventory", "process_sales")),
 ) -> List[PurchaseOrderItemWithDetails]:
     """
     Return all line items for a purchase order, including resolved drug details.

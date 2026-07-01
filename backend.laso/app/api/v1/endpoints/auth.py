@@ -15,7 +15,7 @@ from app.schemas.user_schema import (
     RefreshTokenRequest, PasswordChange, ForcePasswordChange,
     MfaSetupResponse, MfaVerifyRequest, MfaDisableRequest,
 )
-from app.models.user.user_model import User
+from app.models.user.user_model import User, Role
 
 settings = get_settings()
 
@@ -37,7 +37,31 @@ async def register_user(
     - **Returns**: Created user information
     """
     user = await AuthService.create_user(db, user_data)
-    return user
+
+    # Re-fetch with roles eagerly loaded so UserResponse serialisation
+    # does not trigger a MissingGreenlet outside the async context.
+    result = await db.execute(
+        select(User).where(User.id == user.id).options(selectinload(User.roles))
+    )
+    user = result.scalar_one()
+
+    # Assign roles if provided
+    if user_data.role_ids:
+        result = await db.execute(
+            select(Role).where(
+                Role.organization_id == current_user.organization_id,
+                Role.id.in_(user_data.role_ids)
+            )
+        )
+        user.roles = list(result.scalars().all())
+        await db.commit()
+
+        result = await db.execute(
+            select(User).where(User.id == user.id).options(selectinload(User.roles))
+        )
+        user = result.scalar_one()
+
+    return UserResponse.model_validate(user)
 
 
 @router.post(

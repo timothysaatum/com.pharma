@@ -92,7 +92,7 @@ class AuthService:
         db.add(user)
         await db.commit()
         await db.refresh(user)
-        
+
         return user
     
     @staticmethod

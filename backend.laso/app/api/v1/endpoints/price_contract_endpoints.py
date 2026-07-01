@@ -112,7 +112,7 @@ async def list_contracts(
     
     # Dependencies
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("manage_pricing"))
 ):
     """
     Get list of price contracts with filtering and pagination.
@@ -269,7 +269,7 @@ async def verify_contract_eligibility(
 async def get_contract(
     contract_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("manage_pricing"))
 ):
     """
     Get single price contract by ID.
@@ -300,7 +300,7 @@ async def get_contract(
 async def get_contract_details(
     contract_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("manage_pricing"))
 ):
     """
     Get contract with comprehensive details including:
@@ -526,7 +526,7 @@ async def activate_contract(
 async def get_available_contracts(
     branch_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("manage_pricing"))
 ):
     """
     Get list of contracts available for selection at POS.
@@ -666,7 +666,7 @@ async def duplicate_contract(
 async def check_contract_code(
     contract_code: str,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission("manage_pricing"))
 ):
     """
     Check if contract code is available (not already used).
