@@ -38,6 +38,17 @@ describe('parseApiError', () => {
     );
   });
 
+  it('does not expose server exception details from 5xx responses', () => {
+    const err = makeAxiosError(500, {
+      detail: 'ProgrammingError: SELECT users.password_hash FROM users',
+    });
+    const result = parseApiError(err);
+
+    expect(result).toBe('Something went wrong on our side. Please try again.');
+    expect(result).not.toContain('ProgrammingError');
+    expect(result).not.toContain('SELECT');
+  });
+
   it('extracts errors array from validation error', () => {
     const err = makeAxiosError(422, {
       errors: [

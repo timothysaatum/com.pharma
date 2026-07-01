@@ -180,6 +180,12 @@ export function parseApiError(err: unknown): string {
             if (err.code === "ERR_CANCELED") return "";
             return err.message;
         }
+        // Never render server-side exception details. Besides being confusing
+        // to users, database and framework errors can disclose implementation
+        // details. The backend logs retain the specific cause for diagnosis.
+        if (err.response?.status && err.response.status >= 500) {
+            return "Something went wrong on our side. Please try again.";
+        }
         // Project validation responses use a stable top-level detail plus a
         // field-level errors array. Surface the actionable messages first.
         if (Array.isArray(data.errors)) {

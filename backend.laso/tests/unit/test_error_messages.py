@@ -76,17 +76,33 @@ class TestErrorMessageSpecificity:
         assert "purchase order" in exc.value.detail.lower()
         assert "different organization" in exc.value.detail.lower()
 
-    def test_onboarding_error_includes_cause(self):
-        """Onboarding error includes underlying exception message."""
-        from fastapi import status
+    @pytest.mark.asyncio
+    async def test_onboarding_error_does_not_expose_internal_cause(self):
+        """Unexpected onboarding errors are logged but sanitized for clients."""
+        from app.services.org.organization_onboarding_service import (
+            OrganizationOnboardingService,
+        )
+
+        db = AsyncMock()
+        service = OrganizationOnboardingService(db)
+        service._check_idempotency = AsyncMock(
+            side_effect=RuntimeError(
+                "ProgrammingError: SELECT organizations.secret FROM organizations"
+            )
+        )
 
         with pytest.raises(HTTPException) as exc:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to onboard organization: database connection timeout",
+            await service.create_organization_with_admin(
+                org_data={"name": "Test Pharmacy"},
+                admin_data={"password": "Secure-Admin-Password-2026!"},
+                idempotency_key="test-operation",
             )
+
         assert exc.value.status_code == 500
-        assert "database connection timeout" in exc.value.detail
+        assert "try again" in exc.value.detail.lower()
+        assert "ProgrammingError" not in exc.value.detail
+        assert "SELECT" not in exc.value.detail
+        db.rollback.assert_awaited_once()
 
 
 class TestErrorBoundaryConditions:

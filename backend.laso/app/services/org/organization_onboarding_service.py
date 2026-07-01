@@ -11,7 +11,6 @@ from typing import Optional, Dict, Any, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
-from sqlalchemy.exc import DataError, IntegrityError
 from fastapi import HTTPException, status
 from datetime import datetime, timedelta, timezone
 import uuid
@@ -214,15 +213,15 @@ class OrganizationOnboardingService:
         except HTTPException:
             await self.db.rollback()
             raise
-        except (IntegrityError, DataError):
-            await self.db.rollback()
-            raise
         except Exception as exc:
             await self.db.rollback()
             logger.exception("Organization onboarding failed")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Failed to onboard organization: {exc}",
+                detail=(
+                    "We couldn't create the organization right now. "
+                    "Please try again or contact support if the problem continues."
+                ),
             ) from exc
     
     async def _check_organization_exists(self, name: str) -> Optional[Organization]:

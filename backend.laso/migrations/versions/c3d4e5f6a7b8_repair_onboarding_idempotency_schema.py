@@ -1,8 +1,8 @@
-"""add_onboarding_idempotency_key_to_organizations
+"""repair onboarding idempotency schema drift
 
-Revision ID: 14a81694f0ed
-Revises: 7e8f9a0b1c2d
-Create Date: 2026-06-27 09:41:36.105570
+Revision ID: c3d4e5f6a7b8
+Revises: 9b2c3d4e5f6a
+Create Date: 2026-07-01 20:15:00.000000
 
 """
 from typing import Sequence, Union
@@ -11,20 +11,14 @@ from alembic import op
 import sqlalchemy as sa
 
 
-# revision identifiers, used by Alembic.
-revision: str = '14a81694f0ed'
-down_revision: Union[str, None] = '7e8f9a0b1c2d'
+revision: str = "c3d4e5f6a7b8"
+down_revision: Union[str, None] = "9b2c3d4e5f6a"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    """Add the field when the preceding migration did not already add it.
-
-    Some deployments ran an earlier form of 7e8f9a0b1c2d that did not contain
-    this field, while clean installs run its current form, which does. Keep
-    this historical migration compatible with both paths.
-    """
+    """Restore the column on databases stamped past its original migration."""
     bind = op.get_bind()
     inspector = sa.inspect(bind)
     columns = {
@@ -38,9 +32,15 @@ def upgrade() -> None:
                 "onboarding_idempotency_key",
                 sa.String(length=255),
                 nullable=True,
+                comment=(
+                    "Stable key used to prevent duplicate organization "
+                    "onboarding"
+                ),
             ),
         )
 
+    # Re-inspect because this migration may just have added the column.
+    inspector = sa.inspect(bind)
     indexes = inspector.get_indexes("organizations")
     has_unique_index = any(
         index.get("unique")
@@ -57,6 +57,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The preceding migration may own this column and index. Removing either
-    # here would break a database when downgrading to 7e8f9a0b1c2d.
+    # This repair may be restoring a column owned by an older migration.
+    # Dropping it here could destroy valid idempotency data.
     pass
