@@ -111,6 +111,46 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 if (activeBranchId) {
                     syncEngine.start(activeBranchId, user.organization_id);
                 }
+
+                // Cached identity keeps offline startup fast, but authority can
+                // change server-side (for example after an RBAC migration).
+                // Refresh it in the background so stale role data cannot keep
+                // the user in the wrong setup flow.
+                if (navigator.onLine) {
+                    void authApi.me()
+                        .then(async (freshUser) => {
+                            const current = get();
+                            if (!current.isAuthenticated || current.user?.id !== user.id) {
+                                return;
+                            }
+
+                            const freshSetupState = deriveSetupState(freshUser);
+                            let freshBranchId = current.activeBranchId;
+
+                            if (freshSetupState !== "ready") {
+                                freshBranchId = null;
+                                syncEngine.stop();
+                            } else if (
+                                !freshBranchId &&
+                                (freshUser.assigned_branches?.length ?? 0) === 1
+                            ) {
+                                freshBranchId = String(freshUser.assigned_branches[0]);
+                                await authStorage.setActiveBranch(freshBranchId);
+                                syncEngine.start(freshBranchId, freshUser.organization_id);
+                            }
+
+                            await authStorage.setUser(freshUser);
+                            set({
+                                user: freshUser,
+                                setupState: freshSetupState,
+                                activeBranchId: freshBranchId,
+                            });
+                        })
+                        .catch(() => {
+                            // Keep the cached identity when offline or when the
+                            // backend is temporarily unavailable.
+                        });
+                }
             }
         } catch {
             try { await authStorage.clearTokens(); } catch { /* store may not be ready */ }
