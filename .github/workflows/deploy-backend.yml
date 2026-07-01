@@ -1,10 +1,9 @@
 name: Deploy Backend
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'backend.laso/**'   # Only triggers when backend code changes
+  # Automatic deployment is temporarily suspended while server-side GitHub
+  # authentication is repaired. Keep a manual trigger for controlled deploys.
+  workflow_dispatch:
 
 jobs:
   deploy:
