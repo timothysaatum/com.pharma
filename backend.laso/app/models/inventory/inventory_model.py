@@ -286,7 +286,12 @@ class Drug(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         # Composite indexes for common queries
         Index('idx_drug_org_active', 'organization_id', 'is_active'),
         Index('idx_drug_org_type', 'organization_id', 'drug_type'),
-        # GIN index created via raw SQL in main.py (PG 15+ requires explicit gin_trgm_ops)
+        Index(
+            'idx_drug_search',
+            'search_vector',
+            postgresql_using='gin',
+            postgresql_ops={'search_vector': 'gin_trgm_ops'},
+        ),
     )
     
     @validates('unit_price', 'cost_price')
