@@ -1,14 +1,16 @@
 {
   "name": "pharmacare",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.8",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version:check": "node scripts/check-version.mjs",
+    "version:set": "node scripts/set-version.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

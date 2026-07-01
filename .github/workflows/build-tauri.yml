@@ -4,12 +4,36 @@ on:
   push:
     tags:
       - 'v*'   # Triggers when you push a version tag e.g. v1.0.0
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to rebuild (for example v1.2.8)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
 
 jobs:
+  validate-version:
+    runs-on: ubuntu-22.04
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Checkout release
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Validate tag and application version
+        working-directory: ui.laso
+        run: node scripts/check-version.mjs "$RELEASE_TAG"
+
   build:
+    needs: validate-version
     env:
       VITE_API_URL: ${{ vars.VITE_API_URL || 'https://api.atlas.drive4health.org' }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
     strategy:
       fail-fast: false
       matrix:
@@ -26,8 +50,10 @@ jobs:
     runs-on: ${{ matrix.platform }}
 
     steps:
-      - name: Checkout code
+      - name: Checkout release
         uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -86,9 +112,9 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
         with:
           projectPath: ui.laso
-          tagName: ${{ github.ref_name }}
+          tagName: ${{ env.RELEASE_TAG }}
           releaseName: 'Laso v__VERSION__'
-          releaseBody: 'Download the installer for your platform below.'
+          generateReleaseNotes: true
           releaseDraft: true   # Creates a draft release — you review before publishing
           prerelease: false
           args: ${{ matrix.args }}

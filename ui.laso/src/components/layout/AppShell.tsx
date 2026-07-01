@@ -6,6 +6,7 @@ import {
     Receipt, Settings, UserCog, Cog, ChevronDown, Check, ShieldAlert,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
+import packageMetadata from "../../../package.json";
 import { branchApi } from "@/api/branches";
 import type { BranchListItem } from "@/types";
 import { organizationApi } from "@/api/organization";
@@ -74,7 +75,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     useEffect(() => {
         const fetchVersion = async () => {
             if (!IS_TAURI) {
-                setVersion("1.0.0");
+                setVersion(packageMetadata.version);
                 return;
             }
             try {
@@ -83,7 +84,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 setVersion(v);
             } catch (err) {
                 console.error("Failed to fetch app version:", err);
-                setVersion("1.0.0");
+                setVersion(packageMetadata.version);
             }
         };
         fetchVersion();
