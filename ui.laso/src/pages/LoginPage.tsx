@@ -31,8 +31,27 @@ export default function LoginPage() {
 
     const { form, isSubmitting, error, isLocked, requiresMfa, submit } = useLogin({
         onSuccess: async () => {
-            const { user: loggedInUser } = useAuthStore.getState();
+            const {
+                user: loggedInUser,
+                setupState,
+            } = useAuthStore.getState();
             if (!loggedInUser) return;
+
+            // Setup requirements take precedence over branch selection. In
+            // particular, a platform super admin must onboard an organization
+            // and should never be prompted to select or create a branch.
+            if (setupState === "needs_pw_change") {
+                navigate("/change-password", { replace: true });
+                return;
+            }
+            if (setupState === "needs_onboard") {
+                navigate("/onboarding", { replace: true });
+                return;
+            }
+            if (setupState === "needs_branch") {
+                navigate("/setup", { replace: true });
+                return;
+            }
 
             setFetchingBranches(true);
             try {
