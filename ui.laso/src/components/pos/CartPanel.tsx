@@ -280,6 +280,7 @@ interface CartPanelProps {
     notes: string;
     totals: CartTotals;
     validationErrors: CartValidationError[];
+    checkoutError: string | null;
     isSubmitting: boolean;
     taxInclusive?: boolean;
 
@@ -319,7 +320,7 @@ export function CartPanel({
     items, contract, contracts, contractsLoading,
     customerName, customerId, paymentMethod, amountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
-    insuranceVerified, notes, totals, validationErrors,
+    insuranceVerified, notes, totals, validationErrors, checkoutError,
     isSubmitting, taxInclusive = false, onSetQuantity, onRemoveItem, onSetPrescriptionVerified,
     onSetContract, onSetCustomerId, onSetCustomerName, onSetPaymentMethod, onSetAmountPaid,
     onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
@@ -365,7 +366,9 @@ export function CartPanel({
     }, [totals.total, paymentMethod, items.length, onSetAmountPaid]);
 
     const hasRxItems = items.some((i) => i.requiresPrescription);
-    const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance" || contract?.type === "corporate";
+    const isInsurance = paymentMethod === "insurance" || contract?.type === "insurance";
+    const requiresRegisteredCustomer =
+        isInsurance || contract?.type === "corporate" || contract?.type === "wholesale";
     const fieldError = (field: string) =>
         validationErrors.find((e) => e.field === field)?.message;
     const hasErrors = validationErrors.length > 0 && items.length > 0;
@@ -579,7 +582,7 @@ export function CartPanel({
                                     customerId={customerId}
                                     onSetCustomerName={onSetCustomerName}
                                     onSetCustomerId={onSetCustomerId}
-                                    requireRegistered={isInsurance}
+                                    requireRegistered={requiresRegisteredCustomer}
                                     fieldError={fieldError("customer")}
                                 />
                             </div>
@@ -599,11 +602,11 @@ export function CartPanel({
                                 </div>
                             )}
 
-                            {/* Insurance / Corporate */}
+                            {/* Insurance */}
                             {isInsurance && (
                                 <div className="space-y-2.5 p-3.5 rounded-xl bg-blue-50 border border-blue-100">
                                     <p className="text-[11px] font-bold text-blue-700 uppercase tracking-widest">
-                                        {contract?.type === "corporate" ? "Corporate Details" : "Insurance Details"}
+                                        Insurance Details
                                     </p>
                                     {/* Patient copay display */}
                                     <div className="flex items-center justify-between text-sm font-semibold text-blue-700">
@@ -643,7 +646,7 @@ export function CartPanel({
                                     <input
                                         value={insuranceClaimNumber}
                                         onChange={(e) => onSetInsuranceClaimNumber(e.target.value)}
-                                        placeholder={contract?.type === "corporate" ? "Employee ID / Reference *" : "Claim number *"}
+                                        placeholder="Claim number *"
                                         className={`${inputCls} border-blue-200 bg-white ${fieldError("insurance_claim") ? "border-red-300" : ""}`}
                                     />
                                     <input
@@ -660,7 +663,7 @@ export function CartPanel({
                                             className="w-4 h-4 rounded accent-blue-600"
                                         />
                                         <span className="text-sm font-semibold text-blue-700">
-                                            {contract?.type === "corporate" ? "Employee verified ✓" : "Card verified ✓"}
+                                            Card verified ✓
                                         </span>
                                     </label>
                                     {fieldError("insurance") && <p className="text-xs text-red-500">{fieldError("insurance")}</p>}
@@ -776,6 +779,15 @@ export function CartPanel({
                                     {e.message}
                                 </p>
                             ))}
+                        </div>
+                    )}
+                    {checkoutError && (
+                        <div
+                            role="alert"
+                            className="rounded-xl bg-red-50 border border-red-200 px-3 py-2.5 mb-3 text-xs text-red-700 flex items-start gap-1.5"
+                        >
+                            <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
+                            {checkoutError}
                         </div>
                     )}
 

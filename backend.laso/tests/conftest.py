@@ -1,6 +1,9 @@
 import os
 
-os.environ["DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+os.environ["DATABASE_URL"] = os.environ.get(
+    "TEST_DATABASE_URL",
+    "sqlite+aiosqlite:///:memory:",
+)
 os.environ["SECRET_KEY"] = "test-secret-key-that-is-long-enough-for-jwt-signing"
 os.environ["ENCRYPTION_KEY"] = "MDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA="
 os.environ["ENVIRONMENT"] = "test"
@@ -23,9 +26,31 @@ DATABASE_URL_TEST = os.environ["DATABASE_URL"]
 
 @pytest_asyncio.fixture(scope="function")
 async def db():
-    engine = create_async_engine(DATABASE_URL_TEST)
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+    engine_kwargs = {}
+    if DATABASE_URL_TEST.startswith("postgresql"):
+        engine_kwargs["connect_args"] = {
+            "server_settings": {
+                "search_path": os.environ.get("TEST_DATABASE_SCHEMA", "public")
+            }
+        }
+
+    engine = create_async_engine(DATABASE_URL_TEST, **engine_kwargs)
+    postgres_only_indexes = []
+    if DATABASE_URL_TEST.startswith("postgresql"):
+        for table in Base.metadata.tables.values():
+            for index in tuple(table.indexes):
+                if index.name == "idx_drug_search":
+                    table.indexes.remove(index)
+                    postgres_only_indexes.append((table, index))
+
+    try:
+        async with engine.begin() as conn:
+            if DATABASE_URL_TEST.startswith("postgresql"):
+                await conn.run_sync(Base.metadata.drop_all)
+            await conn.run_sync(Base.metadata.create_all)
+    finally:
+        for table, index in postgres_only_indexes:
+            table.indexes.add(index)
 
     async_session_factory = sessionmaker(
         engine, class_=AsyncSession, expire_on_commit=False
@@ -33,6 +58,9 @@ async def db():
     async with async_session_factory() as session:
         yield session
 
+    if DATABASE_URL_TEST.startswith("postgresql"):
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.drop_all)
     await engine.dispose()
 
 @pytest_asyncio.fixture(scope="function")
@@ -93,6 +121,7 @@ async def setup_test_data(db: AsyncSession):
     )
 
     db.add(org)
+    await db.flush()
     db.add(branch)
     db.add(user)
     db.add_all(drugs)

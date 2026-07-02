@@ -15,6 +15,7 @@ from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.customer.customer_model import Customer
 from app.models.user.user_model import User
 from app.models.pricing.pricing_model import PriceContract, PriceContractItem
+from app.models.precriptions.prescription_model import Prescription
 from app.schemas.sales_schemas import SaleCreate, SaleItemCreate
 from app.services.sales.sales_service import SalesService
 from app.services.contracts.contract_verification_tokens import create_contract_verification_token
@@ -137,6 +138,73 @@ class TestPriceContractsIntegration:
         # Price=100*2=200, Discount=15% of 200 = 30 -> Total=170
         assert sale.total_amount == Decimal("170.00")
         assert sale.total_discount_amount == Decimal("30.00")
+        assert sale.amount_paid == Decimal("170.00")
+        assert sale.change_amount == Decimal("0.00")
+        assert sale.patient_copay_amount is None
+        assert sale.insurance_covered_amount is None
+
+    @pytest.mark.parametrize(
+        "contract_type,payment_method",
+        [
+            ("corporate", "credit"),
+            ("staff", "cash"),
+            ("senior_citizen", "cash"),
+            ("wholesale", "cash"),
+            ("promotional", "cash"),
+        ],
+    )
+    async def test_non_standard_contract_with_prescription(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+        contract_type,
+        payment_method,
+    ):
+        """Every non-standard contract can process a valid Rx transaction."""
+        org, branch, user, drugs, customer = setup_test_data
+        drugs[0].requires_prescription = True
+        contract = await self.setup_sale_data(
+            db,
+            setup_test_data,
+            contract_type,
+            Decimal("10.00"),
+        )
+        prescription = Prescription(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            branch_id=branch.id,
+            customer_id=customer.id,
+            prescription_number=f"RX-{contract_type.upper()}",
+            prescriber_name="Dr. Contract Test",
+            prescriber_license="TEST-RX-001",
+            issue_date=date.today(),
+            expiry_date=date.today() + timedelta(days=30),
+            medications=[{"drug_id": str(drugs[0].id), "quantity": 5}],
+            refills_allowed=2,
+            refills_remaining=2,
+            status="active",
+        )
+        db.add(prescription)
+        await db.commit()
+
+        response = await SalesService.process_sale(
+            db,
+            SaleCreate(
+                branch_id=branch.id,
+                price_contract_id=contract.id,
+                customer_id=customer.id,
+                prescription_id=prescription.id,
+                items=[SaleItemCreate(drug_id=drugs[0].id, quantity=1)],
+                payment_method=payment_method,
+            ),
+            user,
+        )
+
+        assert response.success
+        assert response.sale.total_amount == Decimal("90.00")
+        assert response.sale.amount_paid == Decimal("90.00")
+        await db.refresh(prescription)
+        assert prescription.refills_remaining == 1
 
     async def test_staff_contract_processing(self, db: AsyncSession, setup_test_data):
         """Test staff contract processing."""

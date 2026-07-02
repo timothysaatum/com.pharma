@@ -119,7 +119,7 @@ export default function POSPage() {
 
     // ── Checkout ───────────────────────────────────────────────────────────────
     const [isSubmitting, setIsSubmitting] = useState(false);
-    const [, setCheckoutError] = useState<string | null>(null);
+    const [checkoutError, setCheckoutError] = useState<string | null>(null);
     const [successResult, setSuccessResult] = useState<ProcessSaleResponse | null>(null);
 
     const handleCheckout = useCallback(async () => {
@@ -458,6 +458,7 @@ export default function POSPage() {
                         notes={cart.state.notes}
                         totals={cart.totals}
                         validationErrors={cart.validationErrors}
+                        checkoutError={checkoutError}
                         isSubmitting={isSubmitting}
                         taxInclusive={taxInclusive}
                         onSetQuantity={cart.setQuantity}

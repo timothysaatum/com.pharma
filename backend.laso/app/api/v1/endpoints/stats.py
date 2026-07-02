@@ -1,6 +1,6 @@
 
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 import uuid
 from fastapi import Depends, HTTPException, Query, status, APIRouter
@@ -72,8 +72,8 @@ async def get_branch_with_stats(
     response_model=dict
 )
 async def get_sales_summary(
-    start_date: datetime = Query(...),
-    end_date: datetime = Query(...),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
     branch_id: Optional[uuid.UUID] = Query(None),
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id)
@@ -82,8 +82,8 @@ async def get_sales_summary(
     Get sales summary report for a date range
     
     **Query Parameters:**
-    - start_date: Start of reporting period (required)
-    - end_date: End of reporting period (required)
+    - start_date: Start of reporting period (defaults to start of the selected/current day)
+    - end_date: End of reporting period (defaults to end of the selected/current day)
     - branch_id: Filter by branch (optional)
     
     **Returns:**
@@ -98,6 +98,15 @@ async def get_sales_summary(
     from sqlalchemy import select, func, and_
     from app.models.sales.sales_model import Sale
     
+    # Older POS clients request the branch summary without date parameters.
+    # Treat a missing range as the current UTC day; if only one boundary is
+    # provided, use that boundary's calendar day for the other side.
+    reference = start_date or end_date or datetime.now(timezone.utc)
+    if start_date is None:
+        start_date = reference.replace(hour=0, minute=0, second=0, microsecond=0)
+    if end_date is None:
+        end_date = reference.replace(hour=23, minute=59, second=59, microsecond=999999)
+
     # Validate date range
     if end_date < start_date:
         raise HTTPException(

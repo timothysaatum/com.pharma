@@ -180,21 +180,31 @@ function cartReducer(state: CartState, action: CartAction): CartState {
             };
 
         case "SET_CONTRACT":
+            const isInsurance = action.contract?.type === "insurance";
+            const isCorporate = action.contract?.type === "corporate";
             return {
                 ...state,
                 contract: action.contract,
-                paymentMethod: (action.contract?.type === "insurance" || action.contract?.type === "corporate")
+                paymentMethod: isInsurance
                     ? "insurance"
-                    : state.paymentMethod === "insurance"
+                    : isCorporate
+                        ? "credit"
+                    : (
+                        state.paymentMethod === "insurance"
+                        || (
+                            state.contract?.type === "corporate"
+                            && state.paymentMethod === "credit"
+                        )
+                    )
                         ? "cash"
                         : state.paymentMethod,
-                amountPaid: (action.contract?.type === "insurance" || action.contract?.type === "corporate") ? 0 : state.amountPaid,
-                splitPayment: (action.contract?.type === "insurance" || action.contract?.type === "corporate") ? {} : state.splitPayment,
-                // Reset insurance state when switching away from insurance/corporate contract
-                insuranceVerified: (action.contract?.type === "insurance" || action.contract?.type === "corporate")
+                amountPaid: isInsurance || isCorporate ? 0 : state.amountPaid,
+                splitPayment: isInsurance || isCorporate ? {} : state.splitPayment,
+                // Reset insurance state when switching away from insurance.
+                insuranceVerified: isInsurance
                     ? state.insuranceVerified
                     : false,
-                insuranceClaimNumber: (action.contract?.type === "insurance" || action.contract?.type === "corporate")
+                insuranceClaimNumber: isInsurance
                     ? state.insuranceClaimNumber
                     : "",
             };
@@ -286,7 +296,7 @@ function computeTotals(state: CartState, taxInclusive = false): CartTotals {
     // Calculate patient copay based on selected contract (estimate)
     let patientCopay = 0;
     const contract = state.contract;
-    if (contract && (contract.type === "insurance" || contract.type === "corporate")) {
+    if (contract?.type === "insurance") {
         if (contract.copay_amount !== null && contract.copay_amount !== undefined) {
             patientCopay = Number(contract.copay_amount) || 0;
         } else if (contract.copay_percentage !== null && contract.copay_percentage !== undefined) {
@@ -296,7 +306,7 @@ function computeTotals(state: CartState, taxInclusive = false): CartTotals {
         if (patientCopay > total) patientCopay = total;
     }
 
-    const amountDue = (state.contract?.type === "insurance" || state.contract?.type === "corporate") ? patientCopay : total;
+    const amountDue = state.contract?.type === "insurance" ? patientCopay : total;
     const change = Math.max(0, parseFloat((state.amountPaid - amountDue).toFixed(2)));
     const itemCount = state.items.reduce((sum, i) => sum + i.quantity, 0);
 
@@ -348,11 +358,9 @@ function validateCart(
         });
     }
 
-    // Insurance/Corporate specific validations (verification and claim number)
-    const isInsuranceOrCorp = state.contract?.type === "insurance" || state.contract?.type === "corporate";
-    if (isInsuranceOrCorp || state.paymentMethod === "insurance") {
-        const isCorp = state.contract?.type === "corporate";
-
+    // Insurance-specific validations (verification and claim number)
+    const isInsurance = state.contract?.type === "insurance";
+    if (isInsurance || state.paymentMethod === "insurance") {
         if (!state.customerId && state.paymentMethod === "insurance") {
              errors.push({
                 field: "customer",
@@ -363,13 +371,13 @@ function validateCart(
         if (!state.insuranceVerified) {
             errors.push({
                 field: "insurance",
-                message: isCorp ? "Employee must be verified before processing" : "Insurance must be verified before processing",
+                message: "Insurance must be verified before processing",
             });
         }
         if (!state.insuranceClaimNumber.trim()) {
             errors.push({
                 field: "insurance_claim",
-                message: isCorp ? "Employee ID / Reference is required" : "Insurance claim number is required",
+                message: "Insurance claim number is required",
             });
         }
         // Ensure copay is being collected (client-side enforcement)
