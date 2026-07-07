@@ -1070,6 +1070,7 @@ export interface Prescription extends TimestampFields, SyncFields {
     status: PrescriptionStatus;
     verified_by: string | null;
     verified_at: string | null;
+    created_offline_at?: string | null;
 }
 
 // // ============================================================

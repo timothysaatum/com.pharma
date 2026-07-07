@@ -48,6 +48,30 @@ describe("local sync queue scoping", () => {
     ).toBe(true);
   });
 
+  it("treats queued prescriptions as branch-owned sale dependencies", () => {
+    const scope = { organizationId: "org-new", branchId: "branch-new" };
+
+    expect(
+      isQueuedRecordInScope(
+        queuedRecord("prescriptions", {
+          organization_id: "org-new",
+          branch_id: "branch-old",
+        }),
+        scope
+      )
+    ).toBe(false);
+
+    expect(
+      isQueuedRecordInScope(
+        queuedRecord("prescriptions", {
+          organization_id: "org-old",
+          branch_id: "branch-new",
+        }),
+        scope
+      )
+    ).toBe(true);
+  });
+
   it("keeps organization-owned queue records limited to the active organization", () => {
     const scope = { organizationId: "org-new", branchId: "branch-new" };
 

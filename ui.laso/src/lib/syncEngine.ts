@@ -26,6 +26,7 @@ import {
     getPendingQueue, getPendingConflicts, getPendingFailures, resetPendingFailures,
     dequeue, markQueueError, markQueueConflict,
     getPendingCount, getNextRetryAt, requeueConflictForLocalWin,
+    SYNC_QUEUE_CHANGED_EVENT,
 } from "@/lib/localDb";
 import { isOfflineError } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
@@ -86,6 +87,9 @@ class SyncEngine {
     // create a new reference each time and can never be removed.
     private readonly _onOnline = () => this.onOnline();
     private readonly _onOffline = () => this.onOffline();
+    private readonly _onQueueChanged = () => {
+        void this.loadPersistedQueueState();
+    };
 
     // Pending conflict records that need manual resolution
     pendingConflicts: QueuedConflict[] = [];
@@ -121,6 +125,7 @@ class SyncEngine {
 
         window.addEventListener("online", this._onOnline);
         window.addEventListener("offline", this._onOffline);
+        window.addEventListener(SYNC_QUEUE_CHANGED_EVENT, this._onQueueChanged);
 
         void this.loadPersistedQueueState();
 
@@ -149,6 +154,7 @@ class SyncEngine {
         }
         window.removeEventListener("online", this._onOnline);
         window.removeEventListener("offline", this._onOffline);
+        window.removeEventListener(SYNC_QUEUE_CHANGED_EVENT, this._onQueueChanged);
         this.branchId = null;
         this.organizationId = null;
         this.pendingConflicts = [];
@@ -567,13 +573,14 @@ class SyncEngine {
 
         if (response.prescriptions.length) {
             await upsertMany("prescriptions", response.prescriptions, [
-                "id", "organization_id", "prescription_number", "customer_id",
-                "prescriber_name", "prescriber_license", "prescriber_phone",
-                "prescriber_address", "issue_date", "expiry_date", "medications",
-                "diagnosis", "notes", "special_instructions", "refills_allowed",
-                "refills_remaining", "last_refill_date", "status", "verified_by",
-                "verified_at", "sync_status", "sync_version", "synced_at",
-                "updated_at", "created_at",
+                "id", "organization_id", "branch_id", "prescription_number",
+                "customer_id", "prescriber_name", "prescriber_license",
+                "prescriber_phone", "prescriber_address", "issue_date",
+                "expiry_date", "medications", "diagnosis", "notes",
+                "special_instructions", "refills_allowed", "refills_remaining",
+                "last_refill_date", "status", "verified_by", "verified_at",
+                "sync_status", "sync_version", "synced_at", "updated_at",
+                "created_at",
             ]);
         }
 

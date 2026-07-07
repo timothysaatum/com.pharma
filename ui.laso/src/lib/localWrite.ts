@@ -116,6 +116,7 @@ const PRESCRIPTION_COLUMNS = new Set([
     "status",
     "verified_by",
     "verified_at",
+    "created_offline_at",
     "sync_status",
     "sync_version",
     "synced_at",
@@ -468,6 +469,7 @@ export const writeLocal = {
                 {
                     ...prescription,
                     medications: JSON.stringify(prescription.medications ?? []),
+                    created_offline_at: prescription.created_offline_at ?? null,
                     sync_status: "synced",
                     synced_at: prescription.synced_at ?? new Date().toISOString(),
                 } as Record<string, unknown>,
@@ -505,6 +507,7 @@ export const writeLocal = {
                 medications: JSON.stringify(prescription.medications ?? []),
                 refills_remaining: prescription.refills_remaining ?? prescription.refills_allowed ?? 0,
                 status: prescription.status ?? "active",
+                created_offline_at: prescription.created_offline_at ?? now,
                 updated_at: prescription.updated_at ?? now,
                 created_at: prescription.created_at ?? now,
             } as Record<string, unknown>,

@@ -67,8 +67,40 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function OriginBadge({ rx }: { rx: PrescriptionRow }) {
+  if (!rx.created_offline_at) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full border bg-slate-50 text-slate-600 border-slate-100">
+        Online
+      </span>
+    );
+  }
+
+  if (rx.sync_status === "pending") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full border bg-amber-50 text-amber-700 border-amber-100">
+        Offline pending
+      </span>
+    );
+  }
+
+  if (rx.sync_status === "conflict") {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full border bg-red-50 text-red-700 border-red-100">
+        Offline conflict
+      </span>
+    );
+  }
+
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-bold rounded-full border bg-emerald-50 text-emerald-700 border-emerald-100">
+      Offline synced
+    </span>
+  );
+}
+
 export default function PrescriptionsPage() {
-  const { activeBranchId } = useAuthStore();
+  const { activeBranchId, user } = useAuthStore();
   const [items, setItems] = useState<PrescriptionRow[]>([]);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState<"" | PrescriptionStatus>("active");
@@ -457,7 +489,7 @@ export default function PrescriptionsPage() {
           ...data,
           id,
           branch_id: activeBranchId ?? "",
-          organization_id: "",
+          organization_id: user?.organization_id ?? "",
           prescriber_address: null,
           diagnosis: null,
           special_instructions: null,
@@ -466,6 +498,7 @@ export default function PrescriptionsPage() {
           status: "active",
           verified_by: null,
           verified_at: null,
+          created_offline_at: now,
           synced_at: null,
           created_at: now,
           updated_at: now,
@@ -607,7 +640,12 @@ export default function PrescriptionsPage() {
                 <td className="px-6 py-4 font-semibold text-slate-700">
                   {rx.refills_remaining} / {rx.refills_allowed}
                 </td>
-                <td className="px-6 py-4"><StatusBadge status={rx.status} /></td>
+                <td className="px-6 py-4">
+                  <div className="flex flex-col items-start gap-1">
+                    <StatusBadge status={rx.status} />
+                    <OriginBadge rx={rx} />
+                  </div>
+                </td>
                 <td className="px-6 py-4 text-right">
                   <div className="flex items-center justify-end gap-2">
                     <button

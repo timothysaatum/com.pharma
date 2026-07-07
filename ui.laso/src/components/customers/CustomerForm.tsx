@@ -17,7 +17,7 @@ import { customersApi, type CustomerCreate, type CustomerUpdate, type CustomerWi
 import { contractsApi, type ContractResponse } from "@/api/contracts";
 import { InsuranceProviderSelector } from "@/components/contracts/InsuranceProviderSelector";
 import { useAuthStore } from "@/stores/authStore";
-import { isOfflineError, parseApiError } from "@/api/client";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { toast } from "sonner";
 import { writeLocal } from "@/lib/localWrite";
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -305,6 +305,12 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
         try {
             let saved: CustomerWithDetails;
             if (isEdit) {
+                if (!navigator.onLine || !isBackendReachable()) {
+                    saved = buildLocalCustomer(customer.id);
+                    await writeLocal.customer(saved, "update");
+                    onSuccess(saved);
+                    return;
+                }
                 const payload: CustomerUpdate = {
                     first_name: clean(values.first_name),
                     last_name: clean(values.last_name),
@@ -320,6 +326,12 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
                 };
                 saved = await customersApi.update(customer.id, payload);
             } else {
+                if (!navigator.onLine || !isBackendReachable()) {
+                    saved = buildLocalCustomer(crypto.randomUUID());
+                    await writeLocal.customer(saved, "create");
+                    onSuccess(saved);
+                    return;
+                }
                 const payload: CustomerCreate = {
                     organization_id: user.organization_id,
                     customer_type: values.customer_type,

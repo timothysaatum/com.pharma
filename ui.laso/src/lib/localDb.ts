@@ -80,6 +80,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 11) await migrate_v11(db);
       if (user_version < 12) await migrate_v12(db);
       if (user_version < 13) await migrate_v13(db);
+      if (user_version < 14) await migrate_v14(db);
       await ensureBranchInventorySchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
@@ -471,6 +472,7 @@ async function migrate_v10(db: Database): Promise<void> {
       status                TEXT NOT NULL DEFAULT 'active',
       verified_by           TEXT,
       verified_at           TEXT,
+      created_offline_at    TEXT,
       sync_status           TEXT NOT NULL DEFAULT 'synced',
       sync_version          INTEGER NOT NULL DEFAULT 1,
       synced_at             TEXT,
@@ -534,6 +536,15 @@ async function migrate_v13(db: Database): Promise<void> {
     // column already exists
   }
   await db.execute("PRAGMA user_version = 13");
+}
+
+async function migrate_v14(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE prescriptions ADD COLUMN created_offline_at TEXT");
+  } catch {
+    // column already exists
+  }
+  await db.execute("PRAGMA user_version = 14");
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
@@ -615,15 +626,22 @@ const BRANCH_SCOPED_QUEUE_TABLES = new Set([
   "stock_adjustments",
   "sales",
   "purchase_orders",
+  "prescriptions",
 ]);
 
 const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
   "customers",
-  "prescriptions",
   "drugs",
   "drug_categories",
   "price_contracts",
 ]);
+
+export const SYNC_QUEUE_CHANGED_EVENT = "laso:sync-queue-changed";
+
+function notifySyncQueueChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(SYNC_QUEUE_CHANGED_EVENT));
+}
 
 function hasQueueScope(scope?: QueueScope): boolean {
   return Boolean(scope?.organizationId || scope?.branchId);
@@ -711,6 +729,7 @@ export async function enqueue(
       new Date().toISOString(),
     ]
   );
+  notifySyncQueueChanged();
 }
 
 export async function getPendingQueue(
@@ -748,6 +767,7 @@ export async function dequeue(tableName: string, recordId: string): Promise<void
     "DELETE FROM sync_queue WHERE table_name = $1 AND record_id = $2",
     [tableName, recordId]
   );
+  notifySyncQueueChanged();
 }
 
 export async function markQueueError(
@@ -773,6 +793,7 @@ export async function markQueueError(
      WHERE table_name = $4 AND record_id = $5`,
     [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
   );
+  notifySyncQueueChanged();
   const rows = await db.select<{ attempts: number }[]>(
     "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
     [tableName, recordId]
@@ -796,6 +817,7 @@ export async function markQueueConflict(
      WHERE table_name = $4 AND record_id = $5`,
     [new Date().toISOString(), error, JSON.stringify(conflict), tableName, recordId]
   );
+  notifySyncQueueChanged();
 }
 
 export async function clearQueueConflict(
@@ -811,6 +833,7 @@ export async function clearQueueConflict(
      WHERE table_name = $1 AND record_id = $2`,
     [tableName, recordId]
   );
+  notifySyncQueueChanged();
 }
 
 export async function getPendingConflicts(scope?: QueueScope): Promise<QueuedConflict[]> {
@@ -891,6 +914,7 @@ export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
         [row.id]
       );
     }
+    notifySyncQueueChanged();
     return;
   }
 
@@ -903,6 +927,7 @@ export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
      WHERE conflict_json IS NULL
        AND error IS NOT NULL`
   );
+  notifySyncQueueChanged();
 }
 
 export async function getNextRetryAt(
@@ -956,6 +981,7 @@ export async function requeueConflictForLocalWin(
       conflict.record_id,
     ]
   );
+  notifySyncQueueChanged();
 
   // Manual conflicts currently apply only to locally editable cached tables.
   // Keep the row version aligned with the queue so the next pull cannot
