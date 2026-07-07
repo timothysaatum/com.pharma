@@ -124,6 +124,29 @@ const PRESCRIPTION_COLUMNS = new Set([
     "created_at",
 ]);
 
+const CUSTOMER_COLUMNS = new Set([
+    "id",
+    "organization_id",
+    "customer_type",
+    "first_name",
+    "last_name",
+    "phone",
+    "email",
+    "date_of_birth",
+    "loyalty_points",
+    "loyalty_tier",
+    "insurance_provider_id",
+    "insurance_member_id",
+    "preferred_contract_id",
+    "is_active",
+    "is_deleted",
+    "sync_status",
+    "sync_version",
+    "synced_at",
+    "updated_at",
+    "created_at",
+]);
+
 function pickColumns(
     record: Record<string, unknown>,
     columns: Set<string>
@@ -547,10 +570,15 @@ export const writeLocal = {
             ...customerData
         } = customer;
 
-        await upsertAndEnqueue("customers", {
-            ...customerData,
-            updated_at: now,
-            created_at: customerData.created_at ?? now,
-        }, operation);
+        const payload = pickColumns(
+            {
+                ...customerData,
+                updated_at: now,
+                created_at: customerData.created_at ?? now,
+            } as Record<string, unknown>,
+            CUSTOMER_COLUMNS
+        );
+
+        await upsertAndEnqueue("customers", payload, operation);
     },
 };
