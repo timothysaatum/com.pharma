@@ -491,7 +491,7 @@ function ActionMenu({
     const [open, setOpen] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
     const buttonRef = useRef<HTMLButtonElement>(null);
-    const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
+    const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0, maxHeight: 220 });
     const isSelf = user.id === currentUser.id;
     const canManageUser = !user.is_super_admin && (
         currentUser.is_super_admin ||
@@ -512,24 +512,28 @@ function ActionMenu({
         const viewportPadding = 8;
         const gap = 4;
         const spaceBelow = window.innerHeight - rect.bottom;
+        const availableAbove = Math.max(0, rect.top - viewportPadding - gap);
+        const availableBelow = Math.max(0, window.innerHeight - rect.bottom - viewportPadding - gap);
+        const maxHeight = Math.max(120, Math.min(menuHeight, Math.max(availableAbove, availableBelow)));
         const openUpward =
-            spaceBelow < menuHeight + gap &&
-            rect.top > menuHeight + gap;
+            spaceBelow < Math.min(menuHeight, maxHeight) + gap &&
+            availableAbove > availableBelow;
 
         setMenuPosition({
             top: openUpward
-                ? Math.max(viewportPadding, rect.top - menuHeight - gap)
+                ? Math.max(viewportPadding, rect.top - maxHeight - gap)
                 : Math.max(
                     viewportPadding,
                     Math.min(
                         rect.bottom + gap,
-                        window.innerHeight - menuHeight - viewportPadding,
+                        window.innerHeight - maxHeight - viewportPadding,
                     ),
                 ),
             left: Math.min(
                 window.innerWidth - menuWidth - viewportPadding,
                 Math.max(viewportPadding, rect.right - menuWidth),
             ),
+            maxHeight,
         });
     }, []);
 
@@ -587,7 +591,7 @@ function ActionMenu({
                             exit={{ opacity: 0, scale: 0.95 }}
                             transition={{ duration: 0.12 }}
                             style={menuPosition}
-                            className="fixed z-[100] w-48 bg-white rounded-xl shadow-xl border border-slate-100 py-1 overflow-hidden"
+                            className="fixed z-[100] w-48 overflow-y-auto overscroll-contain bg-white rounded-xl shadow-xl border border-slate-100 py-1"
                         >
                             <MenuItem icon={<Edit3 className="w-3.5 h-3.5" />} onClick={() => { onEdit(); setOpen(false); }}>
                                 Edit details

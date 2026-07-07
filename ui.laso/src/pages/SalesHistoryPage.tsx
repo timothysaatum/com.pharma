@@ -504,7 +504,7 @@ function SaleDetailPanel({
                 )}
 
                 {sale && view === "detail" && (
-                    <div className="p-5 space-y-5 pb-40">
+                    <div className="p-5 space-y-5">
                         {/* Status + meta */}
                         <div className="flex items-start justify-between">
                             <div className="space-y-1">
@@ -686,7 +686,7 @@ function SaleDetailPanel({
                 )}
 
                 {sale && view === "detail" && (
-                    <div className="fixed bottom-0 w-[420px] bg-white border-t border-slate-200 p-5 space-y-4 shadow-[0_-8px_30px_rgb(0,0,0,0.04)] z-20">
+                    <div className="bg-white border-t border-slate-200 p-5 space-y-4 shadow-[0_-8px_30px_rgb(0,0,0,0.04)]">
                         {/* Totals breakdown */}
                         <div className="rounded-xl bg-slate-50 p-4 space-y-2">
                             <div className="flex justify-between text-xs text-slate-500">

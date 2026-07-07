@@ -96,15 +96,57 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const dropdownRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        if (user?.assigned_branches && user.assigned_branches.length > 0) {
-            branchApi.list({ is_active: true, page_size: 100 })
-                .then(r => {
-                    const assigned = r.items.filter(b => user.assigned_branches?.includes(b.id));
-                    setBranches(assigned);
-                })
-                .catch(() => setBranches([]));
+        if (!user) {
+            setBranches([]);
+            return;
         }
-    }, [user]);
+
+        let cancelled = false;
+        const assignedIds = new Set((user.assigned_branches ?? []).map(String));
+        const canSeeAllBranches =
+            user.is_super_admin ||
+            assignedIds.size === 0 ||
+            user.roles?.some((role) =>
+                role.permissions.includes("*") ||
+                role.permissions.includes("manage_branches") ||
+                role.permissions.includes("manage_organization")
+            );
+
+        void (async () => {
+            const cached = await offlineCache.getBranches();
+            if (!cancelled && cached?.length) {
+                setBranches(
+                    canSeeAllBranches
+                        ? cached
+                        : cached.filter((branch) => assignedIds.has(String(branch.id)))
+                );
+            }
+
+            try {
+                const fresh = canSeeAllBranches
+                    ? (await branchApi.list({ is_active: true, page_size: 100 })).items
+                    : await branchApi.listMine();
+
+                if (cancelled) return;
+                const visible = canSeeAllBranches
+                    ? fresh
+                    : fresh.filter((branch) => assignedIds.has(String(branch.id)));
+
+                setBranches(visible);
+                await offlineCache.setBranches(visible);
+
+                if (!activeBranchId && visible.length === 1) {
+                    setActiveBranch(String(visible[0].id));
+                }
+            } catch {
+                if (!cancelled && !cached?.length) {
+                    setBranches([]);
+                }
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [activeBranchId, setActiveBranch, user]);
 
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
@@ -118,7 +160,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
     useEffect(() => {
         if (!activeBranchId) {
-            setBranchName(undefined);
+            setBranchName(null);
             return;
         }
         let cancelled = false;
