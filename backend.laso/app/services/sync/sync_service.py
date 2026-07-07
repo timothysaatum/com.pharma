@@ -62,6 +62,7 @@ from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
+from app.models.pharmacy.pharmacy_model import Branch
 from app.models.pricing.pricing_model import InsuranceProvider, PriceContract
 from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import (
@@ -376,12 +377,19 @@ async def _validate_and_fix_sale_fks(
     prescription_id = _uuid_or_none(safe_data.get("prescription_id"))
     safe_data["prescription_id"] = prescription_id
     if prescription_id is not None:
-        # Prescriptions might not be synced; treat as optional
-        # In production, you may want to validate this more strictly
-        logger.debug(
-            "Sync: prescription_id=%s for sale %s (not validated)",
-            prescription_id, record_id,
+        result = await db.execute(
+            select(Prescription.id).where(
+                Prescription.id == prescription_id,
+                Prescription.organization_id == organization_id,
+            )
         )
+        if result.scalar_one_or_none() is None:
+            logger.warning(
+                "Sync: Missing prescription %s for sale %s in org %s; clearing prescription_id",
+                prescription_id, record_id, organization_id,
+            )
+            safe_data["prescription_id"] = None
+            fixes.append(f"prescription_id={prescription_id}")
 
     # pharmacist_id (nullable, ondelete='RESTRICT')
     pharmacist_id = _uuid_or_none(safe_data.get("pharmacist_id"))
@@ -696,6 +704,42 @@ class SyncService:
         conflicts: List[PushConflict] = []
         failed: List[PushResult]     = []
 
+        branch_exists = await db.scalar(
+            select(Branch.id).where(
+                Branch.id == request.branch_id,
+                Branch.organization_id == organization_id,
+                Branch.is_active == True,
+                Branch.is_deleted == False,
+            )
+        )
+        if not branch_exists:
+            error = "Sync branch does not belong to this organization or is inactive."
+            logger.warning(
+                "Rejected push for invalid branch=%s org=%s records=%d",
+                request.branch_id,
+                organization_id,
+                len(request.records),
+            )
+            return PushResponse(
+                accepted=[],
+                conflicts=[],
+                failed=[
+                    PushResult(
+                        local_id=record.local_id,
+                        table_name=record.table_name,
+                        success=False,
+                        error=error,
+                    )
+                    for record in request.records
+                ],
+                total_received=len(request.records),
+                total_accepted=0,
+                total_conflicts=0,
+                total_failed=len(request.records),
+                sync_timestamp=now,
+                next_pull_timestamp=now,
+            )
+
         table_priority = {
             "price_contracts": 0,
             "customers": 1,
@@ -932,6 +976,21 @@ class SyncService:
                 table_name="sales",
                 server_id=str(existing.id),
                 success=True,
+            ), None
+
+        other_branch_sale = await db.scalar(
+            select(Sale.id).where(
+                Sale.organization_id == organization_id,
+                Sale.id == record.local_id,
+                Sale.branch_id != branch_id,
+            )
+        )
+        if other_branch_sale:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error="Sale does not belong to this sync branch.",
             ), None
 
         sale_number_collision = (await db.execute(
@@ -1479,6 +1538,20 @@ class SyncService:
                 success=True,
             ), None
 
+        other_branch_batch = await db.scalar(
+            select(DrugBatch.id).where(
+                DrugBatch.id == record.local_id,
+                DrugBatch.branch_id != branch_id,
+            )
+        )
+        if other_branch_batch:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="drug_batches",
+                success=False,
+                error="Drug batch does not belong to this sync branch.",
+            ), None
+
         safe = _whitelist(record.data, _BATCH_WRITABLE)
         _parse_datetime_fields(safe)
         safe["id"] = record.local_id
@@ -1704,6 +1777,20 @@ class SyncService:
                 success=True,
             ), None
 
+        other_branch_adjustment = await db.scalar(
+            select(StockAdjustment.id).where(
+                StockAdjustment.id == record.local_id,
+                StockAdjustment.branch_id != branch_id,
+            )
+        )
+        if other_branch_adjustment:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="stock_adjustments",
+                success=False,
+                error="Stock adjustment does not belong to this sync branch.",
+            ), None
+
         if record.operation != "create":
             return PushResult(
                 local_id=record.local_id,
@@ -1852,6 +1939,19 @@ class SyncService:
             safe.pop("id", None)
             safe.pop("drug_id", None)
         else:
+            other_branch_inventory = await db.scalar(
+                select(BranchInventory.id).where(
+                    BranchInventory.id == record.local_id,
+                    BranchInventory.branch_id != branch_id,
+                )
+            )
+            if other_branch_inventory:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="branch_inventory",
+                    success=False,
+                    error="Inventory record does not belong to this sync branch.",
+                ), None
             safe = _whitelist(record.data, _INVENTORY_WRITABLE)
             _parse_datetime_fields(safe)
             safe["id"] = record.local_id
@@ -1937,6 +2037,21 @@ class SyncService:
                 return PushResult(
                     local_id=record.local_id, table_name="purchase_orders", success=False
                 ), conflict
+        else:
+            other_branch_po = await db.scalar(
+                select(PurchaseOrder.id).where(
+                    PurchaseOrder.id == record.local_id,
+                    PurchaseOrder.organization_id == organization_id,
+                    PurchaseOrder.branch_id != branch_id,
+                )
+            )
+            if other_branch_po:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="purchase_orders",
+                    success=False,
+                    error="Purchase order does not belong to this sync branch.",
+                ), None
         safe = _whitelist(record.data, _PO_WRITABLE)
         _parse_datetime_fields(safe)
 
@@ -2238,6 +2353,14 @@ class SyncService:
             )
         )).scalar_one_or_none()
 
+        if existing and existing.branch_id != branch_id:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="prescriptions",
+                success=False,
+                error="Prescription does not belong to this sync branch.",
+            ), None
+
         if existing and record.operation == "create":
             return PushResult(
                 local_id=record.local_id,
@@ -2301,15 +2424,17 @@ class SyncService:
                 error=f"Customer {customer_id} not found in organization.",
             ), None
 
-        # Validate branch_id — must match the pushing branch
-        safe_branch_id = safe.get("branch_id")
-        if safe_branch_id and str(safe_branch_id) != str(branch_id):
+        # Validate branch_id if an older/newer client sends it, then stamp the
+        # authenticated sync branch so ownership never depends on client data.
+        safe_branch_id = _uuid_or_none(safe.get("branch_id"))
+        if safe_branch_id and safe_branch_id != branch_id:
             return PushResult(
                 local_id=record.local_id,
                 table_name="prescriptions",
                 success=False,
                 error=f"Branch mismatch: prescription belongs to {safe_branch_id}, pushing from {branch_id}.",
             ), None
+        safe["branch_id"] = str(branch_id)
 
         # Ensure medications is correctly handled (it's JSONB in DB)
         if "medications" in safe and isinstance(safe["medications"], str):
