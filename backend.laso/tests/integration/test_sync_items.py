@@ -585,6 +585,70 @@ class TestSyncSaleItems:
         assert sale is not None
         assert sale.prescription_id is None
 
+    async def test_push_sale_rejects_rx_drug_without_valid_prescription(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Rx-only sales must not sync if their prescription is missing."""
+        org, branch, user, drugs, customer = setup_test_data
+        drugs[0].requires_prescription = True
+        await db.commit()
+
+        sale_id = uuid.uuid4()
+        missing_prescription_id = uuid.uuid4()
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(sale_id),
+                        table_name="sales",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "id": str(sale_id),
+                            "sale_number": "SYNC-MISSING-RX-REJECT-001",
+                            "customer_id": str(customer.id),
+                            "subtotal": 50.0,
+                            "discount_amount": 0.0,
+                            "tax_amount": 0.0,
+                            "total_amount": 50.0,
+                            "payment_method": "cash",
+                            "cashier_id": str(user.id),
+                            "prescription_id": str(missing_prescription_id),
+                            "status": "completed",
+                            "items": [
+                                {
+                                    "id": str(uuid.uuid4()),
+                                    "drug_id": str(drugs[0].id),
+                                    "drug_name": drugs[0].name,
+                                    "quantity": 1,
+                                    "unit_price": 50.0,
+                                    "subtotal": 50.0,
+                                    "total_price": 50.0,
+                                    "requires_prescription": True,
+                                }
+                            ],
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 0
+        assert response.total_failed == 1
+        assert "prescription-required" in (response.failed[0].error or "")
+        assert response.failed[0].fk_fixes == [
+            f"prescription_id={missing_prescription_id}"
+        ]
+        assert await db.get(Sale, sale_id) is None
+
     async def test_push_batch_sorts_customer_prescription_before_sale(
         self,
         db: AsyncSession,
@@ -697,6 +761,651 @@ class TestSyncSaleItems:
         assert prescription is not None
         assert prescription.refills_remaining == 0
         assert prescription.status == "filled"
+
+    async def test_offline_customer_prescription_sale_refund_flow_is_idempotent(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Real offline flow: customer, Rx, sale, refund, retry."""
+        org, branch, user, drugs, _customer = setup_test_data
+        drug = drugs[0]
+        drug.requires_prescription = True
+
+        inventory = BranchInventory(
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=2,
+            reserved_quantity=0,
+        )
+        batch = DrugBatch(
+            branch_id=branch.id,
+            drug_id=drug.id,
+            batch_number="OFFLINE-RX-REFUND-BATCH",
+            quantity=2,
+            remaining_quantity=2,
+            expiry_date=date.today() + timedelta(days=365),
+            cost_price=Decimal("20.00"),
+            selling_price=Decimal("50.00"),
+        )
+        db.add_all([inventory, batch])
+        await db.commit()
+
+        customer_id = uuid.uuid4()
+        prescription_id = uuid.uuid4()
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        refund_id = uuid.uuid4()
+
+        customer_record = PushRecord(
+            operation_id=uuid.uuid4(),
+            local_id=str(customer_id),
+            table_name="customers",
+            operation="create",
+            sync_version=1,
+            created_offline_at=datetime.now(timezone.utc),
+            data={
+                "id": str(customer_id),
+                "customer_type": "registered",
+                "first_name": "Offline",
+                "last_name": "Refund",
+                "phone": "0504444444",
+                "loyalty_tier": "bronze",
+                "loyalty_points": 0,
+            },
+        )
+        prescription_record = PushRecord(
+            operation_id=uuid.uuid4(),
+            local_id=str(prescription_id),
+            table_name="prescriptions",
+            operation="create",
+            sync_version=1,
+            created_offline_at=datetime.now(timezone.utc),
+            data={
+                "id": str(prescription_id),
+                "prescription_number": "RX-OFFLINE-REFUND-001",
+                "customer_id": str(customer_id),
+                "prescriber_name": "Dr Offline",
+                "prescriber_license": "MD-OFF-REF-1",
+                "issue_date": str(date.today()),
+                "expiry_date": str(date.today() + timedelta(days=30)),
+                "medications": [
+                    {
+                        "drug_id": str(drug.id),
+                        "drug_name": drug.name,
+                        "quantity": 1,
+                    }
+                ],
+                "refills_allowed": 1,
+                "refills_remaining": 1,
+                "status": "active",
+            },
+        )
+        sale_record = PushRecord(
+            operation_id=uuid.uuid4(),
+            local_id=str(sale_id),
+            table_name="sales",
+            operation="create",
+            sync_version=1,
+            created_offline_at=datetime.now(timezone.utc),
+            data={
+                "id": str(sale_id),
+                "sale_number": "OFFLINE-RX-REFUND-SALE",
+                "customer_id": str(customer_id),
+                "subtotal": 50.0,
+                "discount_amount": 0.0,
+                "tax_amount": 0.0,
+                "total_amount": 50.0,
+                "payment_method": "cash",
+                "cashier_id": str(user.id),
+                "prescription_id": str(prescription_id),
+                "status": "completed",
+                "sync_protocol_version": 2,
+                "items": [
+                    {
+                        "id": str(sale_item_id),
+                        "drug_id": str(drug.id),
+                        "drug_name": drug.name,
+                        "quantity": 1,
+                        "unit_price": 50.0,
+                        "subtotal": 50.0,
+                        "discount_amount": 0.0,
+                        "tax_amount": 0.0,
+                        "total_price": 50.0,
+                        "requires_prescription": True,
+                        "prescription_verified": True,
+                    }
+                ],
+            },
+        )
+        refund_record = PushRecord(
+            operation_id=uuid.uuid4(),
+            local_id=str(refund_id),
+            table_name="sale_refunds",
+            operation="create",
+            sync_version=1,
+            created_offline_at=datetime.now(timezone.utc),
+            data={
+                "sale_id": str(sale_id),
+                "reason": "Offline customer returned prescribed item",
+                "items_to_refund": [
+                    {
+                        "sale_item_id": str(sale_item_id),
+                        "quantity": 1,
+                        "reason": "Returned unopened",
+                        "restock": True,
+                    }
+                ],
+                "refund_amount": 50.0,
+                "refund_method": "cash",
+                "manager_approval_user_id": str(user.id),
+            },
+        )
+
+        request = PushRequest(
+            branch_id=branch.id,
+            records=[
+                refund_record,
+                sale_record,
+                prescription_record,
+                customer_record,
+            ],
+        )
+
+        first_response = await SyncService.push(db, request, org.id, user.id)
+        retry_response = await SyncService.push(db, request, org.id, user.id)
+
+        assert first_response.total_accepted == 4
+        assert first_response.total_failed == 0
+        assert retry_response.total_accepted == 4
+        assert retry_response.total_failed == 0
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        prescription = await db.get(Prescription, prescription_id)
+        await db.refresh(inventory)
+        await db.refresh(batch)
+
+        assert sale is not None
+        assert sale.status == "refunded"
+        assert sale.payment_status == "refunded"
+        assert sale.refund_amount == Decimal("50.00")
+        assert sale.refund_reference == f"OFFLINE-{refund_id}"
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 1
+        assert prescription is not None
+        assert prescription.refills_remaining == 1
+        assert prescription.status == "active"
+        assert inventory.quantity == 2
+        assert batch.remaining_quantity == 2
+
+        allocations = (await db.execute(
+            select(SaleItemBatchAllocation).where(
+                SaleItemBatchAllocation.sale_item_id == sale_item_id
+            )
+        )).scalars().all()
+        movements = (await db.execute(
+            select(InventoryMovement).where(
+                InventoryMovement.source_id == sale_id
+            )
+        )).scalars().all()
+        adjustments = (await db.execute(
+            select(StockAdjustment).where(
+                StockAdjustment.branch_id == branch.id,
+                StockAdjustment.drug_id == drug.id,
+            )
+        )).scalars().all()
+
+        assert len(allocations) == 1
+        assert allocations[0].refunded_quantity == 1
+        assert sorted(movement.quantity_change for movement in movements) == [-1, 1]
+        assert sorted(adj.quantity_change for adj in adjustments) == [-1, 1]
+
+    async def test_offline_refund_rejects_sale_from_other_branch(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Refund commands cannot cross branch ownership boundaries."""
+        org, branch, user, drugs, customer = setup_test_data
+        other_branch = Branch(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            name="Refund Other Branch",
+            code="REF002",
+            is_active=True,
+            is_deleted=False,
+        )
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        db.add(other_branch)
+        db.add(Sale(
+            id=sale_id,
+            organization_id=org.id,
+            branch_id=other_branch.id,
+            sale_number="OTHER-BRANCH-REFUND-SALE",
+            customer_id=customer.id,
+            subtotal=Decimal("50.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("50.00"),
+            payment_method="cash",
+            payment_status="completed",
+            cashier_id=user.id,
+            status="completed",
+        ))
+        db.add(SaleItem(
+            id=sale_item_id,
+            sale_id=sale_id,
+            drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
+            quantity=1,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("50.00"),
+            total_price=Decimal("50.00"),
+        ))
+        await db.commit()
+
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(uuid.uuid4()),
+                        table_name="sale_refunds",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "sale_id": str(sale_id),
+                            "reason": "Offline refund wrong branch",
+                            "items_to_refund": [
+                                {
+                                    "sale_item_id": str(sale_item_id),
+                                    "quantity": 1,
+                                    "reason": "Wrong branch",
+                                    "restock": True,
+                                }
+                            ],
+                            "refund_amount": 50.0,
+                            "refund_method": "cash",
+                            "manager_approval_user_id": str(user.id),
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 0
+        assert response.total_failed == 1
+        assert "sync branch" in (response.failed[0].error or "")
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        assert sale is not None
+        assert sale.status == "completed"
+        assert sale.refund_amount is None
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 0
+
+    async def test_offline_refund_rejects_amount_mismatch_without_mutation(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Refund amount must match selected items exactly."""
+        org, branch, user, drugs, customer = setup_test_data
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        db.add(Sale(
+            id=sale_id,
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number="REFUND-AMOUNT-MISMATCH-SALE",
+            customer_id=customer.id,
+            subtotal=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("100.00"),
+            payment_method="cash",
+            payment_status="completed",
+            cashier_id=user.id,
+            status="completed",
+        ))
+        db.add(SaleItem(
+            id=sale_item_id,
+            sale_id=sale_id,
+            drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
+            quantity=2,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("100.00"),
+            total_price=Decimal("100.00"),
+        ))
+        await db.commit()
+
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(uuid.uuid4()),
+                        table_name="sale_refunds",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "sale_id": str(sale_id),
+                            "reason": "Offline refund incorrect amount",
+                            "items_to_refund": [
+                                {
+                                    "sale_item_id": str(sale_item_id),
+                                    "quantity": 1,
+                                    "reason": "Amount mismatch",
+                                    "restock": False,
+                                }
+                            ],
+                            "refund_amount": 10.0,
+                            "refund_method": "cash",
+                            "manager_approval_user_id": str(user.id),
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 0
+        assert response.total_failed == 1
+        assert "must equal the selected item value" in (
+            response.failed[0].error or ""
+        )
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        assert sale is not None
+        assert sale.status == "completed"
+        assert sale.refund_amount is None
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 0
+
+    async def test_offline_refund_rejects_over_refund_without_mutation(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Cumulative offline refunds cannot exceed the sale total."""
+        org, branch, user, drugs, customer = setup_test_data
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        db.add(Sale(
+            id=sale_id,
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number="REFUND-OVER-TOTAL-SALE",
+            customer_id=customer.id,
+            subtotal=Decimal("100.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("100.00"),
+            payment_method="cash",
+            payment_status="partial",
+            cashier_id=user.id,
+            status="partially_refunded",
+            refund_amount=Decimal("75.00"),
+        ))
+        db.add(SaleItem(
+            id=sale_item_id,
+            sale_id=sale_id,
+            drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
+            quantity=2,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("100.00"),
+            total_price=Decimal("100.00"),
+            refunded_quantity=1,
+        ))
+        await db.commit()
+
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(uuid.uuid4()),
+                        table_name="sale_refunds",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "sale_id": str(sale_id),
+                            "reason": "Offline refund over sale total",
+                            "items_to_refund": [
+                                {
+                                    "sale_item_id": str(sale_item_id),
+                                    "quantity": 1,
+                                    "reason": "Over total",
+                                    "restock": False,
+                                }
+                            ],
+                            "refund_amount": 50.0,
+                            "refund_method": "cash",
+                            "manager_approval_user_id": str(user.id),
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 0
+        assert response.total_failed == 1
+        assert "cannot exceed sale total" in (response.failed[0].error or "")
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        assert sale is not None
+        assert sale.status == "partially_refunded"
+        assert sale.refund_amount == Decimal("75.00")
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 1
+
+    async def test_offline_refund_without_restock_does_not_touch_inventory(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """Damaged/non-restocked returns should not create inventory effects."""
+        org, branch, user, drugs, customer = setup_test_data
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        inventory = BranchInventory(
+            branch_id=branch.id,
+            drug_id=drugs[0].id,
+            quantity=0,
+            reserved_quantity=0,
+        )
+        db.add(inventory)
+        db.add(Sale(
+            id=sale_id,
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number="REFUND-NO-RESTOCK-SALE",
+            customer_id=customer.id,
+            subtotal=Decimal("50.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("50.00"),
+            payment_method="cash",
+            payment_status="completed",
+            cashier_id=user.id,
+            status="completed",
+        ))
+        db.add(SaleItem(
+            id=sale_item_id,
+            sale_id=sale_id,
+            drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
+            quantity=1,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("50.00"),
+            total_price=Decimal("50.00"),
+        ))
+        await db.commit()
+
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(uuid.uuid4()),
+                        table_name="sale_refunds",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "sale_id": str(sale_id),
+                            "reason": "Offline damaged return no restock",
+                            "items_to_refund": [
+                                {
+                                    "sale_item_id": str(sale_item_id),
+                                    "quantity": 1,
+                                    "reason": "Damaged return",
+                                    "restock": False,
+                                }
+                            ],
+                            "refund_amount": 50.0,
+                            "refund_method": "cash",
+                            "manager_approval_user_id": str(user.id),
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 1
+        assert response.total_failed == 0
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        await db.refresh(inventory)
+        movements = (await db.execute(
+            select(InventoryMovement).where(InventoryMovement.source_id == sale_id)
+        )).scalars().all()
+        adjustments = (await db.execute(
+            select(StockAdjustment).where(
+                StockAdjustment.branch_id == branch.id,
+                StockAdjustment.drug_id == drugs[0].id,
+            )
+        )).scalars().all()
+
+        assert sale is not None
+        assert sale.status == "refunded"
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 1
+        assert inventory.quantity == 0
+        assert movements == []
+        assert adjustments == []
+
+    async def test_offline_refund_missing_inventory_rolls_back_refund_state(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """A restock failure must not leave a phantom refunded sale."""
+        org, branch, user, drugs, customer = setup_test_data
+        sale_id = uuid.uuid4()
+        sale_item_id = uuid.uuid4()
+        db.add(Sale(
+            id=sale_id,
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number="REFUND-MISSING-INVENTORY-SALE",
+            customer_id=customer.id,
+            subtotal=Decimal("50.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("50.00"),
+            payment_method="cash",
+            payment_status="completed",
+            cashier_id=user.id,
+            status="completed",
+        ))
+        db.add(SaleItem(
+            id=sale_item_id,
+            sale_id=sale_id,
+            drug_id=drugs[0].id,
+            drug_name=drugs[0].name,
+            quantity=1,
+            unit_price=Decimal("50.00"),
+            subtotal=Decimal("50.00"),
+            total_price=Decimal("50.00"),
+        ))
+        await db.commit()
+
+        response = await SyncService.push(
+            db,
+            PushRequest(
+                branch_id=branch.id,
+                records=[
+                    PushRecord(
+                        operation_id=uuid.uuid4(),
+                        local_id=str(uuid.uuid4()),
+                        table_name="sale_refunds",
+                        operation="create",
+                        sync_version=1,
+                        created_offline_at=datetime.now(timezone.utc),
+                        data={
+                            "sale_id": str(sale_id),
+                            "reason": "Offline restock but inventory missing",
+                            "items_to_refund": [
+                                {
+                                    "sale_item_id": str(sale_item_id),
+                                    "quantity": 1,
+                                    "reason": "Inventory missing",
+                                    "restock": True,
+                                }
+                            ],
+                            "refund_amount": 50.0,
+                            "refund_method": "cash",
+                            "manager_approval_user_id": str(user.id),
+                        },
+                    )
+                ],
+            ),
+            org.id,
+            user.id,
+        )
+
+        assert response.total_accepted == 0
+        assert response.total_failed == 1
+        assert "Inventory record missing" in (response.failed[0].error or "")
+
+        sale = await db.get(Sale, sale_id)
+        sale_item = await db.get(SaleItem, sale_item_id)
+        movements = (await db.execute(
+            select(InventoryMovement).where(InventoryMovement.source_id == sale_id)
+        )).scalars().all()
+        assert sale is not None
+        assert sale.status == "completed"
+        assert sale.refund_amount is None
+        assert sale_item is not None
+        assert sale_item.refunded_quantity == 0
+        assert movements == []
 
     async def test_push_prescription_defaults_missing_branch_to_sync_branch(
         self,

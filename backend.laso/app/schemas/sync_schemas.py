@@ -11,7 +11,7 @@ Ownership rules encoded here:
       branch_inventory, drug_batches, sales, purchase_orders
 
   Push-only audit command:
-      stock_adjustments
+      stock_adjustments, sale_refunds
 
   Special:
       customers  — org-level but branches CREATE them offline,
@@ -187,8 +187,8 @@ class PushRecord(BaseSchema):
     table_name: str = Field(
         ...,
         description="One of: branch_inventory, drug_batches, "
-                    "stock_adjustments, sales, purchase_orders, customers, "
-                    "prescriptions",
+                    "stock_adjustments, sale_refunds, sales, purchase_orders, "
+                    "customers, prescriptions",
     )
     local_id: str = Field(..., description="Client-side UUID for this record")
     operation: str = Field(..., pattern="^(create|update|delete)$")
@@ -209,6 +209,7 @@ class PushRecord(BaseSchema):
             "branch_inventory",
             "drug_batches",
             "stock_adjustments",
+            "sale_refunds",
             "sales",
             "purchase_orders",
             "customers",      # special: org-level but created offline

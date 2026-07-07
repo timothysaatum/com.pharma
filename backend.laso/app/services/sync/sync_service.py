@@ -57,12 +57,13 @@ from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from dateutil.parser import isoparse
+from pydantic import ValidationError
 
 from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
-from app.models.pharmacy.pharmacy_model import Branch
+from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.pricing.pricing_model import InsuranceProvider, PriceContract
 from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import (
@@ -80,7 +81,7 @@ from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
 from app.schemas.inventory_schemas import BranchInventoryResponse, DrugBatchResponse
 from app.schemas.price_contract_schemas import PriceContractResponse
 from app.schemas.purchase_order_schemas import PurchaseOrderResponse
-from app.schemas.sales_schemas import SaleResponse
+from app.schemas.sales_schemas import RefundSaleRequest, SaleResponse
 from app.schemas.sync_schemas import (
     PullRequest,
     PullResponse,
@@ -92,6 +93,11 @@ from app.schemas.sync_schemas import (
     PushResult,
 )
 from app.services.inventory.inventory_service import InventoryService
+from app.services.sales.pricing.pricing_calculator import d as _d, r2 as _r2
+from app.services.sales.utils.sale_helpers import (
+    DEFAULT_LOYALTY_THRESHOLDS,
+    resolve_loyalty_tier,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +132,7 @@ CONFLICT_RESOLUTION: Dict[str, str] = {
     "branch_inventory":  "server_wins",
     "drug_batches":      "server_wins",
     "stock_adjustments": "server_wins",
+    "sale_refunds":      "server_wins",
     "purchase_orders":   "server_wins",
     "customers":         "manual_required",
     "prescriptions":     "server_wins",
@@ -751,6 +758,7 @@ class SyncService:
             "stock_adjustments": 7,
             "purchase_orders": 8,
             "sales": 9,
+            "sale_refunds": 10,
         }
 
         sorted_records = sorted(
@@ -890,6 +898,7 @@ class SyncService:
 
         handler = {
             "sales":             SyncService._push_sale,
+            "sale_refunds":      SyncService._push_refund,
             "drug_batches":      SyncService._push_batch,
             "stock_adjustments": SyncService._push_adjustment,
             "branch_inventory":  SyncService._push_inventory,
@@ -1118,6 +1127,14 @@ class SyncService:
                 error=f"Drugs not found or inactive: {item_drug_ids - existing_drug_ids}",
             ), None
 
+        prescription_required_drug_ids = set((await db.execute(
+            select(Drug.id).where(
+                Drug.id.in_(item_drug_ids),
+                Drug.organization_id == organization_id,
+                Drug.requires_prescription == True,
+            )
+        )).scalars().all())
+
         header_values = {
             "subtotal": item_subtotal,
             "discount_amount": item_discount,
@@ -1191,6 +1208,18 @@ class SyncService:
                 table_name="sales",
                 success=False,
                 error=f"Foreign key validation failed: {exc}",
+                fk_fixes=fk_fixes if fk_fixes else None,
+            ), None
+
+        if prescription_required_drug_ids and not safe_data.get("prescription_id"):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=(
+                    "Sale contains prescription-required drugs but no valid "
+                    "prescription was synced."
+                ),
                 fk_fixes=fk_fixes if fk_fixes else None,
             ), None
 
@@ -1322,6 +1351,471 @@ class SyncService:
             server_id=str(sale.id),
             success=True,
             fk_fixes=fk_fixes if fk_fixes else None,
+        ), None
+
+    @staticmethod
+    async def _push_refund(
+        db: AsyncSession,
+        record: PushRecord,
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        pushed_by: uuid.UUID,
+    ) -> Tuple[PushResult, Optional[PushConflict]]:
+        """Apply an offline refund command exactly once."""
+        if record.operation != "create":
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error="Refund sync records are immutable create commands.",
+            ), None
+
+        try:
+            refund_id = uuid.UUID(str(record.local_id))
+        except (TypeError, ValueError):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error="Refund local_id must be a valid UUID.",
+            ), None
+
+        previous_receipt = (await db.execute(
+            select(SyncOperationReceipt).where(
+                SyncOperationReceipt.organization_id == organization_id,
+                SyncOperationReceipt.branch_id == branch_id,
+                SyncOperationReceipt.table_name == "sale_refunds",
+                SyncOperationReceipt.record_id == record.local_id,
+                SyncOperationReceipt.result_kind == "accepted",
+            )
+        )).scalar_one_or_none()
+        if previous_receipt:
+            return PushResult.model_validate(previous_receipt.response_data), None
+
+        try:
+            sale_id = uuid.UUID(str(record.data.get("sale_id")))
+            refund_data = RefundSaleRequest.model_validate(record.data)
+        except (TypeError, ValueError, ValidationError) as exc:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=f"Refund payload is invalid: {exc}",
+            ), None
+
+        user = await db.scalar(
+            select(User)
+            .where(
+                User.id == pushed_by,
+                User.organization_id == organization_id,
+                User.is_active == True,
+            )
+            .options(selectinload(User.roles))
+        )
+        if not user or not user.has_permission("process_refunds"):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error="Syncing user cannot process refunds.",
+            ), None
+
+        assigned = [str(b) for b in (user.assigned_branches or [])]
+        if str(branch_id) not in assigned and not user.is_super_admin:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error="Syncing user does not have access to this branch.",
+            ), None
+
+        approver_id = refund_data.manager_approval_user_id
+        if approver_id == user.id:
+            approver = user
+        else:
+            approver = await db.scalar(
+                select(User)
+                .where(
+                    User.id == approver_id,
+                    User.organization_id == organization_id,
+                    User.is_active == True,
+                )
+                .options(selectinload(User.roles))
+            )
+        if not approver or not approver.has_permission("process_refunds"):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error="Approving manager cannot process refunds.",
+            ), None
+
+        sale = (await db.execute(
+            select(Sale)
+            .options(selectinload(Sale.items))
+            .where(
+                Sale.id == sale_id,
+                Sale.organization_id == organization_id,
+                Sale.branch_id == branch_id,
+            )
+            .with_for_update()
+        )).scalar_one_or_none()
+        if not sale:
+            other_branch_sale = await db.scalar(
+                select(Sale.id).where(
+                    Sale.id == sale_id,
+                    Sale.organization_id == organization_id,
+                    Sale.branch_id != branch_id,
+                )
+            )
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=(
+                    "Sale does not belong to this sync branch."
+                    if other_branch_sale
+                    else "Sale to refund was not found."
+                ),
+            ), None
+
+        if sale.status not in ("completed", "partially_refunded"):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=(
+                    f"Cannot refund a sale with status '{sale.status}'. "
+                    "Only completed or partially refunded sales may be refunded."
+                ),
+            ), None
+
+        refund_amount = _r2(_d(refund_data.refund_amount))
+        existing_refund_amount = _r2(_d(sale.refund_amount or 0))
+        sale_total = _r2(_d(sale.total_amount))
+        new_refund_total = _r2(existing_refund_amount + refund_amount)
+        if new_refund_total > sale_total:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=(
+                    f"Refund total ({new_refund_total}) cannot exceed sale "
+                    f"total ({sale_total}). Already refunded: {existing_refund_amount}."
+                ),
+            ), None
+
+        locked_items = list((await db.execute(
+            select(SaleItem)
+            .where(SaleItem.sale_id == sale.id)
+            .with_for_update()
+        )).scalars().all())
+        sale_item_map: Dict[uuid.UUID, SaleItem] = {
+            item.id: item for item in locked_items
+        }
+        refund_item_ids = {ri.sale_item_id for ri in refund_data.items_to_refund}
+        invalid = refund_item_ids - set(sale_item_map)
+        if invalid:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=f"Refund items not found in the original sale: {invalid}",
+            ), None
+
+        for refund_item in refund_data.items_to_refund:
+            sale_item = sale_item_map[refund_item.sale_item_id]
+            already_refunded = int(sale_item.refunded_quantity or 0)
+            remaining_quantity = int(sale_item.quantity) - already_refunded
+            if refund_item.quantity > remaining_quantity:
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sale_refunds",
+                    success=False,
+                    error=(
+                        f"Cannot refund {refund_item.quantity} units of "
+                        f"'{sale_item.drug_name}'. Remaining refundable "
+                        f"quantity: {remaining_quantity}."
+                    ),
+                ), None
+
+        expected_refund = _r2(sum(
+            (
+                _d(sale_item_map[item.sale_item_id].total_price)
+                * Decimal(item.quantity)
+                / Decimal(sale_item_map[item.sale_item_id].quantity)
+            )
+            for item in refund_data.items_to_refund
+        ))
+        if abs(refund_amount - expected_refund) > Decimal("0.005"):
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sale_refunds",
+                success=False,
+                error=(
+                    f"Refund amount ({refund_amount}) must equal the selected "
+                    f"item value ({expected_refund})."
+                ),
+            ), None
+
+        now = datetime.now(timezone.utc)
+        is_full_refund = new_refund_total == sale_total
+        sale.status = "refunded" if is_full_refund else "partially_refunded"
+        sale.payment_status = "refunded" if is_full_refund else "partial"
+        sale.refund_amount = new_refund_total
+        sale.refunded_at = now
+        sale.refunded_by = pushed_by
+        sale.refund_reason = refund_data.reason
+        sale.refund_reference = (
+            str(record.data.get("refund_reference") or f"OFFLINE-{refund_id}")
+        )
+        sale.notes = f"Refunded offline: {refund_data.reason}\n\n{sale.notes or ''}".strip()
+        sale.updated_at = now
+        sale.sync_version += 1
+        sale.mark_as_synced()
+
+        if sale.prescription_id:
+            prescription = await db.scalar(
+                select(Prescription)
+                .where(
+                    Prescription.id == sale.prescription_id,
+                    Prescription.organization_id == organization_id,
+                    Prescription.branch_id == branch_id,
+                )
+                .with_for_update()
+            )
+            if (
+                prescription
+                and prescription.refills_remaining < prescription.refills_allowed
+            ):
+                prescription.refills_remaining += 1
+                prescription.status = "active"
+                prescription.updated_at = now
+                prescription.sync_version += 1
+                prescription.mark_as_synced()
+
+        inventory_restored = 0
+        batches_restored = 0
+
+        for refund_item in refund_data.items_to_refund:
+            sale_item = sale_item_map[refund_item.sale_item_id]
+            sale_item.refunded_quantity = int(
+                sale_item.refunded_quantity or 0
+            ) + refund_item.quantity
+            sale_item.updated_at = now
+
+            allocations = list((await db.execute(
+                select(SaleItemBatchAllocation)
+                .where(SaleItemBatchAllocation.sale_item_id == sale_item.id)
+                .order_by(SaleItemBatchAllocation.created_at.asc())
+                .with_for_update()
+            )).scalars().all())
+
+            restore_targets: list[dict[str, Any]] = []
+            qty_to_allocate = refund_item.quantity
+            for allocation in allocations:
+                if qty_to_allocate <= 0:
+                    break
+                allocation_remaining = (
+                    int(allocation.quantity) - int(allocation.refunded_quantity or 0)
+                )
+                if allocation_remaining <= 0:
+                    continue
+                consume_qty = min(allocation_remaining, qty_to_allocate)
+                allocation.refunded_quantity = int(
+                    allocation.refunded_quantity or 0
+                ) + consume_qty
+                allocation.updated_at = now
+                restore_targets.append({
+                    "batch_id": allocation.batch_id,
+                    "batch_number": allocation.batch_number,
+                    "batch_expiry_date": allocation.batch_expiry_date,
+                    "quantity": consume_qty,
+                })
+                qty_to_allocate -= consume_qty
+
+            if allocations and qty_to_allocate > 0:
+                raise RuntimeError(
+                    "Refund quantity exceeds remaining sale batch allocations."
+                )
+
+            if not allocations:
+                restore_targets = [{
+                    "batch_id": sale_item.batch_id,
+                    "batch_number": None,
+                    "batch_expiry_date": None,
+                    "quantity": refund_item.quantity,
+                }]
+
+            if not refund_item.restock:
+                continue
+
+            inventory = (await db.execute(
+                select(BranchInventory)
+                .where(
+                    BranchInventory.branch_id == branch_id,
+                    BranchInventory.drug_id == sale_item.drug_id,
+                )
+                .with_for_update()
+            )).scalar_one_or_none()
+            if not inventory:
+                raise RuntimeError(
+                    f"Inventory record missing for refunded drug {sale_item.drug_id}."
+                )
+
+            previous_qty = int(inventory.quantity)
+            running_inventory_qty = previous_qty
+            inventory_restored += 1
+
+            qty_to_restore = refund_item.quantity
+            for target in restore_targets:
+                if qty_to_restore <= 0:
+                    break
+                restore_qty = min(int(target["quantity"]), qty_to_restore)
+                batch = None
+                if target["batch_id"]:
+                    batch = (await db.execute(
+                        select(DrugBatch)
+                        .where(
+                            DrugBatch.id == target["batch_id"],
+                            DrugBatch.branch_id == branch_id,
+                        )
+                        .with_for_update()
+                    )).scalar_one_or_none()
+
+                if batch is None:
+                    batch = DrugBatch(
+                        id=uuid.uuid4(),
+                        branch_id=branch_id,
+                        drug_id=sale_item.drug_id,
+                        batch_number=(
+                            target["batch_number"]
+                            or f"RETURN-{sale.sale_number}-{str(sale_item.id)[:8]}"
+                        ),
+                        quantity=restore_qty,
+                        remaining_quantity=restore_qty,
+                        expiry_date=(
+                            target["batch_expiry_date"]
+                            or date.today() + timedelta(days=365 * 10)
+                        ),
+                        sync_status="synced",
+                        created_at=now,
+                        updated_at=now,
+                    )
+                    db.add(batch)
+                    await db.flush()
+
+                previous_batch_qty = int(batch.remaining_quantity)
+                batch.remaining_quantity = previous_batch_qty + restore_qty
+                if batch.remaining_quantity > batch.quantity:
+                    batch.quantity = batch.remaining_quantity
+                batch.updated_at = now
+                batch.sync_version += 1
+                batch.mark_as_synced()
+                batches_restored += 1
+
+                movement_before = running_inventory_qty
+                running_inventory_qty += restore_qty
+                await InventoryService._record_inventory_movement(
+                    db=db,
+                    organization_id=organization_id,
+                    branch_id=branch_id,
+                    drug_id=sale_item.drug_id,
+                    movement_type="refund",
+                    quantity_change=restore_qty,
+                    quantity_before=movement_before,
+                    quantity_after=running_inventory_qty,
+                    batch_id=batch.id,
+                    batch_quantity_before=previous_batch_qty,
+                    batch_quantity_after=batch.remaining_quantity,
+                    unit_cost=(
+                        Decimal(str(batch.cost_price))
+                        if batch.cost_price is not None
+                        else None
+                    ),
+                    unit_price=Decimal(str(sale_item.unit_price)),
+                    source_type="sale",
+                    source_id=sale.id,
+                    source_line_id=sale_item.id,
+                    reference_number=sale.sale_number,
+                    reason=f"Offline refund {refund_id}: {refund_data.reason}",
+                    created_by=pushed_by,
+                )
+                qty_to_restore -= restore_qty
+
+            if qty_to_restore > 0:
+                raise RuntimeError(
+                    "Refund restock quantity could not be allocated to sale batches."
+                )
+
+            inventory.quantity = running_inventory_qty
+            inventory.updated_at = now
+            inventory.sync_version += 1
+            inventory.mark_as_synced()
+
+            db.add(StockAdjustment(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=sale_item.drug_id,
+                adjustment_type="return",
+                quantity_change=refund_item.quantity,
+                previous_quantity=previous_qty,
+                new_quantity=running_inventory_qty,
+                reason=f"Offline refund {refund_id}: {refund_data.reason}",
+                adjusted_by=pushed_by,
+                created_at=now,
+                updated_at=now,
+            ))
+
+        loyalty_points_deducted = 0
+        if sale.customer_id:
+            customer = (await db.execute(
+                select(Customer)
+                .where(
+                    Customer.id == sale.customer_id,
+                    Customer.organization_id == organization_id,
+                )
+                .with_for_update()
+            )).scalar_one_or_none()
+            if customer:
+                organization = await db.get(Organization, organization_id)
+                loyalty_enabled = bool(
+                    organization
+                    and organization.settings.get("enable_loyalty_program", False)
+                )
+                if loyalty_enabled:
+                    loyalty_cfg = organization.settings.get("loyalty", {})
+                    points_rate = _d(loyalty_cfg.get("points_per_unit", "1.0"))
+                    points_to_deduct = int(refund_amount * points_rate)
+                    customer.loyalty_points = max(
+                        0,
+                        int(customer.loyalty_points or 0) - points_to_deduct,
+                    )
+                    customer.loyalty_tier = resolve_loyalty_tier(
+                        customer.loyalty_points,
+                        loyalty_cfg.get("tier_thresholds", DEFAULT_LOYALTY_THRESHOLDS),
+                    )
+                    loyalty_points_deducted = points_to_deduct
+                customer.total_value = _r2(
+                    _d(customer.total_value or 0) - refund_amount
+                )
+                if customer.total_value < 0:
+                    customer.total_value = Decimal("0.00")
+                customer.updated_at = now
+                customer.sync_version += 1
+                customer.mark_as_synced()
+
+        await db.flush()
+        return PushResult(
+            local_id=record.local_id,
+            table_name="sale_refunds",
+            server_id=str(refund_id),
+            success=True,
+            fk_fixes=[
+                f"inventory_restored={inventory_restored}",
+                f"batches_restored={batches_restored}",
+                f"loyalty_points_deducted={loyalty_points_deducted}",
+            ],
         ), None
 
     @staticmethod
