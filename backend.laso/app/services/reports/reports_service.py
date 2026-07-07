@@ -24,7 +24,7 @@ from sqlalchemy.orm import selectinload
 
 from app.models.sales.sales_model import Sale, SaleItem
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
-from app.models.inventory.inventory_model import Drug
+from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.customer.customer_model import Customer
 from app.models.pricing.pricing_model import PriceContract
@@ -360,6 +360,7 @@ class ReportsService:
         start_date: date,
         end_date: date,
         branch_id: Optional[uuid.UUID] = None,
+        branch_ids: Optional[List[uuid.UUID]] = None,
         pagination: Optional[PaginationParams] = None,
     ) -> PaginatedResponse[DrugTurnoverRow]:
         """
@@ -370,7 +371,7 @@ class ReportsService:
                 func.cast(Drug.id, String).label("drug_id"),
                 Drug.name.label("drug_name"),
                 Drug.sku.label("drug_sku"),
-                Drug.category_id.label("category"),
+                DrugCategory.name.label("category"),
                 func.cast(func.sum(SaleItem.quantity), Integer).label("units_sold"),
                 func.cast(func.sum(SaleItem.total_price), Float).label("revenue"),
                 func.count(func.distinct(Sale.id)).label("transaction_count"),
@@ -378,6 +379,7 @@ class ReportsService:
             )
             .join(SaleItem, SaleItem.drug_id == Drug.id)
             .join(Sale, SaleItem.sale_id == Sale.id)
+            .outerjoin(DrugCategory, Drug.category_id == DrugCategory.id)
             .where(
                 Drug.organization_id == organization_id,
                 func.date(Sale.created_at) >= start_date,
@@ -388,13 +390,15 @@ class ReportsService:
 
         if branch_id:
             stmt = stmt.where(Sale.branch_id == branch_id)
+        elif branch_ids:
+            stmt = stmt.where(Sale.branch_id.in_(branch_ids))
 
         stmt = (
             stmt.group_by(
                 Drug.id,
                 Drug.name,
                 Drug.sku,
-                Drug.category_id,
+                DrugCategory.name,
             )
             .order_by(func.sum(SaleItem.quantity).desc().nullsfirst())
         )

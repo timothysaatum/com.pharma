@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.sales.sales_model import Sale, SaleItem
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
-from app.models.inventory.inventory_model import Drug
+from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.customer.customer_model import Customer
 from app.models.user.user_model import User
@@ -149,6 +149,33 @@ class TestReportsService:
                 assert row.drug_name
                 assert row.units_sold > 0
                 assert row.revenue > 0
+
+    async def test_drug_turnover_returns_category_name_not_uuid(
+        self,
+        db: AsyncSession,
+        sales_data,
+    ):
+        """Endpoint response validation expects category to be a string."""
+        org_id = sales_data["org_id"]
+        category = DrugCategory(
+            id=uuid.uuid4(),
+            organization_id=org_id,
+            name="Analgesics",
+        )
+        drug = await db.get(Drug, sales_data["drug_id"])
+        drug.category_id = category.id
+        db.add(category)
+        await db.commit()
+
+        result = await ReportsService.get_drug_turnover(
+            db=db,
+            organization_id=org_id,
+            start_date=date.today() - timedelta(days=30),
+            end_date=date.today(),
+        )
+
+        assert result.total > 0
+        assert result.items[0].category == "Analgesics"
 
 
 # ─── Fixtures ───────────────────────────────────────────────────────────────

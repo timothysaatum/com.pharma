@@ -207,12 +207,13 @@ async def get_drug_turnover(
 
     Returns: Drug turnover metrics
     """
-    resolved_branch_id, _ = _resolve_branch_filter(branch_id, current_user)
+    resolved_branch_id, branch_ids = _resolve_branch_filter(branch_id, current_user)
     return await ReportsService.get_drug_turnover(
         db=db,
         organization_id=current_user.organization_id,
         start_date=start_date,
         end_date=end_date,
         branch_id=resolved_branch_id,
+        branch_ids=branch_ids,
         pagination=pagination,
     )
