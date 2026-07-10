@@ -54,6 +54,17 @@ export default function PurchasesPage() {
     const orders: PurchaseOrder[] = po.orders ?? [];
     const suppliers: Supplier[] = po.suppliers ?? [];
     const suppliersError = po.suppliersError ?? null;
+    const computedPermissions = user?.effective_permissions?.effective_permissions;
+    const effectivePermissions = computedPermissions && computedPermissions.length > 0
+        ? computedPermissions
+        : user?.roles?.flatMap((role) => role.permissions) ?? [];
+    const hasCrossBranchPurchaseAccess =
+        !!user?.is_super_admin ||
+        effectivePermissions.includes("approve_purchase_orders") ||
+        effectivePermissions.includes("view_reports") ||
+        effectivePermissions.includes("*");
+    const hasNoAssignedBranches =
+        !hasCrossBranchPurchaseAccess && (user?.assigned_branches?.length ?? 0) === 0;
 
     // ── Selected PO (detail panel) ────────────────────────────
     const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -257,9 +268,15 @@ export default function PurchasesPage() {
                                     <ShoppingBag className="w-8 h-8 text-slate-300" />
                                 </div>
                                 <div>
-                                    <p className="text-sm font-semibold text-slate-500">No purchase orders</p>
+                                    <p className="text-sm font-semibold text-slate-500">
+                                        {hasNoAssignedBranches
+                                            ? "No branches assigned — contact your administrator"
+                                            : "No purchase orders"}
+                                    </p>
                                     <p className="text-xs text-slate-400 mt-1">
-                                        Create your first order using the button above
+                                        {hasNoAssignedBranches
+                                            ? "Purchase orders will appear after you are assigned to a branch"
+                                            : "Create your first order using the button above"}
                                     </p>
                                 </div>
                             </div>
