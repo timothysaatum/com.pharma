@@ -1071,6 +1071,10 @@ export interface Prescription extends TimestampFields, SyncFields {
     verified_by: string | null;
     verified_at: string | null;
     created_offline_at?: string | null;
+    renumbered_from?: string | null;
+    renumbered_to?: string | null;
+    renumbered_at?: string | null;
+    collision_survivor_id?: string | null;
 }
 
 // // ============================================================
@@ -1452,6 +1456,16 @@ export interface PullRequest {
     branch_id: string;
     last_sync_at?: string | null;
     tables?: string[];
+    crr_since_db_version?: number;
+    customer_merge_since_version?: number;
+}
+
+export interface CustomerMergeDirective {
+    directive_version: number;
+    event_id: string;
+    survivor_id: string;
+    loser_id: string;
+    merged_at: string;
 }
 
 export interface PullResponse {
@@ -1467,6 +1481,69 @@ export interface PullResponse {
     sync_timestamp: string;
     has_more: boolean;
     total_records: number;
+    crr_changes?: CrrChangeRow[];
+    crr_max_db_version?: number;
+    customer_merge_directives?: CustomerMergeDirective[];
+    customer_merge_max_version?: number;
+}
+
+export interface CrrChangeRow {
+    table: string;
+    pk: unknown;
+    cid: string;
+    val: unknown;
+    col_version: number;
+    db_version: number;
+    site_id: string;
+    cl: number;
+    seq: number;
+}
+
+export interface CrrPushRecord {
+    table: string;
+    pk: unknown;
+    cid: string;
+    val: unknown;
+    col_version: number;
+    db_version: number;
+    site_id: string;
+    cl: number;
+    seq: number;
+}
+
+export interface CrrPushRequest {
+    branch_id: string;
+    changes: CrrPushRecord[];
+    audit_events?: CrrRenumberAuditEvent[];
+}
+
+export interface CrrRenumberAuditEvent {
+    event_id: string;
+    table_name: "prescriptions" | "purchase_orders" | "sales";
+    winner_id: string;
+    loser_id: string;
+    business_key_col: string;
+    old_business_key: string;
+    new_business_key: string;
+    renumbered_at: string;
+}
+
+export interface CrrPushResult {
+    table: string;
+    row_id: string;
+    success: boolean;
+    error?: string;
+}
+
+export interface CrrPushResponse {
+    results: CrrPushResult[];
+    total_received: number;
+    total_accepted: number;
+    total_failed: number;
+    sync_timestamp: string;
+    merged_row_ids: string[];
+    accepted_audit_event_ids: string[];
+    audit_errors: Record<string, string>;
 }
 
 export interface PushRecord {

@@ -19,6 +19,7 @@ from .endpoints.purchase_order_endpoints import supplier_router as sr
 from .endpoints.stats import router as stats_router
 from .endpoints.price_contract_endpoints import router as price_contract_router
 from .endpoints.sync_endpoints import router as sync_router
+from .endpoints.crr_sync_endpoints import router as crr_sync_router
 from .endpoints.sync_recovery_endpoints import router as sync_recovery_router
 from .endpoints.customer_endpoints import router as customer_router
 from .endpoints.prescription_endpoints import router as prescription_router
@@ -42,6 +43,7 @@ router.include_router(purchase_order_router, tags=["Purchase Orders"])
 router.include_router(sr, tags=["Suppliers"])
 router.include_router(stats_router, tags=["Statistics"])
 router.include_router(sync_router, tags=["Offline Sync"])
+router.include_router(crr_sync_router, tags=["Offline Sync (CRDT)"])
 router.include_router(sync_recovery_router, tags=["Sync Recovery"])
 router.include_router(price_contract_router, tags=["Price Contracts"])
 router.include_router(customer_router, tags=["Customers"])

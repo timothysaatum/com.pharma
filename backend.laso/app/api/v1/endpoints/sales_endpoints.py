@@ -135,7 +135,7 @@ async def list_sales(
     GET /sales?branch_id=xxx&start_date=2026-02-01T00:00:00Z&status=completed&contract_type=insurance
     ```
     """
-    from sqlalchemy import and_, false, or_, select
+    from sqlalchemy import and_, false, or_, select, text
     
     filters = [Sale.organization_id == organization_id]
 
@@ -179,11 +179,20 @@ async def list_sales(
         filters.append(Sale.price_contract_id == price_contract_id)
 
     if search:
-        term = f"%{search.strip()}%"
+        search_value = search.strip()
+        term = f"%{search_value}%"
         filters.append(
             or_(
                 Sale.sale_number.ilike(term),
                 Sale.customer_name.ilike(term),
+                text("""
+                    EXISTS (
+                        SELECT 1 FROM crr_renumber_audit audit
+                        WHERE audit.table_name = 'sales'
+                          AND audit.loser_id = CAST(sales.id AS VARCHAR)
+                          AND audit.old_business_key = :audit_original_key
+                    )
+                """).bindparams(audit_original_key=search_value),
             )
         )
     

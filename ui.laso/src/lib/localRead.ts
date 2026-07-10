@@ -1149,43 +1149,70 @@ async searchPrescriptions(
     const db = await getDb();
     const qualifiers: string[] = [];
     const values: unknown[] = [];
+    let auditSelect = "";
+    let auditJoin = "";
 
     if (params.customer_id) {
       values.push(params.customer_id);
-      qualifiers.push(`customer_id = $${values.length}`);
+      qualifiers.push(`p.customer_id = $${values.length}`);
     }
     if (params.status_filter) {
       values.push(params.status_filter);
-      qualifiers.push(`status = $${values.length}`);
+      qualifiers.push(`p.status = $${values.length}`);
     }
     if (params.include_expired === false) {
-      qualifiers.push(`DATE(expiry_date) >= DATE('now')`);
+      qualifiers.push(`DATE(p.expiry_date) >= DATE('now')`);
     }
     if (params.organization_id) {
       values.push(params.organization_id);
-      qualifiers.push(`organization_id = $${values.length}`);
+      qualifiers.push(`p.organization_id = $${values.length}`);
     }
     if (params.branch_id) {
       values.push(params.branch_id);
-      qualifiers.push(`branch_id = $${values.length}`);
+      qualifiers.push(`p.branch_id = $${values.length}`);
     }
     if (params.search) {
+      values.push(params.search.trim());
+      const originalKeyIndex = values.length;
       values.push(sqlLike(params.search));
+      const likeIndex = values.length;
       qualifiers.push(`(
-        LOWER(prescription_number) LIKE $${values.length} OR
-        LOWER(prescriber_name) LIKE $${values.length}
+        LOWER(p.prescription_number) LIKE $${likeIndex} OR
+        LOWER(p.prescriber_name) LIKE $${likeIndex} OR
+        EXISTS (
+          SELECT 1 FROM crr_renumber_audit history
+          WHERE history.table_name = 'prescriptions'
+            AND history.loser_id = p.id
+            AND LOWER(history.old_business_key) = LOWER($${originalKeyIndex})
+        )
       )`);
+      auditSelect = `,
+        audit.old_business_key AS renumbered_from,
+        audit.new_business_key AS renumbered_to,
+        audit.renumbered_at,
+        audit.winner_id AS collision_survivor_id`;
+      auditJoin = `LEFT JOIN crr_renumber_audit audit
+        ON audit.table_name = 'prescriptions'
+       AND audit.loser_id = p.id
+       AND LOWER(audit.old_business_key) = LOWER($${originalKeyIndex})
+       AND audit.id = (
+         SELECT MAX(latest.id) FROM crr_renumber_audit latest
+         WHERE latest.table_name = 'prescriptions'
+           AND latest.loser_id = p.id
+           AND LOWER(latest.old_business_key) = LOWER($${originalKeyIndex})
+       )`;
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
-    const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM prescriptions ${where}`, values);
+    const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM prescriptions p ${where}`, values);
     const total = totalRows[0]?.total ?? 0;
 
     const offset = (page - 1) * page_size;
     const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name
+      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name${auditSelect}
        FROM prescriptions p
        LEFT JOIN customers c ON c.id = p.customer_id
+       ${auditJoin}
        ${where}
        ORDER BY p.created_at DESC
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,

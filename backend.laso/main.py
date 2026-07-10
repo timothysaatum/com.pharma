@@ -1,5 +1,7 @@
+import asyncio
 import logging
 import logging.config
+from typing import Optional
 
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
@@ -10,6 +12,8 @@ from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DataError, IntegrityError
+
+from app.db.session import AsyncSessionLocal
 
 from app.core.config import get_settings
 from app.db.session import engine
@@ -92,10 +96,53 @@ LOGGING_CONFIG = {
 logging.config.dictConfig(LOGGING_CONFIG)
 logger = logging.getLogger(__name__)
 
+# Background CRR reconciliation task reference (cancelled on shutdown)
+_crr_reconciliation_task: Optional[asyncio.Task] = None
+
 
 # ============================================================================
 # LIFECYCLE EVENTS
 # ============================================================================
+
+async def _crr_reconciliation_loop(interval: int) -> None:
+    """Periodic background task that re-syncs shadow DB → Postgres.
+
+    Runs immediately on first iteration (crash recovery), then every
+    *interval* seconds.  Uses a dedicated DB session from the engine pool.
+    """
+    from app.services.sync.shadow_db import get_shadow_db
+
+    # Run once immediately (handles crash recovery on restart)
+    await _reconcile_all_tables()
+    logger.info("CRR initial reconciliation complete")
+
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            await _reconcile_all_tables()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("CRR reconciliation error: %s", exc, exc_info=True)
+
+
+async def _reconcile_all_tables() -> None:
+    """Reconcile all known CRR tables from shadow DB into Postgres."""
+    try:
+        from app.services.sync.shadow_db import get_shadow_db, get_crr_table_names
+        shadow = await get_shadow_db()
+        async with AsyncSessionLocal() as db:
+            for table_name in get_crr_table_names():
+                checked, updated = await shadow.reconcile_table(table_name, db)
+                await db.commit()
+                if checked > 0 or updated > 0:
+                    logger.info(
+                        "CRR reconcile %s: checked=%d updated=%d",
+                        table_name, checked, updated,
+                    )
+    except Exception as exc:
+        logger.error("CRR reconcile all tables failed: %s", exc, exc_info=True)
+
 
 async def lifespan(app: FastAPI):
     """
@@ -176,10 +223,36 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"Notification setup failed (non-critical): {str(e)}")
     
+    # Initialise CRDT shadow database (per ADR 0003)
+    try:
+        from app.services.sync.shadow_db import get_shadow_db
+        await get_shadow_db().initialize()
+        logger.info("Shadow SQLite database initialised")
+
+        # Start background CRR reconciliation loop
+        reconcile_interval = settings.CRR_RECONCILE_INTERVAL_SECONDS
+        if reconcile_interval > 0:
+            global _crr_reconciliation_task
+            _crr_reconciliation_task = asyncio.create_task(
+                _crr_reconciliation_loop(reconcile_interval)
+            )
+            logger.info(
+                "CRR reconciliation task started (interval=%ds)", reconcile_interval
+            )
+    except Exception as e:
+        logger.warning(f"Shadow DB initialisation failed (non-critical): {e}")
+    
     yield
     
     # Shutdown
     logger.info("Shutting down application")
+    if _crr_reconciliation_task is not None:
+        _crr_reconciliation_task.cancel()
+        try:
+            await _crr_reconciliation_task
+        except asyncio.CancelledError:
+            pass
+        logger.info("CRR reconciliation task stopped")
     await engine.dispose()
     logger.info("All resources cleaned up")
 

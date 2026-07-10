@@ -9,7 +9,10 @@
  */
 
 import { get, post } from "@/api/client";
-import type { PullRequest, PullResponse, PushRequest, PushResponse } from "@/types";
+import type {
+    PullRequest, PullResponse, PushRequest, PushResponse,
+    CrrPushRequest, CrrPushResponse,
+} from "@/types";
 
 export interface SyncStatusResponse {
     server_time: string;
@@ -41,4 +44,12 @@ export const syncApi = {
      */
     status: (): Promise<SyncStatusResponse> =>
         get<SyncStatusResponse>("/sync/status"),
+
+    /** POST /sync/crr-push — push crsql_changes rows for CRR tables */
+    crrPush: (req: CrrPushRequest): Promise<CrrPushResponse> =>
+        post<CrrPushResponse>("/sync/crr-push", req),
+
+    /** POST /sync/crr-pull — pull crsql_changes delta from server */
+    crrPull: (req: PullRequest): Promise<PullResponse> =>
+        post<PullResponse>("/sync/crr-pull", req),
 };

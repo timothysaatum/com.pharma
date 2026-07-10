@@ -13,7 +13,7 @@ Features:
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_
+from sqlalchemy import select, and_, or_, text, bindparam
 from typing import Optional, List
 from datetime import date, datetime, timezone
 import uuid
@@ -168,6 +168,10 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
     
     verified_by: Optional[uuid.UUID] = None
     verified_at: Optional[datetime] = None
+    renumbered_from: Optional[str] = None
+    renumbered_to: Optional[str] = None
+    renumbered_at: Optional[datetime] = None
+    collision_survivor_id: Optional[uuid.UUID] = None
     
     model_config = ConfigDict(from_attributes=True)
     
@@ -472,7 +476,8 @@ async def list_prescriptions(
     query = select(Prescription).where(and_(*conditions))
 
     if search:
-        term = f"%{search.strip()}%"
+        search_value = search.strip()
+        term = f"%{search_value}%"
         query = (
             query
             .join(Customer, Customer.id == Prescription.customer_id)
@@ -483,6 +488,14 @@ async def list_prescriptions(
                     Customer.first_name.ilike(term),
                     Customer.last_name.ilike(term),
                     Customer.phone.ilike(term),
+                    text("""
+                        EXISTS (
+                            SELECT 1 FROM crr_renumber_audit audit
+                            WHERE audit.table_name = 'prescriptions'
+                              AND audit.loser_id = CAST(prescriptions.id AS VARCHAR)
+                              AND audit.old_business_key = :audit_original_key
+                        )
+                    """).bindparams(audit_original_key=search_value),
                 )
             )
         )
@@ -498,12 +511,33 @@ async def list_prescriptions(
         )
         customers = {c.id: c for c in cust_res.scalars().all()}
 
+    renumber_audits = {}
+    if search and result.items:
+        audit_result = await db.execute(text("""
+            SELECT loser_id, old_business_key, new_business_key,
+                   renumbered_at, winner_id
+            FROM crr_renumber_audit
+            WHERE table_name = 'prescriptions'
+              AND old_business_key = :original_key
+              AND loser_id IN :loser_ids
+        """).bindparams(
+            bindparam("loser_ids", expanding=True),
+            original_key=search.strip(),
+        ), {"loser_ids": [str(p.id) for p in result.items]})
+        renumber_audits = {
+            str(row.loser_id): row for row in audit_result
+        }
+
     items = [
         PrescriptionResponse(
             **{
                 **p.__dict__,
                 "is_expired": p.expiry_date < date.today(),
                 "customer_name": _customer_display_name(customers.get(p.customer_id)),
+                "renumbered_from": getattr(renumber_audits.get(str(p.id)), "old_business_key", None),
+                "renumbered_to": getattr(renumber_audits.get(str(p.id)), "new_business_key", None),
+                "renumbered_at": getattr(renumber_audits.get(str(p.id)), "renumbered_at", None),
+                "collision_survivor_id": getattr(renumber_audits.get(str(p.id)), "winner_id", None),
             }
         )
         for p in result.items

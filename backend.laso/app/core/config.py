@@ -100,6 +100,25 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str = ""
 
     # -------------------------
+    # CRDT / CRR Sync (cr-sqlite)
+    # -------------------------
+    CRR_RECONCILE_INTERVAL_SECONDS: int = Field(
+        default=60,
+        description="How often the background reconciliation task re-syncs "
+                    "shadow DB → Postgres (seconds). Set to 0 to disable.",
+        ge=0,
+    )
+    CRR_MERGE_STRATEGY: str = Field(
+        default="sum_and_merge",
+        description="Fallback merge strategy for tables not listed in "
+                    "_CRR_TABLE_CONFIG. "
+                    "'sum_and_merge' adds sum_columns, newest-wins metadata. "
+                    "'keep_both_renumber' keeps both rows, renumbers loser. "
+                    "'lww_with_external_dedup' last-write-wins header, external dedup.",
+        pattern="^(sum_and_merge|keep_both_renumber|lww_with_external_dedup)$",
+    )
+
+    # -------------------------
     # Africa's Talking (SMS)
     # -------------------------
     ARKESEL_API_KEY: Optional[str] = None

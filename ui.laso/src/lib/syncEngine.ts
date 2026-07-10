@@ -26,6 +26,10 @@ import {
     getPendingQueue, getPendingConflicts, getPendingFailures, resetPendingFailures,
     dequeue, markQueueError, markQueueConflict,
     getPendingCount, getNextRetryAt, requeueConflictForLocalWin,
+    getCrrPushChanges, applyCrrPullChanges, getCrrSiteId,
+    applyCustomerMergeDirectives,
+    getPendingCrrRenumberAudits, markCrrRenumberAuditsUploaded,
+    CRR_TABLES,
     SYNC_QUEUE_CHANGED_EVENT,
 } from "@/lib/localDb";
 import { isOfflineError } from "@/api/client";
@@ -53,6 +57,8 @@ const DEFAULT_SYNC_TABLES = [
 
 /** Maximum push attempts before an item is dead-lettered (excluded from sync queue). */
 const MAX_PUSH_ATTEMPTS = 10;
+const CRR_DB_VERSION_KEY = "crr_db_version";
+const CUSTOMER_MERGE_VERSION_KEY = "customer_merge_directive_version";
 
 // Re-export SyncStatus so existing callers that import it from this module
 // do not need to update their import paths.
@@ -202,7 +208,9 @@ class SyncEngine {
 
         try {
             const pushResult = await this.push();
+            await this.pushCrr();
             await this.pull(pushResult.nextPullTimestamp ?? undefined);
+            await this.pullCrr();
             await this.loadPersistedQueueState();
             this.networkRetryAttempt = 0;
             await this.scheduleNextQueuedRetry();
@@ -437,6 +445,126 @@ class SyncEngine {
         console.log(`[SyncEngine] Pull completed. Total records synced: ${totalRecords}`);
     }
 
+    // ── PUSH CRR (cr-sqlite changes) ────────────────────────────────
+
+    private async pushCrr(): Promise<void> {
+        if (!this.branchId) return;
+        try {
+            const db = await getDb();
+            const rows = await db.select<{ value: string }[]>(
+                "SELECT value FROM sync_meta WHERE key = $1",
+                [CRR_DB_VERSION_KEY]
+            );
+            const sinceDbVersion = parseInt(rows?.[0]?.value ?? "0", 10);
+
+            const changes = await getCrrPushChanges(sinceDbVersion);
+            const auditEvents = await getPendingCrrRenumberAudits();
+            if (changes.length === 0 && auditEvents.length === 0) return;
+
+            // Group by table and push in batches
+            const batchSize = 500;
+            const iterations = Math.max(1, Math.ceil(changes.length / batchSize));
+            for (let batchIndex = 0; batchIndex < iterations; batchIndex++) {
+                const i = batchIndex * batchSize;
+                const batch = changes.slice(i, i + batchSize);
+                const response = await syncApi.crrPush({
+                    branch_id: this.branchId,
+                    changes: batch as any[],
+                    audit_events: batchIndex === 0 ? auditEvents : [],
+                });
+
+                if (response.accepted_audit_event_ids?.length) {
+                    await markCrrRenumberAuditsUploaded(
+                        response.accepted_audit_event_ids,
+                    );
+                }
+
+                if (response.total_failed > 0) {
+                    console.warn(
+                        "[SyncEngine] CRR push: %d accepted, %d failed",
+                        response.total_accepted,
+                        response.total_failed,
+                    );
+                }
+            }
+
+            // Update last pushed db_version
+            if (changes.length > 0) {
+                const maxDbVersion = Math.max(...changes.map((c) => c.db_version), 0);
+                await db.execute(
+                    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+                    [CRR_DB_VERSION_KEY, String(maxDbVersion)]
+                );
+            }
+        } catch (err) {
+            console.warn("[SyncEngine] CRR push error:", err);
+        }
+    }
+
+    // ── PULL CRR (cr-sqlite changes) ────────────────────────────────
+
+    private async pullCrr(): Promise<void> {
+        if (!this.branchId) return;
+        try {
+            const db = await getDb();
+            const rows = await db.select<{ value: string }[]>(
+                "SELECT value FROM sync_meta WHERE key = $1",
+                [CRR_DB_VERSION_KEY]
+            );
+            const sinceDbVersion = parseInt(rows?.[0]?.value ?? "0", 10);
+            const mergeRows = await db.select<{ value: string }[]>(
+                "SELECT value FROM sync_meta WHERE key = $1",
+                [CUSTOMER_MERGE_VERSION_KEY]
+            );
+            const mergeSinceVersion = parseInt(mergeRows?.[0]?.value ?? "0", 10);
+            const siteId = await getCrrSiteId();
+
+            const response = await syncApi.crrPull({
+                branch_id: this.branchId,
+                crr_since_db_version: sinceDbVersion,
+                customer_merge_since_version: mergeSinceVersion,
+            } as PullRequest);
+
+            // Filter out this site's own changes (already merged locally)
+            const remoteChanges = (response.crr_changes ?? []).filter(
+                (c) => c.site_id !== siteId
+            );
+            if (remoteChanges.length > 0) {
+                await applyCrrPullChanges(remoteChanges);
+            }
+            const mergeDirectives = response.customer_merge_directives ?? [];
+            if (mergeDirectives.length > 0) {
+                await applyCustomerMergeDirectives(mergeDirectives);
+            }
+
+            // Update last pulled db_version
+            const newDbVersion = response.crr_max_db_version ?? 0;
+            if (newDbVersion > 0) {
+                await db.execute(
+                    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+                    [CRR_DB_VERSION_KEY, String(newDbVersion)]
+                );
+            }
+            const newMergeVersion = response.customer_merge_max_version ?? mergeSinceVersion;
+            if (newMergeVersion > mergeSinceVersion) {
+                await db.execute(
+                    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+                    [CUSTOMER_MERGE_VERSION_KEY, String(newMergeVersion)]
+                );
+            }
+
+            console.log(
+                "[SyncEngine] CRR pull: %d changes, %d customer merges applied (db_version %d → %d)",
+                remoteChanges.length,
+                mergeDirectives.length,
+                sinceDbVersion,
+                newDbVersion,
+            );
+        } catch (err) {
+            console.warn("[SyncEngine] CRR pull error:", err);
+        }
+    }
+
     // ── Apply pull response to local SQLite ──────────────────────────
 
     private async applyPullResponse(response: PullResponse): Promise<void> {
@@ -560,7 +688,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.customers.length) {
+        if (response.customers.length && !CRR_TABLES.has("customers")) {
             await upsertMany("customers", response.customers, [
                 "id", "organization_id", "customer_type", "first_name",
                 "last_name", "phone", "email", "date_of_birth",
@@ -571,7 +699,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.prescriptions.length) {
+        if (response.prescriptions.length && !CRR_TABLES.has("prescriptions")) {
             await upsertMany("prescriptions", response.prescriptions, [
                 "id", "organization_id", "branch_id", "prescription_number",
                 "customer_id", "prescriber_name", "prescriber_license",
@@ -585,8 +713,12 @@ class SyncEngine {
         }
 
         // ── Branch-level ───────────────────────────────────────────────
+        // NOTE: branch_inventory is now a CRR table managed by cr-sqlite.
+        // The old pull response for it is stale — skip it here. CRR changes
+        // are applied via pullCrr() → applyCrrPullChanges() which triggers
+        // cr-sqlite's automatic merge.
 
-        if (response.branch_inventory.length) {
+        if (response.branch_inventory.length && !CRR_TABLES.has("branch_inventory")) {
             await upsertMany("branch_inventory", response.branch_inventory, [
                 "id", "branch_id", "drug_id", "quantity", "reserved_quantity",
                 "location", "selling_price", "sync_status", "sync_version",
@@ -594,7 +726,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.drug_batches.length) {
+        if (response.drug_batches.length && !CRR_TABLES.has("drug_batches")) {
             await upsertMany("drug_batches", response.drug_batches, [
                 "id", "branch_id", "drug_id", "batch_number", "quantity",
                 "remaining_quantity", "manufacturing_date", "expiry_date",
@@ -603,7 +735,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.sales.length) {
+        if (response.sales.length && !CRR_TABLES.has("sales")) {
             await upsertMany("sales", response.sales, [
                 "id", "organization_id", "branch_id", "sale_number",
                 "customer_id", "customer_name",
@@ -635,7 +767,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.purchase_orders.length) {
+        if (response.purchase_orders.length && !CRR_TABLES.has("purchase_orders")) {
             await upsertMany("purchase_orders", response.purchase_orders, [
                 "id", "organization_id", "branch_id", "po_number",
                 "supplier_id", "subtotal", "tax_amount", "shipping_cost",

@@ -7,24 +7,25 @@
 
 import type { BranchInventoryWithDetails, PushConflict, Drug, Sale } from "@/types";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
+import { invoke } from "@tauri-apps/api/core";
 
-const DB_PATH = "sqlite:laso.db";
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
+interface ExecResult { rowsAffected: number; lastInsertId?: number }
+
 // Define a minimal interface for the Database object we use
-interface Database {
-  execute(query: string, values?: unknown[]): Promise<{ rowsAffected: number; lastInsertId?: number }>;
+export interface Database {
+  execute(query: string, values?: unknown[]): Promise<ExecResult>;
   select<T>(query: string, values?: unknown[]): Promise<T>;
+  execute_batch(query: string): Promise<void>;
   load(path: string): Promise<Database>;
 }
 
 /** Mock database for browser environment */
 const MockDb: Database = {
   execute: async () => ({ rowsAffected: 0 }),
-  select: async <T>(_: string): Promise<T> => {
-    // Return empty results that match the expected structure
-    return [] as unknown as T;
-  },
+  select: async <T>(_: string): Promise<T> => ([] as unknown as T),
+  execute_batch: async (_: string) => {},
   load: async () => MockDb,
 };
 
@@ -40,18 +41,33 @@ export async function getDb(): Promise<Database> {
     return _db;
   }
 
+  // Use rusqlite-backed Tauri commands instead of tauri-plugin-sql
+  _db = {
+    execute: async (sql: string, values?: unknown[]): Promise<ExecResult> => {
+      const result = await invoke<ExecResult>("db_execute", { sql, values: values ?? [] });
+      return result;
+    },
+    select: async <T>(sql: string, values?: unknown[]): Promise<T> => {
+      const result = await invoke<T>("db_select", { sql, values: values ?? [] });
+      return result;
+    },
+    execute_batch: async (sql: string): Promise<void> => {
+      await invoke<void>("db_execute_batch", { sql });
+    },
+    load: async (_path: string): Promise<Database> => {
+      // Connection is already opened by Rust setup; the path arg is ignored.
+      await runMigrations(_db!);
+      return _db!;
+    },
+  };
+
   try {
-    const { default: DatabaseImpl } = await import(/* @vite-ignore */ "@tauri-apps/plugin-sql");
-    _db = await (DatabaseImpl as any).load(DB_PATH);
-    if (_db) {
-        await runMigrations(_db);
-    }
-    return _db!;
+    await (_db as any).load("");
   } catch (err) {
-    console.error("[localDb] Failed to load Tauri SQL plugin:", err);
-    _db = MockDb;
-    return _db;
+    console.error("[localDb] Migration error:", err);
   }
+
+  return _db;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -81,6 +97,10 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 12) await migrate_v12(db);
       if (user_version < 13) await migrate_v13(db);
       if (user_version < 14) await migrate_v14(db);
+      if (user_version < 15) await migrate_v15(db);
+      if (user_version < 16) await migrate_v16(db);
+      await ensureCrrAuditUploadSchema(db);
+      await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
@@ -215,9 +235,9 @@ async function migrate_v1(db: Database): Promise<void> {
 
   await db.execute(`
     CREATE TABLE IF NOT EXISTS branch_inventory (
-      id                TEXT PRIMARY KEY,
-      branch_id         TEXT NOT NULL,
-      drug_id           TEXT NOT NULL,
+      id                TEXT NOT NULL PRIMARY KEY,
+      branch_id         TEXT NOT NULL DEFAULT '',
+      drug_id           TEXT NOT NULL DEFAULT '',
       quantity          INTEGER NOT NULL DEFAULT 0,
       reserved_quantity INTEGER NOT NULL DEFAULT 0,
       location          TEXT,
@@ -225,9 +245,8 @@ async function migrate_v1(db: Database): Promise<void> {
       sync_status       TEXT NOT NULL DEFAULT 'synced',
       sync_version      INTEGER NOT NULL DEFAULT 1,
       synced_at         TEXT,
-      updated_at        TEXT NOT NULL,
-      created_at        TEXT NOT NULL,
-      UNIQUE(branch_id, drug_id)
+      updated_at        TEXT NOT NULL DEFAULT '',
+      created_at        TEXT NOT NULL DEFAULT ''
     )
   `);
 
@@ -547,6 +566,461 @@ async function migrate_v14(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 14");
 }
 
+/// Migration v15: convert branch_inventory to a cr-sqlite CRR table.
+/// cr-sqlite v0.16+ requires every NOT NULL non-PK column to have a DEFAULT.
+/// Recreate the table with missing defaults, then run crsql_as_crr().
+async function migrate_v15(db: Database): Promise<void> {
+    // Recreate branch_inventory with DEFAULTs on all NOT NULL non-PK columns.
+  // sentinel defaults: zero-text for FK, 0 for numeric
+  // NOTE: cr-sqlite v0.16+ does NOT support additional UNIQUE constraints on CRR tables.
+  // The UNIQUE(branch_id, drug_id) was removed — deduplication is handled at the
+  // application level (server-side CrrSyncService validates FK/ranges).
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS branch_inventory_crr (
+      id                TEXT NOT NULL PRIMARY KEY,
+      branch_id         TEXT NOT NULL DEFAULT '',
+      drug_id           TEXT NOT NULL DEFAULT '',
+      quantity          INTEGER NOT NULL DEFAULT 0,
+      reserved_quantity INTEGER NOT NULL DEFAULT 0,
+      location          TEXT,
+      selling_price     REAL,
+      sync_status       TEXT NOT NULL DEFAULT 'synced',
+      sync_version      INTEGER NOT NULL DEFAULT 1,
+      synced_at         TEXT,
+      updated_at        TEXT NOT NULL DEFAULT '',
+      created_at        TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  // Deduplicate by (branch_id, drug_id) — keep the row with the latest updated_at
+  await db.execute(`
+    INSERT INTO branch_inventory_crr
+    SELECT id, branch_id, drug_id, quantity, reserved_quantity,
+           location, selling_price, sync_status, sync_version, synced_at,
+           updated_at, created_at
+    FROM (
+      SELECT *, ROW_NUMBER() OVER (
+        PARTITION BY branch_id, drug_id ORDER BY updated_at DESC
+      ) AS rn
+      FROM branch_inventory
+    )
+    WHERE rn = 1
+  `);
+  await db.execute("DROP TABLE branch_inventory");
+  await db.execute("ALTER TABLE branch_inventory_crr RENAME TO branch_inventory");
+
+  // Convert to CRDT replicated row (requires cr-sqlite extension loaded)
+  try {
+    await db.execute_batch("SELECT crsql_as_crr('branch_inventory')");
+    console.log("[localDb] branch_inventory converted to CRR");
+  } catch (e) {
+    console.warn("[localDb] crsql_as_crr not available — running without CRDT:", e);
+  }
+
+  await db.execute("PRAGMA user_version = 15");
+}
+
+/// Migration v16: convert drug_batches, customers, prescriptions, purchase_orders, sales
+/// to cr-sqlite CRR tables. Recreates each table with DEFAULTs on all NOT NULL columns,
+/// removes UNIQUE constraints from sale_number and prescription_number.
+export async function migrate_v16(db: Database): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+  // Helper: recreate a table with new DDL and copy every row.
+  async function recreateTable(
+    oldName: string,
+    newName: string,
+    ddl: string,
+    selectCols: string,
+  ): Promise<void> {
+    await db.execute(ddl);
+    await db.execute(`
+      INSERT INTO ${newName} (${selectCols})
+      SELECT ${selectCols} FROM ${oldName}
+    `);
+    await db.execute(`DROP TABLE ${oldName}`);
+    await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
+  }
+
+  interface BusinessKeyRow {
+    id: string;
+    scope_value: string;
+    business_key: string;
+    created_at: string;
+  }
+
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS crr_renumber_audit (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id          TEXT NOT NULL UNIQUE,
+      table_name        TEXT NOT NULL,
+      winner_id         TEXT NOT NULL,
+      loser_id          TEXT NOT NULL,
+      business_key_col  TEXT NOT NULL,
+      old_business_key  TEXT NOT NULL,
+      new_business_key  TEXT NOT NULL,
+      renumbered_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      uploaded_at       TEXT
+    )
+  `);
+
+  /**
+   * Preserve all document/transaction rows while removing a business-key UNIQUE
+   * constraint. The earliest-created row keeps the original key; later rows are
+   * assigned the same -B ... -Z suffixes as the server keep_both_renumber path.
+   */
+  async function copyKeepingBoth(
+    oldName: string,
+    newName: string,
+    ddl: string,
+    selectCols: string,
+    scopeColumn: string,
+    businessKeyColumn: string,
+  ): Promise<void> {
+    await db.execute(ddl);
+
+    const rows = await db.select<BusinessKeyRow[]>(`
+      SELECT id,
+             ${scopeColumn} AS scope_value,
+             ${businessKeyColumn} AS business_key,
+             created_at
+      FROM ${oldName}
+      ORDER BY ${scopeColumn}, ${businessKeyColumn}, created_at, id
+    `);
+
+    const usedByScope = new Map<string, Set<string>>();
+    for (const row of rows) {
+      const used = usedByScope.get(row.scope_value) ?? new Set<string>();
+      used.add(row.business_key);
+      usedByScope.set(row.scope_value, used);
+    }
+
+    const winnerByCollision = new Map<string, string>();
+    for (const row of rows) {
+      const collisionKey = JSON.stringify([row.scope_value, row.business_key]);
+      const winnerId = winnerByCollision.get(collisionKey);
+      if (winnerId === undefined) {
+        winnerByCollision.set(collisionKey, row.id);
+        continue;
+      }
+
+      const used = usedByScope.get(row.scope_value)!;
+      let newBusinessKey: string | null = null;
+      for (const suffix of "BCDEFGHIJKLMNOPQRSTUVWXYZ") {
+        const baseBusinessKey = /-[A-Z]$/.test(row.business_key)
+          ? row.business_key.slice(0, -2)
+          : row.business_key;
+        const candidate = `${baseBusinessKey}-${suffix}`;
+        if (!used.has(candidate)) {
+          newBusinessKey = candidate;
+          used.add(candidate);
+          break;
+        }
+      }
+      if (newBusinessKey === null) {
+        throw new Error(
+          `Cannot preserve ${oldName} row ${row.id}: no keep_both_renumber suffix remains for ${row.business_key}`
+        );
+      }
+
+      await db.execute(
+        `UPDATE ${oldName} SET ${businessKeyColumn} = $1 WHERE id = $2`,
+        [newBusinessKey, row.id],
+      );
+      await db.execute(
+        `INSERT INTO crr_renumber_audit
+           (event_id, table_name, winner_id, loser_id, business_key_col,
+            old_business_key, new_business_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         ON CONFLICT(event_id) DO NOTHING`,
+        [`${oldName}:${row.id}:${row.business_key}:${newBusinessKey}`,
+         oldName, winnerId, row.id, businessKeyColumn,
+         row.business_key, newBusinessKey],
+      );
+    }
+
+    await db.execute(`
+      INSERT INTO ${newName} (${selectCols})
+      SELECT ${selectCols} FROM ${oldName}
+    `);
+    await db.execute(`DROP TABLE ${oldName}`);
+    await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
+  }
+
+  // ── drug_batches ──────────────────────────────────────────────────
+  // Add DEFAULTs, no UNIQUE to remove
+  await recreateTable(
+    "drug_batches", "drug_batches_crr",
+    `CREATE TABLE drug_batches_crr (
+      id                  TEXT NOT NULL PRIMARY KEY,
+      branch_id           TEXT NOT NULL DEFAULT '',
+      drug_id             TEXT NOT NULL DEFAULT '',
+      batch_number        TEXT NOT NULL DEFAULT '',
+      quantity            INTEGER NOT NULL DEFAULT 0,
+      remaining_quantity  INTEGER NOT NULL DEFAULT 0,
+      manufacturing_date  TEXT,
+      expiry_date         TEXT NOT NULL DEFAULT '',
+      cost_price          REAL,
+      selling_price       REAL,
+      supplier            TEXT,
+      purchase_order_id   TEXT,
+      sync_status         TEXT NOT NULL DEFAULT 'synced',
+      sync_version        INTEGER NOT NULL DEFAULT 1,
+      synced_at           TEXT,
+      updated_at          TEXT NOT NULL DEFAULT '',
+      created_at          TEXT NOT NULL DEFAULT ''
+    )`,
+    `id, branch_id, drug_id, batch_number, quantity, remaining_quantity,
+     manufacturing_date, expiry_date, cost_price, selling_price, supplier,
+     purchase_order_id, sync_status, sync_version, synced_at, updated_at, created_at`,
+  );
+
+  // ── customers ─────────────────────────────────────────────────────
+  // Add DEFAULTs, no UNIQUE to remove
+  await recreateTable(
+    "customers", "customers_crr",
+    `CREATE TABLE customers_crr (
+      id                      TEXT NOT NULL PRIMARY KEY,
+      organization_id         TEXT NOT NULL DEFAULT '',
+      customer_type           TEXT NOT NULL DEFAULT 'walk_in',
+      first_name              TEXT,
+      last_name               TEXT,
+      phone                   TEXT,
+      email                   TEXT,
+      date_of_birth           TEXT,
+      loyalty_points          INTEGER NOT NULL DEFAULT 0,
+      loyalty_tier            TEXT NOT NULL DEFAULT 'bronze',
+      insurance_provider_id   TEXT,
+      insurance_member_id     TEXT,
+      preferred_contract_id   TEXT,
+      is_active               INTEGER NOT NULL DEFAULT 1,
+      is_deleted              INTEGER NOT NULL DEFAULT 0,
+      sync_status             TEXT NOT NULL DEFAULT 'synced',
+      sync_version            INTEGER NOT NULL DEFAULT 1,
+      synced_at               TEXT,
+      updated_at              TEXT NOT NULL DEFAULT '',
+      created_at              TEXT NOT NULL DEFAULT ''
+    )`,
+    `id, organization_id, customer_type, first_name, last_name, phone, email,
+     date_of_birth, loyalty_points, loyalty_tier, insurance_provider_id,
+     insurance_member_id, preferred_contract_id, is_active, is_deleted,
+     sync_status, sync_version, synced_at, updated_at, created_at`,
+  );
+
+  // ── prescriptions ─────────────────────────────────────────────────
+  // Remove UNIQUE on prescription_number, add DEFAULTs
+  const prescCols = `id, organization_id, branch_id, prescription_number, customer_id,
+    prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
+    issue_date, expiry_date, medications, diagnosis, notes, special_instructions,
+    refills_allowed, refills_remaining, last_refill_date, status, verified_by,
+    verified_at, sync_status, sync_version, synced_at, updated_at, created_at`;
+
+  await copyKeepingBoth(
+    "prescriptions", "prescriptions_crr",
+    `CREATE TABLE prescriptions_crr (
+    id                    TEXT NOT NULL PRIMARY KEY,
+    organization_id       TEXT NOT NULL DEFAULT '',
+    branch_id             TEXT NOT NULL DEFAULT '',
+    prescription_number   TEXT NOT NULL DEFAULT '',
+    customer_id           TEXT NOT NULL DEFAULT '',
+    prescriber_name       TEXT NOT NULL DEFAULT '',
+    prescriber_license    TEXT NOT NULL DEFAULT '',
+    prescriber_phone      TEXT,
+    prescriber_address    TEXT,
+    issue_date            TEXT NOT NULL DEFAULT '',
+    expiry_date           TEXT NOT NULL DEFAULT '',
+    medications           TEXT NOT NULL DEFAULT '[]',
+    diagnosis             TEXT,
+    notes                 TEXT,
+    special_instructions  TEXT,
+    refills_allowed       INTEGER NOT NULL DEFAULT 0,
+    refills_remaining     INTEGER NOT NULL DEFAULT 0,
+    last_refill_date      TEXT,
+    status                TEXT NOT NULL DEFAULT 'active',
+    verified_by           TEXT,
+    verified_at           TEXT,
+    sync_status           TEXT NOT NULL DEFAULT 'synced',
+    sync_version          INTEGER NOT NULL DEFAULT 1,
+    synced_at             TEXT,
+    updated_at            TEXT NOT NULL DEFAULT '',
+    created_at            TEXT NOT NULL DEFAULT ''
+    )`,
+    prescCols,
+    "organization_id",
+    "prescription_number",
+  );
+
+  // ── purchase_orders ───────────────────────────────────────────────
+  // Add DEFAULTs, no UNIQUE to remove (client-side)
+  await recreateTable(
+    "purchase_orders", "purchase_orders_crr",
+    `CREATE TABLE purchase_orders_crr (
+      id                    TEXT NOT NULL PRIMARY KEY,
+      organization_id       TEXT NOT NULL DEFAULT '',
+      branch_id             TEXT NOT NULL DEFAULT '',
+      po_number             TEXT NOT NULL DEFAULT '',
+      supplier_id           TEXT NOT NULL DEFAULT '',
+      subtotal              REAL NOT NULL DEFAULT 0,
+      tax_amount            REAL NOT NULL DEFAULT 0,
+      shipping_cost         REAL NOT NULL DEFAULT 0,
+      total_amount          REAL NOT NULL DEFAULT 0,
+      status                TEXT NOT NULL DEFAULT 'draft',
+      ordered_by            TEXT NOT NULL DEFAULT '',
+      approved_by           TEXT,
+      approved_at           TEXT,
+      expected_delivery_date TEXT,
+      received_date         TEXT,
+      notes                 TEXT,
+      items_json            TEXT NOT NULL DEFAULT '[]',
+      sync_status           TEXT NOT NULL DEFAULT 'synced',
+      sync_version          INTEGER NOT NULL DEFAULT 1,
+      synced_at             TEXT,
+      updated_at            TEXT NOT NULL DEFAULT '',
+      created_at            TEXT NOT NULL DEFAULT ''
+    )`,
+    `id, organization_id, branch_id, po_number, supplier_id, subtotal, tax_amount,
+     shipping_cost, total_amount, status, ordered_by, approved_by, approved_at,
+     expected_delivery_date, received_date, notes, items_json, sync_status,
+     sync_version, synced_at, updated_at, created_at`,
+  );
+
+  // ── sales ─────────────────────────────────────────────────────────
+  // Remove UNIQUE on sale_number, add DEFAULTs
+  const saleCols = `id, organization_id, branch_id, sale_number, customer_id,
+    customer_name, subtotal, discount_amount, tax_amount, total_amount,
+    price_contract_id, contract_name, contract_discount_percentage, contract_type,
+    payment_method, payment_status, amount_paid, change_amount, payment_reference,
+    split_payment_details, insurance_preauth_number, prescription_id,
+    prescription_number, prescriber_name, prescriber_license, cashier_id,
+    pharmacist_id, insurance_claim_number, patient_copay_amount,
+    insurance_covered_amount, insurance_verified, insurance_verified_at,
+    insurance_verified_by, notes, status, cancelled_at, cancelled_by,
+    cancellation_reason, refund_amount, refunded_at, refunded_by, refund_reason,
+    refund_reference, receipt_printed, receipt_emailed, items_json, items_count,
+    sync_status, sync_version, synced_at, updated_at, created_at`;
+
+  await copyKeepingBoth(
+    "sales", "sales_crr",
+    `CREATE TABLE sales_crr (
+    id                            TEXT NOT NULL PRIMARY KEY,
+    organization_id               TEXT NOT NULL DEFAULT '',
+    branch_id                     TEXT NOT NULL DEFAULT '',
+    sale_number                   TEXT NOT NULL DEFAULT '',
+    customer_id                   TEXT,
+    customer_name                 TEXT,
+    subtotal                      REAL NOT NULL DEFAULT 0,
+    discount_amount               REAL NOT NULL DEFAULT 0,
+    tax_amount                    REAL NOT NULL DEFAULT 0,
+    total_amount                  REAL NOT NULL DEFAULT 0,
+    price_contract_id             TEXT,
+    contract_name                 TEXT,
+    contract_discount_percentage  REAL,
+    contract_type                 TEXT,
+    payment_method                TEXT NOT NULL DEFAULT 'cash',
+    payment_status                TEXT NOT NULL DEFAULT 'completed',
+    amount_paid                   REAL,
+    change_amount                 REAL NOT NULL DEFAULT 0,
+    payment_reference             TEXT,
+    split_payment_details         TEXT,
+    insurance_preauth_number      TEXT,
+    prescription_id               TEXT,
+    prescription_number           TEXT,
+    prescriber_name               TEXT,
+    prescriber_license            TEXT,
+    cashier_id                    TEXT NOT NULL DEFAULT '',
+    pharmacist_id                 TEXT,
+    insurance_claim_number        TEXT,
+    patient_copay_amount          REAL,
+    insurance_covered_amount      REAL,
+    insurance_verified            INTEGER NOT NULL DEFAULT 0,
+    insurance_verified_at         TEXT,
+    insurance_verified_by         TEXT,
+    notes                         TEXT,
+    status                        TEXT NOT NULL DEFAULT 'completed',
+    cancelled_at                  TEXT,
+    cancelled_by                  TEXT,
+    cancellation_reason           TEXT,
+    refund_amount                 REAL,
+    refunded_at                   TEXT,
+    refunded_by                   TEXT,
+    refund_reason                 TEXT,
+    refund_reference              TEXT,
+    receipt_printed               INTEGER NOT NULL DEFAULT 0,
+    receipt_emailed               INTEGER NOT NULL DEFAULT 0,
+    items_json                    TEXT NOT NULL DEFAULT '[]',
+    items_count                   INTEGER NOT NULL DEFAULT 0,
+    sync_status                   TEXT NOT NULL DEFAULT 'synced',
+    sync_version                  INTEGER NOT NULL DEFAULT 1,
+    synced_at                     TEXT,
+    updated_at                    TEXT NOT NULL DEFAULT '',
+    created_at                    TEXT NOT NULL DEFAULT ''
+    )`,
+    saleCols,
+    "branch_id",
+    "sale_number",
+  );
+
+  // ── Convert all 5 tables to CRR ───────────────────────────────────
+  const crrTables = [
+    "drug_batches", "customers", "prescriptions",
+    "purchase_orders", "sales",
+  ];
+  for (const table of crrTables) {
+    try {
+      await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
+      console.log(`[localDb] ${table} converted to CRR`);
+    } catch (e) {
+      console.warn(`[localDb] crsql_as_crr for ${table} not available:`, e);
+    }
+  }
+
+    await db.execute("PRAGMA user_version = 16");
+    await db.execute("COMMIT");
+  } catch (error) {
+    try {
+      await db.execute("ROLLBACK");
+    } catch {
+      // Preserve the original migration failure if rollback also fails.
+    }
+    throw error;
+  }
+}
+
+async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
+  try {
+    await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN event_id TEXT");
+  } catch { }
+  try {
+    await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN uploaded_at TEXT");
+  } catch { }
+  await db.execute(`
+    UPDATE crr_renumber_audit
+    SET event_id = table_name || ':' || loser_id || ':' ||
+                   old_business_key || ':' || new_business_key
+    WHERE event_id IS NULL OR event_id = ''
+  `);
+  await db.execute(`
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_crr_renumber_audit_event_id
+    ON crr_renumber_audit(event_id)
+  `);
+}
+
+async function ensureCustomerMergeDirectiveSchema(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS customer_merge_aliases (
+      loser_id     TEXT PRIMARY KEY,
+      survivor_id  TEXT NOT NULL,
+      event_id     TEXT NOT NULL,
+      merged_at    TEXT NOT NULL
+    )
+  `);
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS applied_customer_merge_directives (
+      event_id    TEXT PRIMARY KEY,
+      applied_at  TEXT NOT NULL
+    )
+  `);
+}
+
 async function ensureBranchInventorySchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
@@ -636,6 +1110,15 @@ const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
   "price_contracts",
 ]);
 
+export const CRR_TABLES = new Set([
+    "branch_inventory",
+    "drug_batches",
+    "customers",
+    "prescriptions",
+    "purchase_orders",
+    "sales",
+]);
+
 export const SYNC_QUEUE_CHANGED_EVENT = "laso:sync-queue-changed";
 
 function notifySyncQueueChanged(): void {
@@ -702,6 +1185,8 @@ export async function enqueue(
   syncVersion: number,
   payload: Record<string, unknown>
 ): Promise<void> {
+  // CRR tables are tracked by cr-sqlite's crsql_changes — skip the old sync_queue
+  if (CRR_TABLES.has(tableName)) return;
   const db = await getDb();
   const operationId = crypto.randomUUID();
   await db.execute(
@@ -1009,6 +1494,220 @@ export async function getPendingCount(scope?: QueueScope): Promise<number> {
     "SELECT COUNT(*) as count FROM sync_queue"
   );
   return rows?.[0]?.count ?? 0;
+}
+
+// ─── CRR (cr-sqlite) helpers ───────────────────────────────────────────
+
+export interface CrrRenumberAuditEvent {
+  event_id: string;
+  table_name: "prescriptions" | "purchase_orders" | "sales";
+  winner_id: string;
+  loser_id: string;
+  business_key_col: string;
+  old_business_key: string;
+  new_business_key: string;
+  renumbered_at: string;
+}
+
+export async function getPendingCrrRenumberAudits(): Promise<CrrRenumberAuditEvent[]> {
+  const db = await getDb();
+  return db.select<CrrRenumberAuditEvent[]>(`
+    SELECT event_id, table_name, winner_id, loser_id, business_key_col,
+           old_business_key, new_business_key, renumbered_at
+    FROM crr_renumber_audit
+    WHERE uploaded_at IS NULL
+    ORDER BY id
+    LIMIT 500
+  `);
+}
+
+export async function markCrrRenumberAuditsUploaded(eventIds: string[]): Promise<void> {
+  if (eventIds.length === 0) return;
+  const db = await getDb();
+  const uploadedAt = new Date().toISOString();
+  for (const eventId of eventIds) {
+    await db.execute(
+      "UPDATE crr_renumber_audit SET uploaded_at = $1 WHERE event_id = $2",
+      [uploadedAt, eventId],
+    );
+  }
+}
+
+let _crr_site_id: string | null = null;
+
+/** Get the local cr-sqlite site ID (cached after first call). */
+export async function getCrrSiteId(): Promise<string> {
+  if (_crr_site_id) return _crr_site_id;
+  const db = await getDb();
+  const rows = await db.select<{ "crsql_site_id()": string }[]>(
+    "SELECT crsql_site_id()"
+  );
+  _crr_site_id = rows?.[0]?.["crsql_site_id()"] ?? "";
+  return _crr_site_id;
+}
+
+export interface CrrChangeRow {
+  table: string;
+  pk: unknown;
+  cid: string;
+  val: unknown;
+  col_version: number;
+  db_version: number;
+  site_id: string;
+  cl: number;
+  seq: number;
+}
+
+export interface CustomerMergeDirective {
+  directive_version: number;
+  event_id: string;
+  survivor_id: string;
+  loser_id: string;
+  merged_at: string;
+}
+
+async function normalizeMergedCustomerReferences(db: Database): Promise<void> {
+  for (const table of ["sales", "prescriptions"]) {
+    await db.execute(`
+      UPDATE ${table}
+      SET customer_id = (
+        SELECT survivor_id FROM customer_merge_aliases
+        WHERE loser_id = ${table}.customer_id
+      )
+      WHERE customer_id IN (SELECT loser_id FROM customer_merge_aliases)
+    `);
+  }
+}
+
+export async function applyCustomerMergeDirectives(
+  directives: CustomerMergeDirective[],
+): Promise<void> {
+  if (directives.length === 0) return;
+  const db = await getDb();
+  await applyCustomerMergeDirectivesToDb(db, directives);
+}
+
+export async function applyCustomerMergeDirectivesToDb(
+  db: Database,
+  directives: CustomerMergeDirective[],
+): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    for (const directive of directives) {
+      const applied = await db.select<{ event_id: string }[]>(
+        "SELECT event_id FROM applied_customer_merge_directives WHERE event_id = $1",
+        [directive.event_id],
+      );
+      if (applied.length > 0) continue;
+
+      // Collapse older aliases if their survivor is itself merged later.
+      await db.execute(
+        "UPDATE customer_merge_aliases SET survivor_id = $1 WHERE survivor_id = $2",
+        [directive.survivor_id, directive.loser_id],
+      );
+      await db.execute(`
+        INSERT INTO customer_merge_aliases
+          (loser_id, survivor_id, event_id, merged_at)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(loser_id) DO UPDATE SET
+          survivor_id = excluded.survivor_id,
+          event_id = excluded.event_id,
+          merged_at = excluded.merged_at
+      `, [
+        directive.loser_id,
+        directive.survivor_id,
+        directive.event_id,
+        directive.merged_at,
+      ]);
+
+      await normalizeMergedCustomerReferences(db);
+      await db.execute("DELETE FROM customers WHERE id = $1", [directive.loser_id]);
+      await db.execute(
+        "INSERT INTO applied_customer_merge_directives(event_id, applied_at) VALUES($1, $2)",
+        [directive.event_id, new Date().toISOString()],
+      );
+    }
+    await normalizeMergedCustomerReferences(db);
+    await db.execute("COMMIT");
+  } catch (error) {
+    try { await db.execute("ROLLBACK"); } catch { }
+    throw error;
+  }
+}
+
+/**
+ * Return crsql_changes entries newer than `sinceDbVersion` for the given
+ * site_id (defaults to local site).  These are the changes this client
+ * produced locally and needs to push to the server.
+ */
+export async function getCrrPushChanges(
+  sinceDbVersion = 0,
+): Promise<CrrChangeRow[]> {
+  const db = await getDb();
+  const siteId = await getCrrSiteId();
+  if (!siteId) return [];
+  return db.select<CrrChangeRow[]>(
+    `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
+     FROM crsql_changes
+     WHERE site_id = ? AND db_version > ?
+     ORDER BY seq`,
+    [siteId, sinceDbVersion]
+  );
+}
+
+/**
+ * Insert changes from the server into local crsql_changes, triggering
+ * cr-sqlite's auto-merge into the local table.
+ */
+function decodeCrrValue(v: unknown): unknown {
+  if (typeof v === "string" && v.startsWith("b64:")) {
+    const binaryStr = atob(v.slice(4));
+    const bytes = new Uint8Array(binaryStr.length);
+    for (let i = 0; i < binaryStr.length; i++) {
+      bytes[i] = binaryStr.charCodeAt(i);
+    }
+    return bytes;
+  }
+  return v;
+}
+
+export async function applyCrrPullChanges(
+  changes: CrrChangeRow[],
+): Promise<void> {
+  if (changes.length === 0) return;
+  const db = await getDb();
+  await applyCrrPullChangesToDb(db, changes);
+}
+
+export async function applyCrrPullChangesToDb(
+  db: Database,
+  changes: CrrChangeRow[],
+): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    for (const ch of changes) {
+      await db.execute(
+        `INSERT INTO crsql_changes ("table", pk, cid, val, col_version, db_version, site_id, cl, seq)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
+        [
+          ch.table,
+          decodeCrrValue(ch.pk),
+          ch.cid,
+          decodeCrrValue(ch.val),
+          ch.col_version,
+          ch.db_version,
+          ch.site_id,
+          ch.cl,
+          ch.seq,
+        ]
+      );
+    }
+    await normalizeMergedCustomerReferences(db);
+    await db.execute("COMMIT");
+  } catch (error) {
+    try { await db.execute("ROLLBACK"); } catch { }
+    throw error;
+  }
 }
 
 export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails[]): Promise<void> {

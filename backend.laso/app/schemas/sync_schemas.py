@@ -27,9 +27,10 @@ Ownership rules encoded here:
 
 from __future__ import annotations
 
+import base64
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, field_serializer, field_validator, model_validator
 import uuid
 
 from app.schemas.base_schemas import BaseSchema
@@ -108,6 +109,20 @@ class PullRequest(BaseSchema):
         description="Subset of tables to pull. Defaults to all.",
     )
 
+    # CRDT sync: client reports its last seen crsql_changes db_version
+    crr_since_db_version: int = Field(
+        default=0,
+        description="Client's last applied cr-sqlite db_version. "
+                    "Server returns newer crr_changes rows on pull. "
+                    "Pass 0 on first sync to get all CRR changes.",
+        ge=0,
+    )
+    customer_merge_since_version: int = Field(
+        default=0,
+        description="Last crr_customer_merge_audit id applied by this client.",
+        ge=0,
+    )
+
     @field_validator("tables")
     @classmethod
     def validate_tables(cls, v: List[str]) -> List[str]:
@@ -126,6 +141,39 @@ class PullRequest(BaseSchema):
         if unknown:
             raise ValueError(f"Unknown tables requested: {unknown}")
         return v
+
+
+class CrrChangeRow(BaseSchema):
+    """A single row from crsql_changes, used for CRDT sync transport."""
+    table: str
+    pk: Any = None
+    cid: str
+    val: Any = None
+    col_version: int
+    db_version: int
+    site_id: str
+    cl: int
+    seq: int
+
+    @field_serializer("pk", "val")
+    def serialize_bytes(self, v: Any) -> Any:
+        """Convert ``bytes`` to ``b64:<base64>`` strings for JSON transport.
+
+        cr-sqlite stores arbitrary column values in ``pk`` and ``val``;
+        when those columns are BLOB in the original table, sqlite3 returns
+        ``bytes`` objects that cannot be serialised to JSON directly.
+        """
+        if isinstance(v, bytes):
+            return "b64:" + base64.b64encode(v).decode("ascii")
+        return v
+
+
+class CustomerMergeDirective(BaseSchema):
+    directive_version: int
+    event_id: str
+    survivor_id: uuid.UUID
+    loser_id: uuid.UUID
+    merged_at: datetime
 
 
 class PullResponse(BaseSchema):
@@ -147,6 +195,27 @@ class PullResponse(BaseSchema):
     drug_batches: List[DrugBatchResponse] = Field(default_factory=list)
     sales: List[SaleResponse] = Field(default_factory=list)
     purchase_orders: List[PurchaseOrderResponse] = Field(default_factory=list)
+
+    # CRDT changes (cr-sqlite) for migrated tables
+    crr_changes: List[CrrChangeRow] = Field(
+        default_factory=list,
+        description="cr-sqlite crsql_changes rows since last_sync_db_version. "
+                    "Client inserts these into its local crsql_changes to trigger "
+                    "automatic CRDT merge. Only present for tables migrated to CRR.",
+    )
+    crr_max_db_version: int = Field(
+        default=0,
+        description="The maximum db_version in this batch of crr_changes. "
+                    "Client stores this and passes as crr_since_db_version on next pull.",
+    )
+    customer_merge_directives: List[CustomerMergeDirective] = Field(
+        default_factory=list,
+        description="Durable loser-to-survivor mappings for customer merges.",
+    )
+    customer_merge_max_version: int = Field(
+        default=0,
+        description="Highest directive_version returned in this batch.",
+    )
 
     # Metadata
     sync_timestamp: datetime = Field(
@@ -316,3 +385,113 @@ class PushResponse(BaseSchema):
     # so it receives any server-side changes triggered by its push
     # (e.g. inventory totals updated by a sale it just pushed)
     next_pull_timestamp: datetime
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CRR PUSH  (branch → server, via cr-sqlite crsql_changes)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class CrrPushRecord(BaseSchema):
+    """A single crsql_changes row pushed from the client.
+
+    The server inserts these into its own shadow DB's crsql_changes table,
+    triggering cr-sqlite's automatic CRDT merge.
+    """
+    table: str = Field(
+        ..., description="Name of the CRR table (e.g. branch_inventory)",
+    )
+    pk: Any = None
+    cid: str = Field(
+        ..., description="Column name that changed",
+    )
+    val: Any = None
+    col_version: int
+    db_version: int
+    site_id: str
+    cl: int
+    seq: int
+
+    @field_validator("table")
+    @classmethod
+    def validate_crr_table(cls, v: str) -> str:
+        allowed = {
+            "branch_inventory", "drug_batches", "customers",
+            "prescriptions", "purchase_orders", "sales",
+        }
+        if v not in allowed:
+            raise ValueError(
+                f"'{v}' is not a CRR table. "
+                f"Allowed: {allowed}"
+            )
+        return v
+
+
+class CrrRenumberAuditEvent(BaseSchema):
+    """Idempotent client-originated keep_both_renumber audit event."""
+    event_id: str = Field(..., min_length=1, max_length=512)
+    table_name: str
+    winner_id: uuid.UUID
+    loser_id: uuid.UUID
+    business_key_col: str
+    old_business_key: str
+    new_business_key: str
+    renumbered_at: datetime
+
+    @field_validator("table_name")
+    @classmethod
+    def validate_table_name(cls, value: str) -> str:
+        allowed = {"prescriptions", "purchase_orders", "sales"}
+        if value not in allowed:
+            raise ValueError(f"'{value}' does not use keep_both_renumber")
+        return value
+
+
+class CrrPushRequest(BaseSchema):
+    """Batch of crsql_changes rows the client is pushing.
+
+    The server validates, inserts into its shadow crsql_changes,
+    lets cr-sqlite merge, then upserts the merged state to Postgres.
+    """
+    branch_id: uuid.UUID
+    changes: List[CrrPushRecord] = Field(
+        default_factory=list, max_length=1000,
+        description="Raw crsql_changes rows from the client",
+    )
+    audit_events: List[CrrRenumberAuditEvent] = Field(
+        default_factory=list, max_length=1000,
+        description="Migration-time keep_both_renumber audit events",
+    )
+
+    @model_validator(mode="after")
+    def require_payload(self):
+        if not self.changes and not self.audit_events:
+            raise ValueError("At least one CRR change or audit event is required")
+        return self
+
+
+class CrrPushResult(BaseSchema):
+    """Result for a single pushed CRR change batch."""
+    table: str
+    row_id: str
+    success: bool
+    error: Optional[str] = None
+
+
+class CrrPushResponse(BaseSchema):
+    """
+    Response to a CRR push.
+    The client no longer needs to dequeue sync_queue entries for this table;
+    cr-sqlite already tracked the change.
+    """
+    results: List[CrrPushResult] = Field(default_factory=list)
+    total_received: int
+    total_accepted: int
+    total_failed: int
+    sync_timestamp: datetime
+    merged_row_ids: List[str] = Field(
+        default_factory=list,
+        description="IDs of rows that were merged into Postgres. "
+                    "Client can re-pull these if needed.",
+    )
+    accepted_audit_event_ids: List[str] = Field(default_factory=list)
+    audit_errors: Dict[str, str] = Field(default_factory=dict)

@@ -1,0 +1,281 @@
+"""
+CRR Sync Service
+================
+
+Handles cr-sqlite CRDT-based sync for tables migrated to CRR.
+
+Per ADR 0003:
+  1. Client POSTs crsql_changes rows to /sync/crr-push
+  2. Server validates (org scope, FK checks)
+  3. Server INSERTs into shadow crsql_changes → triggers auto-merge
+  4. Server reads merged state from shadow table
+  5. Server upserts merged row into Postgres
+
+Per ADR 0002: single Mutex<Connection> on the shadow DB.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Tuple
+import uuid
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.inventory.inventory_model import Drug
+from app.schemas.sync_schemas import (
+    CrrPushRecord,
+    CrrRenumberAuditEvent,
+    CrrPushResult,
+    CrrPushResponse,
+)
+from app.services.sync.shadow_db import get_shadow_db
+
+logger = logging.getLogger(__name__)
+
+
+# ── Table-level FK / validation rules ─────────────────────────────────
+
+# Tables that are FK-validated before the merge is accepted
+_CRR_VALIDATORS: Dict[str, callable] = {}
+
+
+async def _validate_branch_inventory(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Validate a merged branch_inventory row.
+
+    Returns an error string or None if valid.
+    """
+    drug_id = merged.get("drug_id", "")
+    if not drug_id:
+        return "Missing drug_id"
+
+    # Drug must belong to this organization
+    drug = await db.scalar(
+        select(Drug.id).where(
+            Drug.id == drug_id,
+            Drug.organization_id == organization_id,
+        )
+    )
+    if not drug:
+        return f"Drug {drug_id} not found in organization"
+
+    # Quantity sanity
+    try:
+        qty = int(merged.get("quantity", 0))
+        reserved = int(merged.get("reserved_quantity", 0))
+    except (TypeError, ValueError):
+        return "Invalid quantity values"
+
+    if qty < 0 or qty > 1_000_000:
+        return f"Quantity {qty} out of range"
+    if reserved < 0 or reserved > qty:
+        return f"reserved_quantity {reserved} out of range for quantity {qty}"
+
+    return None
+
+
+_CRR_VALIDATORS["branch_inventory"] = _validate_branch_inventory
+
+
+# ── Main service ──────────────────────────────────────────────────────
+
+class CrrSyncService:
+
+    @staticmethod
+    async def persist_client_renumber_audits(
+        db: AsyncSession,
+        events: List[CrrRenumberAuditEvent],
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+    ) -> Tuple[List[str], Dict[str, str]]:
+        """Persist client migration audits after verifying both rows are in scope."""
+        accepted: List[str] = []
+        errors: Dict[str, str] = {}
+        expected_columns = {
+            "prescriptions": "prescription_number",
+            "purchase_orders": "po_number",
+            "sales": "sale_number",
+        }
+
+        for event in events:
+            try:
+                expected_column = expected_columns[event.table_name]
+                if event.business_key_col != expected_column:
+                    raise ValueError(
+                        f"Invalid business key column for {event.table_name}"
+                    )
+                expected_event_id = (
+                    f"{event.table_name}:{event.loser_id}:"
+                    f"{event.old_business_key}:{event.new_business_key}"
+                )
+                if event.event_id != expected_event_id:
+                    raise ValueError("Audit event_id does not match event contents")
+
+                scoped_rows = await db.execute(
+                    text(f"""
+                        SELECT id FROM {event.table_name}
+                        WHERE id IN (:winner_id, :loser_id)
+                          AND organization_id = :organization_id
+                          AND branch_id = :branch_id
+                    """),
+                    {
+                        "winner_id": str(event.winner_id),
+                        "loser_id": str(event.loser_id),
+                        "organization_id": str(organization_id),
+                        "branch_id": str(branch_id),
+                    },
+                )
+                ids = {str(row[0]) for row in scoped_rows.fetchall()}
+                if ids != {str(event.winner_id), str(event.loser_id)}:
+                    raise ValueError("Audit rows are missing or outside sync scope")
+
+                await db.execute(text("""
+                    INSERT INTO crr_renumber_audit
+                        (event_id, table_name, winner_id, loser_id,
+                         business_key_col, old_business_key, new_business_key,
+                         renumbered_at)
+                    VALUES
+                        (:event_id, :table_name, :winner_id, :loser_id,
+                         :business_key_col, :old_business_key, :new_business_key,
+                         :renumbered_at)
+                    ON CONFLICT (event_id) DO NOTHING
+                """), {
+                    "event_id": event.event_id,
+                    "table_name": event.table_name,
+                    "winner_id": str(event.winner_id),
+                    "loser_id": str(event.loser_id),
+                    "business_key_col": event.business_key_col,
+                    "old_business_key": event.old_business_key,
+                    "new_business_key": event.new_business_key,
+                    "renumbered_at": event.renumbered_at,
+                })
+                accepted.append(event.event_id)
+            except Exception as exc:
+                logger.warning(
+                    "Rejected client renumber audit %s: %s",
+                    event.event_id, exc,
+                )
+                errors[event.event_id] = str(exc)
+
+        await db.commit()
+        return accepted, errors
+
+    @staticmethod
+    async def handle_crr_push(
+        db: AsyncSession,
+        changes: List[CrrPushRecord],
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+    ) -> CrrPushResponse:
+        """
+        Accept a batch of crsql_changes rows from a client branch.
+
+        For each row:
+          1. Validate the table is a known CRR table
+          2. Group by table + PK
+          3. Insert into shadow crsql_changes (triggers auto-merge)
+          4. Read the merged row from the shadow table
+          5. Validate merged row (FK, business rules)
+          6. If valid, upsert into Postgres
+
+        If validation fails for a group, the shadow DB changes are
+        rolled back to the savepoint and the error is reported.
+        """
+        now = datetime.now(timezone.utc)
+        shadow = await get_shadow_db()
+        results: List[CrrPushResult] = []
+        merged_ids: List[str] = []
+
+        # Group changes by (table, pk)
+        groups: Dict[Tuple[str, str], List[CrrPushRecord]] = {}
+        for ch in changes:
+            pk_str = str(ch.pk) if ch.pk is not None else ""
+            key = (ch.table, pk_str)
+            groups.setdefault(key, []).append(ch)
+
+        for (table, pk_str), group_changes in groups.items():
+            validator = _CRR_VALIDATORS.get(table)
+            row_id = pk_str
+            error: Optional[str] = None
+
+            try:
+                # Build the raw tuples for shadow DB insert
+                rows_to_insert: List[Tuple[Any, ...]] = []
+                for ch in group_changes:
+                    rows_to_insert.append((
+                        ch.table,
+                        ch.pk,
+                        ch.cid,
+                        ch.val,
+                        ch.col_version,
+                        ch.db_version,
+                        ch.site_id,
+                        ch.cl,
+                        ch.seq,
+                    ))
+
+                # Insert into shadow crsql_changes (auto-merge via triggers)
+                await shadow.insert_crr_changes(rows_to_insert)
+
+                # Read the merged state
+                merged = await shadow.get_merged_row(table, row_id)
+                if merged is None:
+                    error = f"Row {row_id} not found after merge in table {table}"
+                elif validator is not None:
+                    error = await validator(merged, organization_id, branch_id, db)
+
+                if error:
+                    logger.warning(
+                        "CRR push validation failed: table=%s row=%s error=%s",
+                        table, row_id, error,
+                    )
+                    results.append(CrrPushResult(
+                        table=table,
+                        row_id=row_id,
+                        success=False,
+                        error=error,
+                    ))
+                else:
+                    # Upsert the merged row into Postgres
+                    # (delegates to shadow.upsert_merged_row which handles
+                    # duplicate business-key detection and configurable merge)
+                    await shadow.upsert_merged_row(db, table, merged)
+                    merged_ids.append(row_id)
+                    results.append(CrrPushResult(
+                        table=table,
+                        row_id=row_id,
+                        success=True,
+                    ))
+
+            except Exception as exc:
+                logger.error(
+                    "CRR push error: table=%s row=%s exc=%s",
+                    table, row_id, exc, exc_info=True,
+                )
+                results.append(CrrPushResult(
+                    table=table,
+                    row_id=row_id,
+                    success=False,
+                    error=str(exc),
+                ))
+
+        await db.commit()
+
+        accepted = len([r for r in results if r.success])
+        failed = len([r for r in results if not r.success])
+
+        return CrrPushResponse(
+            results=results,
+            total_received=len(changes),
+            total_accepted=accepted,
+            total_failed=failed,
+            sync_timestamp=now,
+            merged_row_ids=merged_ids,
+        )

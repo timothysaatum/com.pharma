@@ -1,3 +1,8 @@
+mod db;
+
+use db::DbState;
+use tauri::Manager;
+
 const KEYRING_SERVICE: &str = "com.vermithor.pharmacare";
 
 fn validate_secret_key(key: &str) -> Result<(), String> {
@@ -57,16 +62,35 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_sql::Builder::new().build())
         .setup(|app| {
             #[cfg(desktop)]
             app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+
+            // Initialize the local SQLite database with rusqlite + cr-sqlite
+            let db_dir = app.path().app_data_dir().ok();
+            let resource_dir = app.path().resource_dir().ok();
+            let ext_path = match db::resolve_extension_path(resource_dir) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("[db] {e}");
+                    None
+                }
+            };
+            let db_state = db::init_db(db_dir, ext_path)
+                .expect("Failed to initialize local database");
+            app.manage(db_state);
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             secure_set,
             secure_get,
-            secure_delete
+            secure_delete,
+            db::db_execute,
+            db::db_select,
+            db::db_execute_batch,
+            db::db_test_savepoint,
+            db::db_get_crsql_changes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

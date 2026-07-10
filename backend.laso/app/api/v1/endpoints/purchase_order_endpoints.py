@@ -26,7 +26,7 @@ from typing import Annotated, List, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import false, select, or_
+from sqlalchemy import false, select, or_, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
@@ -271,6 +271,7 @@ async def list_purchase_orders(
         ),
     ] = None,
     supplier_id: Annotated[Optional[uuid.UUID], Query(description="Filter by supplier")] = None,
+    search: Annotated[Optional[str], Query(max_length=100, description="Search current or original PO number")] = None,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
     organization_id: uuid.UUID = Depends(get_organization_id),
@@ -312,6 +313,19 @@ async def list_purchase_orders(
         query = query.where(PurchaseOrder.status == status_filter)
     if supplier_id:
         query = query.where(PurchaseOrder.supplier_id == supplier_id)
+    if search:
+        search_value = search.strip()
+        query = query.where(or_(
+            PurchaseOrder.po_number.ilike(f"%{search_value}%"),
+            text("""
+                EXISTS (
+                    SELECT 1 FROM crr_renumber_audit audit
+                    WHERE audit.table_name = 'purchase_orders'
+                      AND audit.loser_id = CAST(purchase_orders.id AS VARCHAR)
+                      AND audit.old_business_key = :audit_original_key
+                )
+            """).bindparams(audit_original_key=search_value),
+        ))
 
     query = query.order_by(PurchaseOrder.created_at.desc())
 

@@ -624,6 +624,11 @@ export default function PrescriptionsPage() {
               <tr key={rx.id} className="hover:bg-slate-50/70">
                 <td className="px-6 py-4">
                   <p className="font-bold text-ink font-mono">{rx.prescription_number}</p>
+                  {rx.renumbered_from && (
+                    <p className="mt-1 text-xs font-medium text-amber-700">
+                      Originally {rx.renumbered_from}; renumbered after offline collision.
+                    </p>
+                  )}
                   <p className="text-xs text-slate-400">{rx.medications?.length ?? 0} medications</p>
                 </td>
                 <td className="px-6 py-4 text-slate-600">{rx.customer_name ?? "Customer"}</td>
