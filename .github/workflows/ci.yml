@@ -57,6 +57,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Install native cr-sqlite extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.16.3 --repo vlcn-io/cr-sqlite --pattern "crsqlite-linux-x86_64.zip" --dir ui.laso/src-tauri/crsqlite-download
+          node ui.laso/scripts/install-crsqlite-extension.mjs ui.laso/src-tauri/crsqlite-download/crsqlite-linux-x86_64.zip ui.laso/src-tauri/crsqlite.so
       - name: Install Tauri system dependencies
         run: |
           sudo apt-get update

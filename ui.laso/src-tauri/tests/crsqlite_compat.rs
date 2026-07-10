@@ -5,8 +5,11 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const EXT_PATH: &str = "crsqlite.so";
 static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
+
+fn extension_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crsqlite.so")
+}
 
 fn temp_db_path(label: &str) -> PathBuf {
     let id = NEXT_DB_ID.fetch_add(1, Ordering::Relaxed);
@@ -25,7 +28,8 @@ fn open_db(path: &Path, load_crsqlite: bool) -> Connection {
         .expect("pragmas");
     if load_crsqlite {
         unsafe {
-            conn.load_extension(EXT_PATH, None).expect("load cr-sqlite");
+            conn.load_extension(extension_path(), None)
+                .expect("load cr-sqlite");
         }
     }
     conn
@@ -40,7 +44,8 @@ fn connect_existing(path: &Path, load_crsqlite: bool) -> Connection {
         .expect("pragmas");
     if load_crsqlite {
         unsafe {
-            conn.load_extension(EXT_PATH, None).expect("load cr-sqlite");
+            conn.load_extension(extension_path(), None)
+                .expect("load cr-sqlite");
         }
     }
     conn

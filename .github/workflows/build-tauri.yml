@@ -40,12 +40,20 @@ jobs:
         include:
           - platform: ubuntu-22.04
             args: ''
+            crsqlite_asset: crsqlite-linux-x86_64.zip
+            test_crsqlite: true
           - platform: windows-latest
             args: ''
+            crsqlite_asset: crsqlite-win-x86_64.zip
+            test_crsqlite: false
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'  # Apple Silicon
+            crsqlite_asset: crsqlite-darwin-aarch64.zip
+            test_crsqlite: false
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'   # Intel Mac
+            crsqlite_asset: crsqlite-darwin-x86_64.zip
+            test_crsqlite: false
 
     runs-on: ${{ matrix.platform }}
 
@@ -81,6 +89,13 @@ jobs:
         working-directory: ui.laso
         run: pnpm install --frozen-lockfile
 
+      - name: Install target cr-sqlite extension
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.16.3 --repo vlcn-io/cr-sqlite --pattern "${{ matrix.crsqlite_asset }}" --dir ui.laso/src-tauri/crsqlite-download
+          node ui.laso/scripts/install-crsqlite-extension.mjs "ui.laso/src-tauri/crsqlite-download/${{ matrix.crsqlite_asset }}" ui.laso/src-tauri/crsqlite.so
+
       - name: Validate production API URL
         run: node -e "if (!process.env.VITE_API_URL?.startsWith('https://')) throw new Error('VITE_API_URL must be an HTTPS URL')"
 
@@ -94,7 +109,12 @@ jobs:
 
       - name: Test Rust commands
         working-directory: ui.laso/src-tauri
-        run: cargo test --locked
+        run: cargo test --locked --lib
+
+      - name: Test cr-sqlite compatibility
+        if: matrix.test_crsqlite
+        working-directory: ui.laso/src-tauri
+        run: cargo test --locked --test crsqlite_compat
 
       - name: Audit Rust dependencies
         if: matrix.platform == 'ubuntu-22.04'
