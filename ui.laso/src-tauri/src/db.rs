@@ -1,5 +1,5 @@
 use rusqlite::{Connection, params_from_iter};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::sync::Mutex;
 use tauri::State;
@@ -76,7 +76,7 @@ pub fn init_db(
     std::fs::create_dir_all(&db_dir).map_err(|e| format!("Cannot create DB dir: {e}"))?;
 
     let db_path = db_dir.join("laso.db");
-    let mut conn = Connection::open(&db_path)
+    let conn = Connection::open(&db_path)
         .map_err(|e| format!("Cannot open SQLite DB: {e}"))?;
 
     // Enable WAL mode

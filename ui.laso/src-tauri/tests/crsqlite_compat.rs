@@ -3,12 +3,28 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-const EXT_PATH: &str = "../crsqlite.so";
+const EXT_PATH: &str = "crsqlite.so";
 
 fn open_db(path: &str, load_crsqlite: bool) -> Connection {
     // Remove old file if exists
     let _ = std::fs::remove_file(path);
-    let mut conn = Connection::open(path).expect("open");
+    let conn = Connection::open(path).expect("open");
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
+        .expect("pragmas");
+    if load_crsqlite {
+        unsafe {
+            conn.load_extension(EXT_PATH, None)
+                .expect("load cr-sqlite");
+        }
+    }
+    conn
+}
+
+/// Opens a connection to an EXISTING database file without deleting it,
+/// optionally loading the cr-sqlite extension. Safe to call from multiple
+/// threads/connections against a database that's already been set up.
+fn connect_existing(path: &str, load_crsqlite: bool) -> Connection {
+    let conn = Connection::open(path).expect("open existing db");
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .expect("pragmas");
     if load_crsqlite {
@@ -249,7 +265,7 @@ fn step5_concurrency() {
     // Spawn reader threads that continuously read while a writer writes
     let reader_count = 4;
     let iterations = 50;
-    let readers_done = Arc::new(Mutex::new(0));
+    let readers_done = Arc::new(Mutex::new(Vec::new()));
     let errors = Arc::new(Mutex::new(Vec::new()));
 
     let mut handles = Vec::new();
@@ -286,10 +302,8 @@ fn step5_concurrency() {
     let path = db_path.to_string();
     let errs = errors.clone();
     handles.push(thread::spawn(move || {
-        let conn = match Connection::open(&path) {
-            Ok(c) => c,
-            Err(e) => { errs.lock().unwrap().push(format!("writer open: {e}")); return; }
-        };
+        let conn = connect_existing(&path, true);
+        let _ = &errs; // kept for symmetry with reader error handling
         for i in 0..iterations {
             if let Err(e) = conn.execute(
                 "UPDATE branch_inventory SET quantity = ?1 WHERE id = 'concur-1'",

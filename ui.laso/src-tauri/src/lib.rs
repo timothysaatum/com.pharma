@@ -1,6 +1,5 @@
 mod db;
 
-use db::DbState;
 use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "com.vermithor.pharmacare";
