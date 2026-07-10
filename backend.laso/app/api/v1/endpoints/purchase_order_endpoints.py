@@ -26,7 +26,7 @@ from typing import Annotated, List, Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, or_
+from sqlalchemy import false, select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
@@ -272,6 +272,7 @@ async def list_purchase_orders(
     ] = None,
     supplier_id: Annotated[Optional[uuid.UUID], Query(description="Filter by supplier")] = None,
     db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     organization_id: uuid.UUID = Depends(get_organization_id),
 ) -> PaginatedResponse[PurchaseOrderResponse]:
     """
@@ -281,8 +282,32 @@ async def list_purchase_orders(
         PurchaseOrder.organization_id == organization_id
     )
 
+    assigned_branch_ids = {
+        str(assigned_branch_id)
+        for assigned_branch_id in (current_user.assigned_branches or [])
+    }
+    has_cross_branch_access = (
+        current_user.is_super_admin
+        or current_user.has_permission("approve_purchase_orders")
+        or current_user.has_permission("view_reports")
+    )
+
     if branch_id:
+        if not has_cross_branch_access and str(branch_id) not in assigned_branch_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to purchase orders for this branch",
+            )
         query = query.where(PurchaseOrder.branch_id == branch_id)
+    elif not has_cross_branch_access:
+        if assigned_branch_ids:
+            query = query.where(
+                PurchaseOrder.branch_id.in_(
+                    [uuid.UUID(assigned_id) for assigned_id in assigned_branch_ids]
+                )
+            )
+        else:
+            query = query.where(false())
     if status_filter:
         query = query.where(PurchaseOrder.status == status_filter)
     if supplier_id:
