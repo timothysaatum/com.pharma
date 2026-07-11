@@ -51,6 +51,19 @@ export const LEGACY_SYNC_TABLES = [
     "audit_logs",
 ];
 
+export async function getCompatibleLocalColumns(
+    db: { select<T>(sql: string, values?: any[]): Promise<T> },
+    table: string,
+    requested: string[],
+): Promise<string[]> {
+    const info = await db.select<Array<{ name: string }>>(
+        `PRAGMA table_info(${table})`
+    );
+    if (!info.length) return requested;
+    const available = new Set(info.map((column) => column.name));
+    return requested.filter((column) => available.has(column));
+}
+
 /** Maximum push attempts before an item is dead-lettered (excluded from sync queue). */
 const MAX_PUSH_ATTEMPTS = 10;
 const CRR_DB_VERSION_KEY = "crr_db_version";
@@ -206,8 +219,8 @@ class SyncEngine {
             const pushResult = await this.push();
             await this.pushCrr();
             await this.reconcileOfflineSales();
-            await this.pull(pushResult.nextPullTimestamp ?? undefined);
             await this.pullCrr();
+            await this.pull(pushResult.nextPullTimestamp ?? undefined);
             await this.loadPersistedQueueState();
             this.networkRetryAttempt = 0;
             await this.scheduleNextQueuedRetry();
@@ -626,6 +639,9 @@ class SyncEngine {
             columns: string[]
         ) => {
             if (rows.length === 0) return;
+            const compatibleColumns = await getCompatibleLocalColumns(
+                db, table, columns
+            );
             
             for (const row of rows) {
                 const r = row as Record<string, unknown>;
@@ -651,7 +667,7 @@ class SyncEngine {
                         continue;
                     }
                 }
-                const vals = columns.map((c) => {
+                const vals = compatibleColumns.map((c) => {
                     const v = r[c];
                     if (typeof v === "boolean") return v ? 1 : 0;
                     if (Array.isArray(v) || (typeof v === "object" && v !== null)) {
@@ -680,14 +696,14 @@ class SyncEngine {
                     }
                     return v;
                 });
-                const placeholders = columns.map((_, i) => `$${i + 1}`).join(", ");
-                const updates = columns
+                const placeholders = compatibleColumns.map((_, i) => `$${i + 1}`).join(", ");
+                const updates = compatibleColumns
                     .filter((c) => c !== "id")
                     .map((c) => `${c} = excluded.${c}`)
                     .join(", ");
 
                 await db.execute(
-                    `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})
+                    `INSERT INTO ${table} (${compatibleColumns.join(", ")}) VALUES (${placeholders})
                      ON CONFLICT(id) DO UPDATE SET ${updates}`,
                     vals
                 );
