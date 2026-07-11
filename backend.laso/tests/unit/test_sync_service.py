@@ -121,6 +121,26 @@ def test_shadow_pg_row_replaces_client_queue_state_for_raw_insert():
     assert "synced_at" not in prepared
 
 
+def test_shadow_pg_row_drops_crr_only_aggregate_columns():
+    purchase_order = ShadowDB._prepare_pg_row("purchase_orders", {
+        "id": str(uuid.uuid4()),
+        "po_number": "PO-EDGE",
+        "items_json": "[]",
+        "sync_status": "pending",
+    })
+    sale = ShadowDB._prepare_pg_row("sales", {
+        "id": str(uuid.uuid4()),
+        "sale_number": "SALE-EDGE",
+        "items_json": "[]",
+        "items_count": 2,
+    })
+
+    assert "items_json" not in purchase_order
+    assert "items_json" not in sale
+    assert "items_count" not in sale
+    assert purchase_order["sync_status"] == "synced"
+
+
 def test_server_resolves_tracked_monorepo_crsqlite_extension(monkeypatch, tmp_path):
     from app.services.sync.shadow_db import _resolve_extension_path
 

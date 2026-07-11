@@ -32,6 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.db.base import Base
+# Register every mapped table before type coercion inspects Base.metadata.
+# ShadowDB is also used by standalone reconciliation/e2e processes that do not
+# import FastAPI's normal model-loading path first.
+import app.models as _registered_models  # noqa: F401, E402
 
 logger = logging.getLogger(__name__)
 
@@ -820,10 +824,16 @@ class ShadowDB:
     @classmethod
     def _prepare_pg_row(cls, table: str, row: Dict[str, Any]) -> Dict[str, Any]:
         """Remove local-only fields and normalize required Postgres values."""
+        model_table = Base.metadata.tables.get(table)
+        postgres_columns = (
+            {column.name for column in model_table.columns}
+            if model_table is not None else None
+        )
         prepared = {
             key: value
             for key, value in row.items()
             if key not in ("rowid", "sync_status", "synced_at")
+            and (postgres_columns is None or key in postgres_columns)
         }
         if not prepared:
             return prepared
@@ -981,8 +991,8 @@ class ShadowDB:
         # Collect existing business keys to avoid collision
         all_bk_rows = await db.execute(
             text(f"""
-                SELECT DISTINCT [{bk_column}] FROM {table}
-                WHERE [{bk_column}] LIKE :pattern
+                SELECT DISTINCT "{bk_column}" FROM {table}
+                WHERE "{bk_column}" LIKE :pattern
             """),
             {"pattern": f"{old_bk}%"},
         )
