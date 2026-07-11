@@ -24,6 +24,20 @@ from app.models.db_types import UUID, JSONB, ARRAY, INET
 config = context.config
 target_metadata = Base.metadata
 
+# These CRR audit tables are intentionally owned by hand-written migrations
+# and the sync layer rather than ORM models. Never let autogenerate interpret
+# their absence from Base.metadata as permission to drop them.
+AUTOGENERATE_EXCLUDED_TABLES = {
+    "crr_renumber_audit",
+    "crr_customer_merge_audit",
+}
+
+
+def include_object(object_, name, type_, reflected, compare_to):
+    if type_ == "table" and name in AUTOGENERATE_EXCLUDED_TABLES:
+        return False
+    return True
+
 # Logging setup
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -91,6 +105,7 @@ def run_migrations_offline() -> None:
         render_item=render_item,
         user_module_prefix='app.models.db_types.',
         process_revision_directives=process_revision_directives,
+        include_object=include_object,
     )
 
     with context.begin_transaction():
@@ -122,6 +137,7 @@ def run_migrations_online() -> None:
             render_item=render_item,
             user_module_prefix='app.models.db_types.',
             process_revision_directives=process_revision_directives,
+            include_object=include_object,
         )
 
         with context.begin_transaction():

@@ -1,7 +1,7 @@
 from app.db.base import Base
 from sqlalchemy import (
     String, Integer, Numeric, Text, 
-    ForeignKey, Index, CheckConstraint, UniqueConstraint, Date, text
+    ForeignKey, Index, CheckConstraint, Date, text
 )
 from app.models.db_types import UUID
 from sqlalchemy.orm import (
@@ -79,7 +79,8 @@ class BranchInventory(Base, TimestampMixin, SyncTrackingMixin):
     drug: Mapped["Drug"] = relationship(back_populates="inventory")
     
     __table_args__ = (
-        UniqueConstraint('branch_id', 'drug_id', name='uq_branch_drug'),
+        # Deliberately no business-key UNIQUE constraint: CRR conflict
+        # resolution must be able to retain concurrent offline rows.
         CheckConstraint("quantity >= 0", name='check_quantity_nonnegative'),
         CheckConstraint("reserved_quantity >= 0", name='check_reserved_nonnegative'),
         CheckConstraint("reserved_quantity <= quantity", name='check_reserved_lte_quantity'),
@@ -163,7 +164,7 @@ class DrugBatch(Base, TimestampMixin, SyncTrackingMixin):
     drug: Mapped["Drug"] = relationship(back_populates="batches")
     
     __table_args__ = (
-        UniqueConstraint('branch_id', 'drug_id', 'batch_number', name='uq_branch_drug_batch'),
+        # Deliberately no business-key UNIQUE constraint; see CRR migration.
         CheckConstraint("remaining_quantity >= 0", name='check_batch_remaining'),
         CheckConstraint("remaining_quantity <= quantity", name='check_batch_remaining_lte_total'),
         Index('idx_batch_branch', 'branch_id'),

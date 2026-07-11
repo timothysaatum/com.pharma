@@ -99,8 +99,13 @@ pub fn init_db(
             }
         }
         if startup_warning.is_none() {
-            match conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, String>(0)) {
-                Ok(site_id) => println!("[db] cr-sqlite loaded, site_id={site_id}"),
+            match conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0)) {
+                Ok(site_id) => {
+                    let site_id_hex: String = site_id.iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect();
+                    println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
+                }
                 Err(error) => startup_warning = Some(format!(
                     "cr-sqlite loaded but crsql_site_id() failed: {error}"
                 )),
@@ -119,6 +124,27 @@ pub fn init_db(
 #[cfg(test)]
 mod startup_tests {
     use super::init_db;
+    use std::path::PathBuf;
+
+    #[test]
+    fn real_crsqlite_extension_loads_without_degraded_warning() {
+        let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crsqlite.so");
+        assert!(extension.exists(), "test requires {}", extension.display());
+        let temp = std::env::temp_dir().join(format!(
+            "pharmacare-valid-extension-{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+
+        let state = init_db(Some(temp.clone()), Some(extension))
+            .expect("real cr-sqlite extension should initialize");
+        assert_eq!(state.startup_warning, None);
+        let site_id: Vec<u8> = state.conn.lock().unwrap()
+            .query_row("SELECT crsql_site_id()", [], |row| row.get(0)).unwrap();
+        assert!(!site_id.is_empty());
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(temp);
+    }
 
     #[test]
     fn invalid_extension_degrades_without_crashing_desktop_startup() {
