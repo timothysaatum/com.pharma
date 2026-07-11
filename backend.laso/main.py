@@ -226,12 +226,19 @@ async def lifespan(app: FastAPI):
     # Initialise CRDT shadow database (per ADR 0003)
     try:
         from app.services.sync.shadow_db import get_shadow_db
-        await get_shadow_db()
+        shadow = await get_shadow_db()
         logger.info("Shadow SQLite database initialised")
+
+        if not shadow.crr_available:
+            logger.error(
+                "CRR synchronization disabled: cr-sqlite extension is not "
+                "loaded. Set CRSQLITE_EXTENSION_PATH to the server's native "
+                "crsqlite library. CRR endpoints will return HTTP 503."
+            )
 
         # Start background CRR reconciliation loop
         reconcile_interval = settings.CRR_RECONCILE_INTERVAL_SECONDS
-        if reconcile_interval > 0:
+        if reconcile_interval > 0 and shadow.crr_available:
             global _crr_reconciliation_task
             _crr_reconciliation_task = asyncio.create_task(
                 _crr_reconciliation_loop(reconcile_interval)

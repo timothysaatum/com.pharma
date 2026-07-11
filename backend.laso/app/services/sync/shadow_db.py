@@ -284,6 +284,13 @@ def _resolve_extension_path() -> Optional[str]:
     candidates = [
         Path(__file__).parent / "crsqlite.so",
         Path("crsqlite.so"),
+        # Monorepo deployment fallback: the Tauri build keeps the vetted
+        # Linux server-compatible extension here. This avoids silently
+        # disabling CRR when systemd does not define an explicit path.
+        Path(__file__).resolve().parents[4]
+        / "ui.laso"
+        / "src-tauri"
+        / "crsqlite.so",
     ]
     for p in candidates:
         if p.exists():
@@ -396,6 +403,12 @@ class ShadowDB:
         self._initialized = False
         self._db_path: str = ""
         self._ext_path: Optional[str] = None
+        self._crr_available = False
+
+    @property
+    def crr_available(self) -> bool:
+        """Whether cr-sqlite loaded and its change table is queryable."""
+        return self._crr_available
 
     # ── Initialisation ────────────────────────────────────────────────
 
@@ -425,10 +438,12 @@ class ShadowDB:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=ON")
 
+        extension_loaded = False
         if self._ext_path:
             try:
                 conn.enable_load_extension(True)
                 conn.load_extension(self._ext_path)
+                extension_loaded = True
                 logger.info("cr-sqlite extension loaded from %s", self._ext_path)
             except Exception as exc:
                 logger.warning(
@@ -443,6 +458,7 @@ class ShadowDB:
             )
 
         # Create CRR table schemas
+        conversion_ok = extension_loaded
         for table_name, cfg in _CRR_TABLE_CONFIG.items():
             conn.executescript(cfg["ddl"])
             if self._ext_path:
@@ -450,9 +466,20 @@ class ShadowDB:
                     conn.execute(f"SELECT crsql_as_crr('{table_name}')")
                     logger.info("Table %s converted to CRR", table_name)
                 except Exception as exc:
+                    conversion_ok = False
                     logger.warning(
                         "crsql_as_crr for %s failed: %s", table_name, exc
                     )
+        if conversion_ok:
+            try:
+                conn.execute("SELECT 1 FROM crsql_changes LIMIT 1")
+                self._crr_available = True
+            except sqlite3.Error as exc:
+                logger.error("cr-sqlite change table unavailable: %s", exc)
+                self._crr_available = False
+        else:
+            self._crr_available = False
+
         conn.commit()
         self._conn = conn
 
@@ -598,6 +625,9 @@ class ShadowDB:
 
         This is what the client pulls to apply server-side changes locally.
         """
+        if not self._crr_available:
+            raise RuntimeError("Server CRR sync is unavailable")
+
         def _sync() -> List[Dict[str, Any]]:
             with self._lock:
                 conn = self._conn
@@ -620,6 +650,9 @@ class ShadowDB:
     # ── Get max db_version (for pull pagination) ──────────────────────
 
     async def max_db_version(self) -> int:
+        if not self._crr_available:
+            raise RuntimeError("Server CRR sync is unavailable")
+
         def _sync() -> int:
             with self._lock:
                 conn = self._conn

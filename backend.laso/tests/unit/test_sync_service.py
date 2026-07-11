@@ -121,6 +121,17 @@ def test_shadow_pg_row_replaces_client_queue_state_for_raw_insert():
     assert "synced_at" not in prepared
 
 
+def test_server_resolves_tracked_monorepo_crsqlite_extension(monkeypatch, tmp_path):
+    from app.services.sync.shadow_db import _resolve_extension_path
+
+    monkeypatch.delenv("CRSQLITE_EXTENSION_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    resolved = _resolve_extension_path()
+    assert resolved is not None
+    assert resolved.endswith("ui.laso/src-tauri/crsqlite.so")
+
+
 @pytest.mark.asyncio
 async def test_rejected_shadow_row_restores_authoritative_state():
     shadow = ShadowDB()
@@ -153,3 +164,38 @@ async def test_rejected_shadow_row_restores_authoritative_state():
         (row_id,),
     ).fetchone()
     assert restored == (37, 2, "synced")
+
+
+@pytest.mark.asyncio
+async def test_shadow_without_crsqlite_reports_unavailable_instead_of_sql_error(tmp_path):
+    shadow = ShadowDB()
+    await shadow.initialize(
+        db_path=str(tmp_path / "shadow.db"),
+        ext_path=str(tmp_path / "missing-crsqlite.so"),
+    )
+
+    assert shadow.crr_available is False
+    with pytest.raises(RuntimeError, match="CRR sync is unavailable"):
+        await shadow.max_db_version()
+    with pytest.raises(RuntimeError, match="CRR sync is unavailable"):
+        await shadow.get_changes_since()
+
+
+@pytest.mark.asyncio
+async def test_crr_endpoint_guard_returns_503_when_extension_is_unavailable(monkeypatch):
+    from fastapi import HTTPException
+    from app.api.v1.endpoints import crr_sync_endpoints
+
+    class UnavailableShadow:
+        crr_available = False
+
+    async def unavailable_shadow():
+        return UnavailableShadow()
+
+    monkeypatch.setattr(crr_sync_endpoints, "get_shadow_db", unavailable_shadow)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await crr_sync_endpoints._require_crr_shadow()
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.headers == {"Retry-After": "60"}

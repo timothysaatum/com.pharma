@@ -31,6 +31,20 @@ def _user_can_sync_branch(current_user: User, branch_id) -> bool:
     return str(branch_id) in assigned
 
 
+async def _require_crr_shadow():
+    shadow = await get_shadow_db()
+    if not shadow.crr_available:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "CRR synchronization is temporarily unavailable because the "
+                "server cr-sqlite extension is not loaded."
+            ),
+            headers={"Retry-After": "60"},
+        )
+    return shadow
+
+
 @router.post(
     "/crr-push",
     response_model=CrrPushResponse,
@@ -58,6 +72,8 @@ async def crr_push(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You do not have access to this branch.",
         )
+
+    await _require_crr_shadow()
 
     response = await CrrSyncService.handle_crr_push(
         db=db,
@@ -98,7 +114,7 @@ async def crr_pull(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PullResponse:
-    shadow = await get_shadow_db()
+    shadow = await _require_crr_shadow()
 
     max_db = await shadow.max_db_version()
     changes = await shadow.get_changes_since(
