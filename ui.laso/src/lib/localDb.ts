@@ -1069,7 +1069,7 @@ async function ensureCrrMeta(db: Database): Promise<void> {
   }
 }
 
-async function ensureAuditLogSchema(db: Database): Promise<void> {
+export async function ensureAuditLogSchema(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS audit_logs (
       id                TEXT PRIMARY KEY,
@@ -1091,6 +1091,14 @@ async function ensureAuditLogSchema(db: Database): Promise<void> {
       sync_hash         TEXT
     )
   `);
+  // CREATE TABLE IF NOT EXISTS does not evolve databases created by older
+  // desktop releases. Add the display-only server field idempotently so a
+  // legacy pull cannot abort before advancing its cursor and reaching CRR pull.
+  try {
+    await db.execute("ALTER TABLE audit_logs ADD COLUMN user_full_name TEXT");
+  } catch {
+    // Duplicate-column is expected on every startup after the first repair.
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

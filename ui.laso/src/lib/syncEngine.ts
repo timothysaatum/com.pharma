@@ -44,16 +44,10 @@ import type {
 } from "@/types";
 import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
-const DEFAULT_SYNC_TABLES = [
+export const LEGACY_SYNC_TABLES = [
     "drugs",
     "drug_categories",
     "price_contracts",
-    "customers",
-    "prescriptions",
-    "branch_inventory",
-    "drug_batches",
-    "sales",
-    "purchase_orders",
     "audit_logs",
 ];
 
@@ -413,7 +407,7 @@ class SyncEngine {
 
                 const request: Partial<PullRequest> = {
                     branch_id: this.branchId!,
-                    tables: DEFAULT_SYNC_TABLES,
+                    tables: LEGACY_SYNC_TABLES,
                 };
                 if (since !== null) {
                     request.last_sync_at = since;
