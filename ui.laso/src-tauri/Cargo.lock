@@ -2686,7 +2686,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pharmacare"
-version = "1.2.20"
+version = "1.2.21"
 dependencies = [
  "keyring",
  "rusqlite",
