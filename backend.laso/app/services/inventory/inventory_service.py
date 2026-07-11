@@ -1588,7 +1588,7 @@ class InventoryService:
         if branch_id:
             query       = query.where(DrugBatch.branch_id == branch_id)
             count_query = count_query.where(DrugBatch.branch_id == branch_id)
-        elif branch_ids:
+        elif branch_ids is not None:
             query       = query.where(DrugBatch.branch_id.in_(branch_ids))
             count_query = count_query.where(DrugBatch.branch_id.in_(branch_ids))
 
@@ -1662,7 +1662,7 @@ class InventoryService:
 
         if branch_id:
             query = query.where(BranchInventory.branch_id == branch_id)
-        elif branch_ids:
+        elif branch_ids is not None:
             query = query.where(BranchInventory.branch_id.in_(branch_ids))
 
         result = await db.execute(query)

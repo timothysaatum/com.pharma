@@ -309,7 +309,7 @@ fn row_to_json(row: &rusqlite::Row, i: usize) -> JsonValue {
 fn base64_encode(data: &[u8]) -> String {
     // Simple base64 encoding without external dependency
     const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut result = String::new();
+    let mut result = String::from("b64:");
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;

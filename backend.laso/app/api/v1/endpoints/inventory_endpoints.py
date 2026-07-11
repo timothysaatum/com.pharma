@@ -401,7 +401,10 @@ async def get_drug_batches(
             )
         branch_ids = None
     else:
-        branch_ids = [uuid.UUID(b) for b in assigned] if assigned else None
+        # Preserve an explicit empty scope.  ``None`` means "do not apply a
+        # branch filter" to the service, whereas [] must mean "return no
+        # rows" for a user who has no assigned branches.
+        branch_ids = [uuid.UUID(b) for b in assigned]
     
     result = await InventoryService.get_batches_paginated(
         db=db,

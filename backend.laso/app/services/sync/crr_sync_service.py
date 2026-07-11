@@ -224,6 +224,14 @@ class CrrSyncService:
                 # Insert into shadow crsql_changes (auto-merge via triggers)
                 await shadow.insert_crr_changes(rows_to_insert)
 
+                resolved_row_id = await shadow.resolve_row_id(
+                    table, group_changes[0].pk
+                )
+                if resolved_row_id is None:
+                    error = f"Unable to resolve encoded primary key for {table}"
+                    raise ValueError(error)
+                row_id = resolved_row_id
+
                 # Read the merged state
                 merged = await shadow.get_merged_row(table, row_id)
                 if merged is None:
@@ -235,6 +243,16 @@ class CrrSyncService:
                     logger.warning(
                         "CRR push validation failed: table=%s row=%s error=%s",
                         table, row_id, error,
+                    )
+                    authoritative = await db.execute(
+                        text(f'SELECT * FROM "{table}" WHERE id = :row_id'),
+                        {"row_id": row_id},
+                    )
+                    authoritative_row = authoritative.mappings().first()
+                    await shadow.restore_rejected_row(
+                        table,
+                        row_id,
+                        dict(authoritative_row) if authoritative_row else None,
                     )
                     results.append(CrrPushResult(
                         table=table,

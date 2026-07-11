@@ -226,7 +226,7 @@ async def lifespan(app: FastAPI):
     # Initialise CRDT shadow database (per ADR 0003)
     try:
         from app.services.sync.shadow_db import get_shadow_db
-        await get_shadow_db().initialize()
+        await get_shadow_db()
         logger.info("Shadow SQLite database initialised")
 
         # Start background CRR reconciliation loop

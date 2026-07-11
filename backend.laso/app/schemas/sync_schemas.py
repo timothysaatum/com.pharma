@@ -151,11 +151,11 @@ class CrrChangeRow(BaseSchema):
     val: Any = None
     col_version: int
     db_version: int
-    site_id: str
+    site_id: Any
     cl: int
     seq: int
 
-    @field_serializer("pk", "val")
+    @field_serializer("pk", "val", "site_id")
     def serialize_bytes(self, v: Any) -> Any:
         """Convert ``bytes`` to ``b64:<base64>`` strings for JSON transport.
 
@@ -407,9 +407,19 @@ class CrrPushRecord(BaseSchema):
     val: Any = None
     col_version: int
     db_version: int
-    site_id: str
+    site_id: Any
     cl: int
     seq: int
+
+    @field_validator("pk", "val", "site_id", mode="before")
+    @classmethod
+    def decode_binary_transport(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.startswith("b64:"):
+            try:
+                return base64.b64decode(value[4:], validate=True)
+            except ValueError as exc:
+                raise ValueError("Invalid base64 CRR transport value") from exc
+        return value
 
     @field_validator("table")
     @classmethod

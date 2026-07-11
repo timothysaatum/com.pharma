@@ -192,3 +192,32 @@ async def test_transfer_stock_preserves_batch_identity_and_records_movements(db,
         "transfer_out",
     }
     assert sum(movement.quantity_change for movement in movements) == 0
+
+
+@pytest.mark.asyncio
+async def test_batch_listing_with_explicit_empty_branch_scope_returns_no_rows(
+    db, setup_test_data
+):
+    """An unassigned user must not fall through to an unrestricted query."""
+    from app.utils.pagination import PaginationParams
+
+    org, branch, user, drugs, customer = setup_test_data
+    drug = drugs[0]
+    db.add(DrugBatch(
+        id=uuid.uuid4(), branch_id=branch.id, drug_id=drug.id,
+        batch_number="EMPTY-SCOPE-REGRESSION", quantity=4,
+        remaining_quantity=4, expiry_date=date.today() + timedelta(days=90),
+    ))
+    await db.commit()
+
+    result = await InventoryService.get_batches_paginated(
+        db=db,
+        drug_id=drug.id,
+        pagination=PaginationParams(page=1, page_size=50),
+        branch_ids=[],
+        include_expired=True,
+        include_empty=True,
+    )
+
+    assert result.total == 0
+    assert result.items == []

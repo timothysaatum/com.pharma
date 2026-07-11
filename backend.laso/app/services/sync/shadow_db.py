@@ -22,14 +22,16 @@ import os
 import re
 import sqlite3
 from datetime import date, datetime
+from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 from typing import Any, Dict, List, Optional, Tuple
 
-from sqlalchemy import bindparam, text
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, Numeric, bindparam, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.db.base import Base
 
 logger = logging.getLogger(__name__)
 
@@ -507,6 +509,86 @@ class ShadowDB:
 
         return await asyncio.to_thread(_sync)
 
+    async def resolve_row_id(self, table: str, encoded_pk: Any) -> Optional[str]:
+        """Resolve cr-sqlite's encoded PK blob to the table's textual id."""
+        if table not in _CRR_TABLE_CONFIG:
+            raise ValueError(f"Unknown CRR table: {table}")
+
+        def _sync() -> Optional[str]:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    raise RuntimeError("Shadow DB not initialised")
+                row = conn.execute(
+                    f"SELECT id FROM [{table}] "
+                    "WHERE crsql_pack_columns(id) = ? LIMIT 1",
+                    (encoded_pk,),
+                ).fetchone()
+                return str(row[0]) if row else None
+
+        return await asyncio.to_thread(_sync)
+
+    async def restore_rejected_row(
+        self,
+        table: str,
+        row_id: str,
+        authoritative_row: Optional[Dict[str, Any]],
+    ) -> None:
+        """Remove a rejected merge and restore the last Postgres state.
+
+        A CRR push reaches the shadow database before application-level
+        validation. Rejected changes must not remain eligible for pull or
+        scheduled reconciliation. Deleting and, when available, reinserting
+        the authoritative Postgres row creates a newer corrective CRR state.
+        """
+        if table not in _CRR_TABLE_CONFIG:
+            raise ValueError(f"Unknown CRR table: {table}")
+
+        def _sqlite_value(value: Any) -> Any:
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (date, datetime, Decimal)):
+                return str(value)
+            return str(value) if hasattr(value, "hex") and not isinstance(value, str) else value
+
+        def _sync() -> None:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    raise RuntimeError("Shadow DB not initialised")
+                conn.execute("SAVEPOINT reject_crr_group")
+                try:
+                    conn.execute(f"DELETE FROM [{table}] WHERE id = ?", (row_id,))
+                    if authoritative_row:
+                        table_columns = {
+                            str(info[1])
+                            for info in conn.execute(
+                                f"PRAGMA table_info([{table}])"
+                            ).fetchall()
+                        }
+                        restored = {
+                            key: _sqlite_value(value)
+                            for key, value in authoritative_row.items()
+                            if key in table_columns and value is not None
+                        }
+                        restored["id"] = row_id
+                        columns = list(restored)
+                        placeholders = ", ".join("?" for _ in columns)
+                        conn.execute(
+                            f"INSERT INTO [{table}] "
+                            f"({', '.join(f'[{column}]' for column in columns)}) "
+                            f"VALUES ({placeholders})",
+                            [restored[column] for column in columns],
+                        )
+                    conn.execute("RELEASE reject_crr_group")
+                    conn.commit()
+                except Exception:
+                    conn.execute("ROLLBACK TO reject_crr_group")
+                    conn.execute("RELEASE reject_crr_group")
+                    raise
+
+        await asyncio.to_thread(_sync)
+
     # ── List all rows that changed in crsql_changes (for pull) ────────
 
     async def get_changes_since(
@@ -627,8 +709,7 @@ class ShadowDB:
         Includes duplicate business-key detection and resolution
         using the per-table strategy declared in ``_CRR_TABLE_CONFIG``.
         """
-        row = {k: v for k, v in row.items()
-               if k not in ("rowid", "sync_status", "synced_at")}
+        row = self._prepare_pg_row(table, row)
         if not row:
             return
         if table == "customers":
@@ -703,6 +784,57 @@ class ShadowDB:
 
     # ── Strategy handlers ─────────────────────────────────────────────
 
+    @classmethod
+    def _prepare_pg_row(cls, table: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove local-only fields and normalize required Postgres values."""
+        prepared = {
+            key: value
+            for key, value in row.items()
+            if key not in ("rowid", "sync_status", "synced_at")
+        }
+        if not prepared:
+            return prepared
+        # Client queue state is local-only. Raw SQL upserts do not apply ORM
+        # defaults, so provide the required server-side state explicitly.
+        prepared["sync_status"] = "synced"
+        return cls._coerce_pg_types(table, prepared)
+
+    @staticmethod
+    def _coerce_pg_types(table: str, row: Dict[str, Any]) -> Dict[str, Any]:
+        """Convert shadow SQLite scalar values to SQLAlchemy/asyncpg types."""
+        coerced = dict(row)
+        model_table = Base.metadata.tables.get(table)
+        if model_table is None:
+            return coerced
+
+        for column in model_table.columns:
+            if column.name not in coerced or coerced[column.name] is None:
+                continue
+            value = coerced[column.name]
+            column_type = column.type
+
+            if isinstance(column_type, DateTime) and isinstance(value, str):
+                coerced[column.name] = datetime.fromisoformat(
+                    value.replace("Z", "+00:00")
+                )
+            elif isinstance(column_type, Date) and isinstance(value, str):
+                coerced[column.name] = date.fromisoformat(value[:10])
+            elif isinstance(column_type, Boolean) and not isinstance(value, bool):
+                if isinstance(value, str):
+                    coerced[column.name] = value.strip().lower() in {
+                        "1", "true", "t", "yes", "y",
+                    }
+                else:
+                    coerced[column.name] = bool(value)
+            elif isinstance(column_type, Integer) and not isinstance(value, int):
+                coerced[column.name] = int(value)
+            elif isinstance(column_type, Numeric) and not isinstance(value, Decimal):
+                coerced[column.name] = Decimal(str(value))
+            elif isinstance(column_type, Float) and not isinstance(value, float):
+                coerced[column.name] = float(value)
+
+        return coerced
+
     @staticmethod
     def _coerce_customer_pg_types(
         row: Dict[str, Any], include_defaults: bool = False
@@ -776,6 +908,7 @@ class ShadowDB:
         ) + 1
         merged.pop("rowid", None)
         merged.pop("synced_at", None)
+        merged = self._coerce_pg_types(table, merged)
 
         set_clause = ", ".join(
             f"{c} = :{c}" for c in merged if c != "id"
@@ -828,6 +961,7 @@ class ShadowDB:
         incoming_row[bk_column] = new_bk
         incoming_row.pop("rowid", None)
         incoming_row.pop("synced_at", None)
+        incoming_row = self._coerce_pg_types(table, incoming_row)
 
         columns = list(incoming_row.keys())
         placeholders = [f":{c}" for c in columns]
