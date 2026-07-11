@@ -11,6 +11,12 @@ if (!archive || !destination) {
 }
 
 const extractionDir = mkdtempSync(join(tmpdir(), "crsqlite-extension-"));
+const nativeExtension = process.platform === "win32"
+  ? ".dll"
+  : process.platform === "darwin"
+    ? ".dylib"
+    : ".so";
+const nativeDestination = destination.replace(/\.(?:so|dll|dylib)$/i, nativeExtension);
 
 try {
   const python = process.platform === "win32" ? "python" : "python3";
@@ -25,8 +31,8 @@ try {
     throw new Error(`No cr-sqlite shared library found in ${archive}`);
   }
 
-  cpSync(library, destination);
-  console.log(`Installed ${basename(library)} as ${destination}`);
+  cpSync(library, nativeDestination);
+  console.log(`Installed ${basename(library)} as ${nativeDestination}`);
 } finally {
   rmSync(extractionDir, { recursive: true, force: true });
 }

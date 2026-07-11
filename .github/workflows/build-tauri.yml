@@ -52,7 +52,7 @@ jobs:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'  # Apple Silicon
             crsqlite_asset: crsqlite-darwin-aarch64.zip
-            test_crsqlite: false
+            test_crsqlite: true
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'   # Intel Mac
             crsqlite_asset: crsqlite-darwin-x86_64.zip

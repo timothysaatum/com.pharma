@@ -33,9 +33,9 @@ impl From<rusqlite::Error> for DbError {
 ///
 /// Resolution order (first match wins):
 ///   1. `CRSQLITE_EXTENSION_PATH` environment variable
-///   2. Tauri resource directory (`resource_dir/crsqlite.so`) — for production bundling
-///   3. `../crsqlite.so` — relative from `src-tauri`, works with `tauri dev`
-///   4. `crsqlite.so` — next to the binary, general fallback
+///   2. Tauri resource directory — for production bundling
+///   3. Parent directory — works with `tauri dev`
+///   4. Current directory — general fallback
 pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     // 1. Environment variable (highest priority)
     if let Ok(val) = std::env::var("CRSQLITE_EXTENSION_PATH") {
@@ -45,19 +45,27 @@ pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, 
         }
     }
 
+    let library_name = if cfg!(target_os = "windows") {
+        "crsqlite.dll"
+    } else if cfg!(target_os = "macos") {
+        "crsqlite.dylib"
+    } else {
+        "crsqlite.so"
+    };
+
     // Build candidate list
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     // 2. Tauri resource directory (used in production bundles)
     if let Some(dir) = &resource_dir {
-        candidates.push(dir.join("crsqlite.so"));
+        candidates.push(dir.join(library_name));
     }
 
     // 3. Relative from src-tauri (works with `tauri dev`)
-    candidates.push(PathBuf::from("../crsqlite.so"));
+    candidates.push(PathBuf::from("..").join(library_name));
 
     // 4. Current working directory fallback
-    candidates.push(PathBuf::from("crsqlite.so"));
+    candidates.push(PathBuf::from(library_name));
 
     for p in &candidates {
         if p.exists() {
@@ -128,7 +136,14 @@ mod startup_tests {
 
     #[test]
     fn real_crsqlite_extension_loads_without_degraded_warning() {
-        let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crsqlite.so");
+        let library_name = if cfg!(target_os = "windows") {
+            "crsqlite.dll"
+        } else if cfg!(target_os = "macos") {
+            "crsqlite.dylib"
+        } else {
+            "crsqlite.so"
+        };
+        let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(library_name);
         assert!(extension.exists(), "test requires {}", extension.display());
         let temp = std::env::temp_dir().join(format!(
             "pharmacare-valid-extension-{}", std::process::id()

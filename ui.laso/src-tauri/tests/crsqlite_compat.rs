@@ -8,7 +8,14 @@ use std::time::{Duration, Instant};
 static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
 
 fn extension_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("crsqlite.so")
+    let library_name = if cfg!(target_os = "windows") {
+        "crsqlite.dll"
+    } else if cfg!(target_os = "macos") {
+        "crsqlite.dylib"
+    } else {
+        "crsqlite.so"
+    };
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(library_name)
 }
 
 fn temp_db_path(label: &str) -> PathBuf {
