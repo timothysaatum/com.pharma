@@ -43,6 +43,7 @@ from app.schemas.price_contract_schemas import PriceContractResponse
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.sales_schemas import SaleResponse
 from app.schemas.purchase_order_schemas import PurchaseOrderResponse
+from app.schemas.syst_schemas import AuditLogResponse
 
 
 class PrescriptionSyncResponse(BaseSchema):
@@ -105,6 +106,7 @@ class PullRequest(BaseSchema):
             "drug_batches",
             "sales",
             "purchase_orders",
+            "audit_logs",
         ],
         description="Subset of tables to pull. Defaults to all.",
     )
@@ -136,6 +138,7 @@ class PullRequest(BaseSchema):
             "drug_batches",
             "sales",
             "purchase_orders",
+            "audit_logs",
         }
         unknown = set(v) - allowed
         if unknown:
@@ -195,6 +198,9 @@ class PullResponse(BaseSchema):
     drug_batches: List[DrugBatchResponse] = Field(default_factory=list)
     sales: List[SaleResponse] = Field(default_factory=list)
     purchase_orders: List[PurchaseOrderResponse] = Field(default_factory=list)
+
+    # Org-level pull-only (audit trail)
+    audit_logs: List[AuditLogResponse] = Field(default_factory=list)
 
     # CRDT changes (cr-sqlite) for migrated tables
     crr_changes: List[CrrChangeRow] = Field(

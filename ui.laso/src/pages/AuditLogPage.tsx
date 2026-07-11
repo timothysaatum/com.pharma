@@ -16,10 +16,24 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { auditApi, type AuditLogEntry } from "@/api/audit";
-import { parseApiError } from "@/api/client";
+import { isOfflineError, isBackendReachable, parseApiError } from "@/api/client";
+import { getDb } from "@/lib/localDb";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 50;
+
+const JSON_FIELDS = new Set(["changes", "context_metadata"] as const);
+
+function parseAuditRow(row: Record<string, unknown>): AuditLogEntry {
+    const parsed = { ...row };
+    for (const field of JSON_FIELDS) {
+        const val = parsed[field];
+        if (typeof val === "string") {
+            try { parsed[field] = JSON.parse(val); } catch { parsed[field] = null; }
+        }
+    }
+    return parsed as unknown as AuditLogEntry;
+}
 
 function fmtDateTime(iso: string) {
     return new Date(iso).toLocaleString("en-GH", {
@@ -310,11 +324,30 @@ export default function AuditLogPage() {
     const [startDate, setStartDate] = useState("");
     const [endDate, setEndDate] = useState("");
     const [selectedLogId, setSelectedLogId] = useState<string | null>(null);
+    const [isOffline, setIsOffline] = useState(false);
 
     const fetchLogs = useCallback(async (targetPage = 1) => {
         setLoading(true);
         setError(null);
         try {
+            if (!isBackendReachable()) {
+                setIsOffline(true);
+                const db = await getDb();
+                const rawRows = await db.select<Record<string, unknown>[]>(
+                    "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                    [PAGE_SIZE, (targetPage - 1) * PAGE_SIZE]
+                );
+                const rows = rawRows.map(parseAuditRow);
+                const countRows = await db.select<{ c: number }[]>(
+                    "SELECT COUNT(*) AS c FROM audit_logs"
+                );
+                setLogs(rows);
+                setTotal(countRows[0]?.c ?? 0);
+                setTotalPages(Math.max(1, Math.ceil((countRows[0]?.c ?? 0) / PAGE_SIZE)));
+                setPage(targetPage);
+                return;
+            }
+            setIsOffline(false);
             const result = await auditApi.list({
                 page: targetPage,
                 page_size: PAGE_SIZE,
@@ -328,7 +361,28 @@ export default function AuditLogPage() {
             setTotalPages(result.total_pages);
             setPage(targetPage);
         } catch (err) {
-            setError(parseApiError(err));
+            if (isOfflineError(err)) {
+                setIsOffline(true);
+                try {
+                    const db = await getDb();
+                    const rawRows = await db.select<Record<string, unknown>[]>(
+                        "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                        [PAGE_SIZE, (targetPage - 1) * PAGE_SIZE]
+                    );
+                    const rows = rawRows.map(parseAuditRow);
+                    const countRows = await db.select<{ c: number }[]>(
+                        "SELECT COUNT(*) AS c FROM audit_logs"
+                    );
+                    setLogs(rows);
+                    setTotal(countRows[0]?.c ?? 0);
+                    setTotalPages(Math.max(1, Math.ceil((countRows[0]?.c ?? 0) / PAGE_SIZE)));
+                    setPage(targetPage);
+                } catch {
+                    setError(parseApiError(err));
+                }
+            } else {
+                setError(parseApiError(err));
+            }
         } finally {
             setLoading(false);
         }
@@ -454,6 +508,11 @@ export default function AuditLogPage() {
             </div>
 
             <div className="min-h-0 flex-1 overflow-auto p-6">
+                {isOffline && (
+                    <div className="mb-4 rounded-xl border border-amber-100 bg-amber-50 p-4 text-sm text-amber-700">
+                        Showing cached audit logs — you are offline.
+                    </div>
+                )}
                 {error && (
                     <div className="mb-4 rounded-xl border border-red-100 bg-red-50 p-4 text-sm text-red-600">
                         {error}

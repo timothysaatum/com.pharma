@@ -102,6 +102,8 @@ async function runMigrations(db: Database): Promise<void> {
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
+      await ensureCrrMeta(db);
+      await ensureAuditLogSchema(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
   }
@@ -612,8 +614,16 @@ async function migrate_v15(db: Database): Promise<void> {
   try {
     await db.execute_batch("SELECT crsql_as_crr('branch_inventory')");
     console.log("[localDb] branch_inventory converted to CRR");
+    await db.execute(
+      "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+      ["crr_enabled_branch_inventory", "1"]
+    );
   } catch (e) {
     console.warn("[localDb] crsql_as_crr not available — running without CRDT:", e);
+    await db.execute(
+      "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+      ["crr_enabled_branch_inventory", "0"]
+    );
   }
 
   await db.execute("PRAGMA user_version = 15");
@@ -968,8 +978,16 @@ export async function migrate_v16(db: Database): Promise<void> {
     try {
       await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
       console.log(`[localDb] ${table} converted to CRR`);
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        [`crr_enabled_${table}`, "1"]
+      );
     } catch (e) {
       console.warn(`[localDb] crsql_as_crr for ${table} not available:`, e);
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        [`crr_enabled_${table}`, "0"]
+      );
     }
   }
 
@@ -1025,6 +1043,54 @@ async function ensureBranchInventorySchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE branch_inventory ADD COLUMN selling_price REAL");
   } catch { }
+}
+
+const KNOWN_CRR_TABLES = [
+  "branch_inventory",
+  "drug_batches",
+  "customers",
+  "prescriptions",
+  "purchase_orders",
+  "sales",
+];
+
+async function ensureCrrMeta(db: Database): Promise<void> {
+  for (const table of KNOWN_CRR_TABLES) {
+    const rows = await db.select<{ key: string }[]>(
+      "SELECT key FROM sync_meta WHERE key = $1",
+      [`crr_enabled_${table}`]
+    );
+    if (rows.length === 0) {
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        [`crr_enabled_${table}`, "1"]
+      );
+    }
+  }
+}
+
+async function ensureAuditLogSchema(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id                TEXT PRIMARY KEY,
+      organization_id   TEXT NOT NULL,
+      user_id           TEXT,
+      user_full_name    TEXT,
+      action            TEXT NOT NULL,
+      entity_type       TEXT,
+      entity_id         TEXT,
+      changes           TEXT,
+      ip_address        TEXT,
+      user_agent        TEXT,
+      context_metadata  TEXT,
+      created_at        TEXT NOT NULL DEFAULT '',
+      updated_at        TEXT NOT NULL DEFAULT '',
+      sync_status       TEXT NOT NULL DEFAULT 'synced',
+      sync_version      INTEGER NOT NULL DEFAULT 1,
+      last_synced_at    TEXT,
+      sync_hash         TEXT
+    )
+  `);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1110,14 +1176,25 @@ const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
   "price_contracts",
 ]);
 
-export const CRR_TABLES = new Set([
-    "branch_inventory",
-    "drug_batches",
-    "customers",
-    "prescriptions",
-    "purchase_orders",
-    "sales",
-]);
+let _crrCache: Record<string, boolean> | null = null;
+
+export async function isCrrTable(table: string): Promise<boolean> {
+  if (_crrCache === null) {
+    const db = await getDb();
+    const rows = await db.select<{ key: string; value: string }[]>(
+      "SELECT key, value FROM sync_meta WHERE key LIKE 'crr_enabled_%'"
+    );
+    _crrCache = {};
+    for (const row of rows) {
+      _crrCache[row.key.replace("crr_enabled_", "")] = row.value === "1";
+    }
+  }
+  return _crrCache[table] ?? false;
+}
+
+export function resetCrrCache(): void {
+  _crrCache = null;
+}
 
 export const SYNC_QUEUE_CHANGED_EVENT = "laso:sync-queue-changed";
 
@@ -1186,7 +1263,7 @@ export async function enqueue(
   payload: Record<string, unknown>
 ): Promise<void> {
   // CRR tables are tracked by cr-sqlite's crsql_changes — skip the old sync_queue
-  if (CRR_TABLES.has(tableName)) return;
+  if (await isCrrTable(tableName)) return;
   const db = await getDb();
   const operationId = crypto.randomUUID();
   await db.execute(

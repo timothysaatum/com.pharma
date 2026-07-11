@@ -11,12 +11,12 @@ from typing import Optional, List, TYPE_CHECKING
 from datetime import datetime
 import uuid
 
-from app.models.core.mixins import TimestampMixin
+from app.models.core.mixins import TimestampMixin, SyncTrackingMixin
 if TYPE_CHECKING:
     from app.models.inventory.inventory_model import Drug
     from app.models.user.user_model import User
 
-class AuditLog(Base):
+class AuditLog(Base, TimestampMixin, SyncTrackingMixin):
     """
     Comprehensive audit trail for all critical operations.
     Immutable - no updates or deletes allowed.
@@ -76,13 +76,6 @@ class AuditLog(Base):
     context_metadata: Mapped[Optional[dict]] = mapped_column(
         JSONB,
         comment="Additional context about the action"
-    )
-    
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-        index=True
     )
     
     # Relationships

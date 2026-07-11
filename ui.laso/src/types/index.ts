@@ -1400,12 +1400,20 @@ export interface AuditLog {
     id: string;
     organization_id: string;
     user_id: string | null;
+    user_full_name?: string | null;
     action: string;
     entity_type: string | null;
     entity_id: string | null;
-    changes: { before?: Record<string, unknown>; after?: Record<string, unknown> } | null;
+    changes: Record<string, unknown> | null;
     ip_address: string | null;
+    user_agent?: string | null;
+    context_metadata?: Record<string, unknown> | null;
     created_at: string;
+    updated_at?: string;
+    sync_status?: string;
+    sync_version?: number;
+    last_synced_at?: string | null;
+    sync_hash?: string | null;
 }
 
 // ============================================================
@@ -1478,6 +1486,7 @@ export interface PullResponse {
     drug_batches: DrugBatch[];
     sales: Sale[];
     purchase_orders: PurchaseOrder[];
+    audit_logs: AuditLog[];
     sync_timestamp: string;
     has_more: boolean;
     total_records: number;
