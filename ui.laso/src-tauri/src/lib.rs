@@ -1,6 +1,7 @@
 mod db;
 
 use tauri::Manager;
+use std::io::Write;
 
 const KEYRING_SERVICE: &str = "com.vermithor.pharmacare";
 
@@ -75,8 +76,24 @@ pub fn run() {
                     None
                 }
             };
-            let db_state = db::init_db(db_dir, ext_path)
-                .expect("Failed to initialize local database");
+            let db_state = db::init_db(db_dir.clone(), ext_path)
+                .map_err(|error| format!("Failed to initialize local database: {error}"))?;
+            if let Some(warning) = &db_state.startup_warning {
+                eprintln!("[db] {warning}");
+                // Release builds on Windows have no console. Preserve the
+                // reason in the app data directory so startup failures can be
+                // diagnosed on the affected machine.
+                if let Some(dir) = db_dir {
+                    let _ = std::fs::create_dir_all(&dir);
+                    if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(dir.join("startup.log"))
+                    {
+                        let _ = writeln!(file, "[db] {warning}");
+                    }
+                }
+            }
             app.manage(db_state);
 
             Ok(())

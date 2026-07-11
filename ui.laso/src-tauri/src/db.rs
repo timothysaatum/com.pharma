@@ -7,6 +7,9 @@ use std::path::PathBuf;
 
 pub struct DbState {
     pub conn: Mutex<Connection>,
+    /// Diagnostic captured during startup.  The UI can continue in degraded
+    /// (non-CRR) mode instead of the desktop process disappearing.
+    pub startup_warning: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -84,24 +87,60 @@ pub fn init_db(
         .map_err(|e| format!("Cannot set pragmas: {e}"))?;
 
     // Load cr-sqlite extension (if a path was resolved)
+    let mut startup_warning = None;
     if let Some(ext_path) = ext_path {
         // SAFETY: cr-sqlite is a trusted extension shipped with the app
         unsafe {
-            conn.load_extension(ext_path, None)
-                .map_err(|e| format!("Cannot load cr-sqlite extension: {e}"))?;
+            if let Err(error) = conn.load_extension(&ext_path, None) {
+                startup_warning = Some(format!(
+                    "Cannot load cr-sqlite extension {}: {error}",
+                    ext_path.display()
+                ));
+            }
         }
-        // Verify extension loaded
-        let site_id: String = conn
-            .query_row("SELECT crsql_site_id()", [], |row| row.get(0))
-            .map_err(|e| format!("cr-sqlite loaded but crsql_site_id() failed: {e}"))?;
-        println!("[db] cr-sqlite loaded, site_id={site_id}");
+        if startup_warning.is_none() {
+            match conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, String>(0)) {
+                Ok(site_id) => println!("[db] cr-sqlite loaded, site_id={site_id}"),
+                Err(error) => startup_warning = Some(format!(
+                    "cr-sqlite loaded but crsql_site_id() failed: {error}"
+                )),
+            }
+        }
     } else {
         println!("[db] cr-sqlite extension not found, running without CRDT support");
     }
 
     Ok(DbState {
         conn: Mutex::new(conn),
+        startup_warning,
     })
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::init_db;
+
+    #[test]
+    fn invalid_extension_degrades_without_crashing_desktop_startup() {
+        let temp = std::env::temp_dir().join(format!(
+            "pharmacare-invalid-extension-{}", std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let invalid = temp.join("crsqlite.invalid");
+        std::fs::write(&invalid, b"not a shared library").unwrap();
+
+        let state = init_db(Some(temp.clone()), Some(invalid))
+            .expect("SQLite itself should remain available");
+        assert!(state.startup_warning.as_deref().unwrap_or_default()
+            .contains("Cannot load cr-sqlite extension"));
+        let value: i64 = state.conn.lock().unwrap()
+            .query_row("SELECT 1", [], |row| row.get(0)).unwrap();
+        assert_eq!(value, 1);
+
+        drop(state);
+        let _ = std::fs::remove_dir_all(temp);
+    }
 }
 
 /// Execute a write query (INSERT/UPDATE/DELETE/CREATE).

@@ -45,7 +45,10 @@ jobs:
           - platform: windows-latest
             args: ''
             crsqlite_asset: crsqlite-win-x86_64.zip
-            test_crsqlite: false
+            # A successful compile does not prove that the packaged native DLL
+            # can be loaded on Windows. This smoke test prevents releases that
+            # immediately exit during database startup.
+            test_crsqlite: true
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'  # Apple Silicon
             crsqlite_asset: crsqlite-darwin-aarch64.zip
