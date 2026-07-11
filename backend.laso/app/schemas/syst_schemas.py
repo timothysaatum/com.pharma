@@ -237,6 +237,11 @@ class AuditLogResponse(BaseSchema):
     user_agent: Optional[str] = None
     context_metadata: Optional[Dict[str, Any]] = None
     created_at: datetime
+    updated_at: Optional[datetime] = None
+    sync_status: str = "synced"
+    sync_version: int = 1
+    last_synced_at: Optional[datetime] = None
+    sync_hash: Optional[str] = None
 
 
 # ============================================

@@ -74,9 +74,10 @@ from app.models.sales.sales_model import (
     SaleItemBatchAllocation,
     Supplier,
 )
-from app.models.system_md.sys_models import SyncOperationReceipt
+from app.models.system_md.sys_models import AuditLog, SyncOperationReceipt
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
+from app.schemas.syst_schemas import AuditLogResponse
 from app.schemas.drugs_schemas import DrugCategoryResponse, DrugResponse
 from app.schemas.inventory_schemas import BranchInventoryResponse, DrugBatchResponse
 from app.schemas.price_contract_schemas import PriceContractResponse
@@ -122,6 +123,7 @@ SYNC_TABLES: tuple[str, ...] = (
     "drug_batches",
     "sales",
     "purchase_orders",
+    "audit_logs",
 )
 
 # ---------------------------------------------------------------------------
@@ -653,6 +655,14 @@ class SyncService:
                 )
                 for r in rows
             ]
+            total += len(rows)
+
+        if "audit_logs" in tables:
+            rows = await SyncService._pull_table(
+                db, AuditLog, since,
+                AuditLog.organization_id == organization_id,
+            )
+            result.audit_logs = [AuditLogResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         result.total_records = total
