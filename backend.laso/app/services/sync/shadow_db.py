@@ -1511,6 +1511,13 @@ class ShadowDB:
 
         rows = await asyncio.to_thread(_fetch_all)
         checked = len(rows)
+        cfg = _CRR_TABLE_CONFIG.get(table, {})
+        if cfg.get("server_authoritative"):
+            # These tables are published Postgres -> shadow for CRR delivery.
+            # Replaying their intentionally narrow shadow rows back into
+            # Postgres can violate server-only NOT NULL columns.
+            return checked, 0
+
         updated = 0
         for row in rows:
             row_id = row.get("id")

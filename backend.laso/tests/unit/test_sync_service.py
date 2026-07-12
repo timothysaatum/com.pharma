@@ -241,3 +241,36 @@ async def test_crr_pull_rejects_unassigned_branch():
         )
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reconcile_skips_server_authoritative_tables(tmp_path, monkeypatch):
+    shadow = ShadowDB()
+    await shadow.initialize(
+        db_path=str(tmp_path / "shadow.db"),
+        ext_path=str(tmp_path / "missing-crsqlite.so"),
+    )
+    assert shadow._conn is not None
+    shadow._conn.execute("""
+        INSERT INTO price_contracts
+            (id, organization_id, contract_code, contract_name, contract_type,
+             effective_from, updated_at, created_at)
+        VALUES
+            ('contract-1', 'org-1', 'GLICO', 'Glico', 'insurance',
+             '2026-07-02', '2026-07-02T09:13:37Z', '2026-07-02T09:13:16Z')
+    """)
+    shadow._conn.commit()
+
+    called = False
+
+    async def fail_if_called(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("server-authoritative rows must not reconcile into Postgres")
+
+    monkeypatch.setattr(shadow, "upsert_merged_row", fail_if_called)
+
+    checked, updated = await shadow.reconcile_table("price_contracts", db=None)
+
+    assert (checked, updated) == (1, 0)
+    assert called is False
