@@ -6,7 +6,13 @@ from decimal import Decimal
 import pytest
 
 from app.api.v1.endpoints.sync_endpoints import _user_can_sync_branch
-from app.schemas.sync_schemas import CrrPushRecord, PullRequest, PullResponse
+from app.schemas.sync_schemas import (
+    CrrPushRecord,
+    PullRequest,
+    PullResponse,
+    PushRecord,
+    PushResult,
+)
 from app.services.sync.sync_service import SyncService
 from app.services.sync.shadow_db import ShadowDB, _CRR_TABLE_CONFIG
 
@@ -40,6 +46,29 @@ class _SessionContext:
 
     async def __aexit__(self, exc_type, exc, tb):
         return False
+
+
+class _NestedTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _AuditSession:
+    def __init__(self):
+        self.added = []
+        self.flushed = False
+
+    def begin_nested(self):
+        return _NestedTransaction()
+
+    def add(self, value):
+        self.added.append(value)
+
+    async def flush(self):
+        self.flushed = True
 
 
 @pytest.mark.asyncio
@@ -119,6 +148,62 @@ def test_shadow_pg_row_replaces_client_queue_state_for_raw_insert():
     assert prepared["quantity"] == 37
     assert prepared["sync_status"] == "synced"
     assert "synced_at" not in prepared
+
+
+@pytest.mark.asyncio
+async def test_sync_accepted_sale_writes_searchable_audit_log():
+    organization_id = uuid.uuid4()
+    branch_id = uuid.uuid4()
+    user_id = uuid.uuid4()
+    sale_id = uuid.uuid4()
+    operation_id = uuid.uuid4()
+    db = _AuditSession()
+
+    record = PushRecord(
+        operation_id=operation_id,
+        table_name="sales",
+        local_id=str(sale_id),
+        operation="create",
+        sync_version=1,
+        created_offline_at=datetime.now(),
+        data={
+            "sale_number": "OFF-SALE-UNIT",
+            "customer_id": str(uuid.uuid4()),
+            "prescription_id": str(uuid.uuid4()),
+            "total_amount": "25.00",
+            "discount_amount": "0.00",
+            "payment_method": "cash",
+            "items": [{"quantity": 2}],
+        },
+    )
+    result = PushResult(
+        local_id=str(sale_id),
+        table_name="sales",
+        server_id=str(sale_id),
+        success=True,
+    )
+
+    await SyncService._write_accepted_record_audit(
+        db=db,
+        record=record,
+        push_result=result,
+        organization_id=organization_id,
+        branch_id=branch_id,
+        pushed_by=user_id,
+    )
+
+    assert db.flushed is True
+    assert len(db.added) == 1
+    audit = db.added[0]
+    assert audit.action == "process_sale"
+    assert audit.entity_type == "Sale"
+    assert audit.entity_id == sale_id
+    assert audit.user_id == user_id
+    assert audit.organization_id == organization_id
+    assert audit.changes["sale_number"] == "OFF-SALE-UNIT"
+    assert audit.changes["items_count"] == 1
+    assert audit.context_metadata["source"] == "offline_sync"
+    assert audit.context_metadata["operation_id"] == str(operation_id)
 
 
 def test_shadow_pg_row_drops_crr_only_aggregate_columns():

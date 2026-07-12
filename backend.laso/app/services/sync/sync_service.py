@@ -140,6 +140,19 @@ CONFLICT_RESOLUTION: Dict[str, str] = {
     "prescriptions":     "server_wins",
 }
 
+_ALLOWED_PAYMENT_STATUSES: frozenset[str] = frozenset({
+    "pending",
+    "completed",
+    "partial",
+    "refunded",
+    "cancelled",
+})
+
+_PAYMENT_STATUS_ALIASES: Dict[str, str] = {
+    # Older/offline clients have used "paid" for the persisted "completed" state.
+    "paid": "completed",
+}
+
 # ---------------------------------------------------------------------------
 # Sync-metadata keys that must never be written from client-supplied data.
 # Only these are stripped; None values are preserved so intentional nulls
@@ -844,6 +857,14 @@ class SyncService:
                 if conflict:
                     conflicts.append(conflict)
                 elif push_result.success:
+                    await SyncService._write_accepted_record_audit(
+                        db=db,
+                        record=record,
+                        push_result=push_result,
+                        organization_id=organization_id,
+                        branch_id=request.branch_id,
+                        pushed_by=pushed_by,
+                    )
                     accepted.append(push_result)
                 else:
                     failed.append(push_result)
@@ -941,6 +962,93 @@ class SyncService:
             conflicts.append(PushConflict.model_validate(receipt.response_data))
         else:
             failed.append(PushResult.model_validate(receipt.response_data))
+
+    @staticmethod
+    async def _write_accepted_record_audit(
+        db: AsyncSession,
+        record: PushRecord,
+        push_result: PushResult,
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        pushed_by: uuid.UUID,
+    ) -> None:
+        """Best-effort audit row for accepted offline sync mutations."""
+        server_id = _uuid_or_none(push_result.server_id or record.local_id)
+        if server_id is None:
+            return
+
+        action_by_table = {
+            "customers": "create_customer",
+            "prescriptions": "create_prescription",
+            "sales": "process_sale",
+        }
+        entity_by_table = {
+            "customers": "Customer",
+            "prescriptions": "Prescription",
+            "sales": "Sale",
+        }
+        action = action_by_table.get(record.table_name)
+        entity_type = entity_by_table.get(record.table_name)
+        if action is None or entity_type is None:
+            return
+
+        data = record.data or {}
+        changes: Dict[str, Any] = {
+            "operation": record.operation,
+            "local_id": record.local_id,
+        }
+        if record.table_name == "customers":
+            changes.update({
+                "phone": data.get("phone"),
+                "email": data.get("email"),
+                "first_name": data.get("first_name"),
+                "last_name": data.get("last_name"),
+            })
+        elif record.table_name == "prescriptions":
+            changes.update({
+                "prescription_number": data.get("prescription_number"),
+                "customer_id": str(data.get("customer_id")) if data.get("customer_id") else None,
+                "refills_allowed": data.get("refills_allowed"),
+                "refills_remaining": data.get("refills_remaining"),
+            })
+        elif record.table_name == "sales":
+            changes.update({
+                "sale_number": data.get("sale_number"),
+                "customer_id": str(data.get("customer_id")) if data.get("customer_id") else None,
+                "total_amount": data.get("total_amount"),
+                "discount_amount": data.get("discount_amount")
+                if data.get("discount_amount") is not None
+                else data.get("total_discount_amount"),
+                "items_count": len(data.get("items") or []),
+                "payment_method": data.get("payment_method"),
+                "prescription_id": str(data.get("prescription_id")) if data.get("prescription_id") else None,
+            })
+
+        try:
+            async with db.begin_nested():
+                db.add(AuditLog(
+                    id=uuid.uuid4(),
+                    organization_id=organization_id,
+                    user_id=pushed_by,
+                    action=action,
+                    entity_type=entity_type,
+                    entity_id=server_id,
+                    changes=changes,
+                    context_metadata={
+                        "source": "offline_sync",
+                        "operation_id": str(record.operation_id),
+                        "table_name": record.table_name,
+                        "branch_id": str(branch_id),
+                    },
+                    created_at=datetime.now(timezone.utc),
+                ))
+                await db.flush()
+        except Exception:
+            logger.exception(
+                "Failed to write sync audit log for %s/%s",
+                record.table_name,
+                record.local_id,
+            )
 
     # =========================================================================
     # Per-table push handlers
@@ -1171,6 +1279,19 @@ class SyncService:
                 ), None
 
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
+        payment_status = str(safe_data.get("payment_status") or "completed")
+        payment_status = _PAYMENT_STATUS_ALIASES.get(payment_status, payment_status)
+        if payment_status not in _ALLOWED_PAYMENT_STATUSES:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=(
+                    "Invalid sale payment_status. Expected one of: "
+                    f"{', '.join(sorted(_ALLOWED_PAYMENT_STATUSES))}."
+                ),
+            ), None
+        safe_data["payment_status"] = payment_status
         _parse_datetime_fields(safe_data)
         safe_data["id"] = record.local_id
         safe_data["organization_id"] = str(organization_id)

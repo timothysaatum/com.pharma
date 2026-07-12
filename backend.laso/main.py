@@ -31,6 +31,7 @@ from app.utils.exceptions import (
 # ============================================================================
 
 settings = get_settings()
+HTTP_422_UNPROCESSABLE = getattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", 422)
 
 # Ensure logs directory exists before configuring file logging
 import os
@@ -402,7 +403,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         formatted_errors.append(clean_error)
     
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=HTTP_422_UNPROCESSABLE,
         content={
             "detail": "Validation error",
             "errors": formatted_errors,
@@ -432,7 +433,7 @@ async def pydantic_validation_exception_handler(request: Request, exc: Validatio
         })
     
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=HTTP_422_UNPROCESSABLE,
         content={
             "detail": "Validation error",
             "errors": formatted_errors,
@@ -499,9 +500,9 @@ async def data_error_handler(request: Request, exc: DataError):
     )
 
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        status_code=HTTP_422_UNPROCESSABLE,
         content=build_error_response(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status_code=HTTP_422_UNPROCESSABLE,
             detail=detail,
             request_id=request_id,
         ),
