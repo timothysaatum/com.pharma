@@ -58,7 +58,7 @@ export default function POSPage() {
         if (!activeBranchId) return;
 
         try {
-            if (navigator.onLine && !isOffline) {
+            if (navigator.onLine && !isOffline && isBackendReachable()) {
                 const stats = await statsApi.getBranchStats(activeBranchId);
                 setTodaySales(stats.total_sales_today);
             } else {
@@ -347,7 +347,7 @@ export default function POSPage() {
         try {
             let result: ProcessSaleResponse;
 
-            if (!navigator.onLine) {
+            if (!navigator.onLine || !backendWasReachable) {
                 // ── Offline path ─────────────────────────────────────────────
                 if (requiresOnlineContractVerification) {
                     throw new Error("This contract requires online verification before checkout.");

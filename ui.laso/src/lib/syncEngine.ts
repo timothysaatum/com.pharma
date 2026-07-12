@@ -607,6 +607,15 @@ class SyncEngine {
                     customer_merge_since_version: mergeSinceVersion,
                 } as PullRequest);
 
+                // CRR is the primary pull path. Persist its server timestamp so
+                // the status indicator reflects a real successful sync even
+                // when there are no legacy tables (and no changed rows).
+                await setLastSyncAt(
+                    response.sync_timestamp,
+                    undefined,
+                    this.branchId ?? undefined,
+                );
+
                 // Filter out this site's own changes (already merged locally)
                 const remoteChanges = (response.crr_changes ?? []).filter(
                     (c) => c.site_id !== siteId

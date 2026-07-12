@@ -54,6 +54,7 @@ class OfflineSalesManager {
     const appliedInventoryDeltas: Array<{ drug_id: string; delta: number }> = [];
     let saleWritten = false;
     let prescriptionDecremented = false;
+    let auditWritten = false;
 
     try {
       const existing = await db.select<Array<{ id: string; sync_status: string }>>(
@@ -92,6 +93,39 @@ class OfflineSalesManager {
         prescriptionDecremented = true;
       }
 
+      // Use the sale UUID as the audit UUID. The sync service creates the
+      // canonical server audit with this same ID, so the later CRR pull
+      // reconciles this immediate offline entry instead of duplicating it.
+      await db.execute(
+        `INSERT INTO audit_logs (
+           id, organization_id, user_id, user_full_name, action,
+           entity_type, entity_id, changes, context_metadata,
+           created_at, updated_at, sync_status, sync_version
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$10,'pending',1)
+         ON CONFLICT(id) DO NOTHING`,
+        [
+          sale.id,
+          sale.organization_id,
+          sale.cashier_id || null,
+          null,
+          "process_sale",
+          "Sale",
+          sale.id,
+          JSON.stringify({
+            sale_number: sale.sale_number,
+            customer_id: sale.customer_id ?? null,
+            total_amount: Number(sale.total_amount),
+            discount_amount: Number(sale.discount_amount ?? 0),
+            items_count: items.length,
+            payment_method: sale.payment_method,
+            prescription_id: sale.prescription_id ?? null,
+          }),
+          JSON.stringify({ offline: true, idempotency_key: idempotencyKey }),
+          now,
+        ]
+      );
+      auditWritten = true;
+
       await this.recordAuditRow(db, sale, items, inventoryDeltas, idempotencyKey, now);
       return { success: true, saleId: sale.id };
     } catch (err) {
@@ -103,6 +137,7 @@ class OfflineSalesManager {
         prescriptionDecremented,
         saleWritten,
         appliedInventoryDeltas,
+        auditWritten,
       });
       return {
         success: false,
@@ -255,6 +290,7 @@ class OfflineSalesManager {
     prescriptionDecremented,
     saleWritten,
     appliedInventoryDeltas,
+    auditWritten,
   }: {
     saleId: string;
     branchId: string;
@@ -262,6 +298,7 @@ class OfflineSalesManager {
     prescriptionDecremented: boolean;
     saleWritten: boolean;
     appliedInventoryDeltas: Array<{ drug_id: string; delta: number }>;
+    auditWritten: boolean;
   }): Promise<void> {
     const db = await getDb();
 
@@ -307,6 +344,15 @@ class OfflineSalesManager {
           `[OfflineSalesManager] Failed to remove incomplete sale ${saleId}:`,
           error
         );
+      }
+    }
+
+
+    if (auditWritten) {
+      try {
+        await db.execute("DELETE FROM audit_logs WHERE id = $1", [saleId]);
+      } catch (error) {
+        console.error(`[OfflineSalesManager] Failed to remove audit ${saleId}:`, error);
       }
     }
 

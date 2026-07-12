@@ -21,7 +21,7 @@ from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.precriptions.prescription_model import Prescription
 from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.sales.sales_model import PurchaseOrder, Supplier
-from app.models.system_md.sys_models import SyncOperationReceipt
+from app.models.system_md.sys_models import AuditLog, SyncOperationReceipt
 from app.schemas.sync_schemas import PushRequest, PushRecord
 from app.services.sync.sync_service import SyncService
 
@@ -94,6 +94,12 @@ class TestSyncSaleItems:
         assert sale.items[0].id == item_id
         assert sale.items[0].drug_id == drugs[0].id
         assert sale.items[0].quantity == 2
+
+        audit = await db.get(AuditLog, sale_id)
+        assert audit is not None
+        assert audit.action == "process_sale"
+        assert audit.entity_id == sale_id
+        assert audit.context_metadata["offline"] is True
 
     async def test_push_sale_reassigns_stale_cashier_to_syncing_user(
         self,

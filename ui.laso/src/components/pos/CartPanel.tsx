@@ -22,7 +22,7 @@ import {
 import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
-import { apiClient } from "@/api/client";
+import { apiClient, isBackendReachable } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
@@ -103,6 +103,21 @@ function CustomerSearchWidget({
         debounceRef.current = setTimeout(async () => {
             setSearching(true);
             try {
+                // Customers are part of the synced local reference data. Read
+                // SQLite first so POS lookup never depends on network timeout.
+                const localMatches = await localRead.searchCustomerMatches(
+                    q,
+                    10,
+                    organizationId
+                );
+                if (localMatches.length > 0 || !navigator.onLine || !isBackendReachable()) {
+                    setResults(localMatches);
+                    setOpen(true);
+                    return;
+                }
+
+                // An online fallback covers a newly-created server customer
+                // that has not reached this device's cache yet.
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
                     { params: { q, limit: 10 } }

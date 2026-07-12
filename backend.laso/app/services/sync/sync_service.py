@@ -990,6 +990,16 @@ class SyncService:
         )).scalar_one_or_none()
 
         if existing:
+            audit_exists = await db.scalar(
+                select(AuditLog.id).where(AuditLog.id == existing.id)
+            )
+            if not audit_exists:
+                db.add(SyncService._offline_sale_audit(
+                    sale=existing,
+                    pushed_by=pushed_by,
+                    record=record,
+                ))
+                await db.flush()
             return PushResult(
                 local_id=record.local_id,
                 table_name="sales",
@@ -1343,6 +1353,16 @@ class SyncService:
                         "Prescription refill update failed; sale was rolled back."
                     ) from rx_exc
 
+            # A sale recorded without connectivity must have the same durable
+            # audit coverage as an online checkout. Reuse the sale UUID so the
+            # client's immediate offline audit row is reconciled, not doubled.
+            db.add(SyncService._offline_sale_audit(
+                sale=sale,
+                pushed_by=pushed_by,
+                record=record,
+            ))
+            await db.flush()
+
         except Exception as exc:
             # Let the per-record savepoint unwind every sale side effect,
             # including inventory, allocations, and ledger rows. Attempting an
@@ -1362,6 +1382,36 @@ class SyncService:
             success=True,
             fk_fixes=fk_fixes if fk_fixes else None,
         ), None
+
+    @staticmethod
+    def _offline_sale_audit(
+        sale: Sale,
+        pushed_by: uuid.UUID,
+        record: PushRecord,
+    ) -> AuditLog:
+        items = record.data.get("items")
+        return AuditLog(
+            id=sale.id,
+            organization_id=sale.organization_id,
+            user_id=pushed_by,
+            action="process_sale",
+            entity_type="Sale",
+            entity_id=sale.id,
+            changes={
+                "sale_number": sale.sale_number,
+                "customer_id": str(sale.customer_id) if sale.customer_id else None,
+                "total_amount": float(sale.total_amount),
+                "discount_amount": float(sale.discount_amount or 0),
+                "items_count": len(items) if isinstance(items, list) else 0,
+                "payment_method": sale.payment_method,
+                "prescription_id": str(sale.prescription_id) if sale.prescription_id else None,
+            },
+            context_metadata={"offline": True, "sync_operation_id": str(record.operation_id)},
+            created_at=record.created_offline_at or datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+            sync_status="synced",
+            sync_version=1,
+        )
 
     @staticmethod
     async def _push_refund(

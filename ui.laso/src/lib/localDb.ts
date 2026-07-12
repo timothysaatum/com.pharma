@@ -1937,6 +1937,7 @@ export async function getCrrPushChanges(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
      WHERE site_id = ? AND db_version > ?
+       AND "table" != 'audit_logs'
      ORDER BY seq`,
     [siteId, sinceDbVersion]
   );
