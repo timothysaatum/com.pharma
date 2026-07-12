@@ -259,13 +259,14 @@ export const writeLocal = {
      * no SQLite columns and are derived at read time.
      */
     drugBatch: async (
-        batch: Omit<DrugBatch, "sync_status" | "sync_version"> & { id: string }
+        batch: Omit<DrugBatch, "sync_status" | "sync_version"> & { id: string },
+        operation: "create" | "update" = "create",
     ): Promise<void> => {
         const { days_until_expiry, is_expired, is_expiring_soon, ...batchData } = batch;
         await upsertAndEnqueue(
             "drug_batches",
             batchData as Record<string, unknown>,
-            "create",
+            operation,
             { sync_protocol_version: 2 }
         );
     },

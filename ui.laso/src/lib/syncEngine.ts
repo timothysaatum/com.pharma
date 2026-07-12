@@ -32,7 +32,11 @@ import {
     isCrrTable, enqueue,
     SYNC_QUEUE_CHANGED_EVENT,
 } from "@/lib/localDb";
-import { isOfflineError } from "@/api/client";
+import {
+    BACKEND_CONNECTIVITY_EVENT,
+    isBackendReachable,
+    isOfflineError,
+} from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import type {
@@ -100,6 +104,16 @@ class SyncEngine {
     // create a new reference each time and can never be removed.
     private readonly _onOnline = () => this.onOnline();
     private readonly _onOffline = () => this.onOffline();
+    private readonly _onBackendConnectivityChange = (event: Event) => {
+        const detail = (event as CustomEvent<{ reachable?: boolean }>).detail;
+        if (detail?.reachable === false) {
+            this.onOffline();
+            return;
+        }
+        if (detail?.reachable === true) {
+            this.onOnline();
+        }
+    };
     private readonly _onQueueChanged = () => {
         void this.loadPersistedQueueState();
     };
@@ -138,18 +152,22 @@ class SyncEngine {
 
         window.addEventListener("online", this._onOnline);
         window.addEventListener("offline", this._onOffline);
+        window.addEventListener(
+            BACKEND_CONNECTIVITY_EVENT,
+            this._onBackendConnectivityChange,
+        );
         window.addEventListener(SYNC_QUEUE_CHANGED_EVENT, this._onQueueChanged);
 
         void this.loadPersistedQueueState();
 
-        if (navigator.onLine) {
+        if (navigator.onLine && isBackendReachable()) {
             this.sync();
         } else {
             this.setStatus("offline");
         }
 
         this.intervalId = setInterval(() => {
-            if (navigator.onLine && !this._isSyncing) {
+            if (navigator.onLine && isBackendReachable() && !this._isSyncing) {
                 this.sync();
             }
         }, effectiveIntervalMs);
@@ -167,6 +185,10 @@ class SyncEngine {
         }
         window.removeEventListener("online", this._onOnline);
         window.removeEventListener("offline", this._onOffline);
+        window.removeEventListener(
+            BACKEND_CONNECTIVITY_EVENT,
+            this._onBackendConnectivityChange,
+        );
         window.removeEventListener(SYNC_QUEUE_CHANGED_EVENT, this._onQueueChanged);
         this.branchId = null;
         this.organizationId = null;
@@ -959,7 +981,7 @@ class SyncEngine {
         }
 
         await this.loadPersistedQueueState();
-        if (navigator.onLine && !this._isSyncing) {
+        if (navigator.onLine && isBackendReachable() && !this._isSyncing) {
             this.sync();
         }
     }

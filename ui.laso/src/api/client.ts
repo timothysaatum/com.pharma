@@ -9,6 +9,26 @@ const BASE_URL = configuredBaseUrl.replace(/^http:\/\/127\.0\.0\.1:8000\/?$/, "h
 let backendReachable = true;
 let backendOfflineSince: number | null = null;
 
+export const BACKEND_CONNECTIVITY_EVENT = "backend:connectivity-change";
+
+type BackendConnectivityDetail = {
+    reachable: boolean;
+    offlineSince: number | null;
+};
+
+function emitBackendConnectivityChange(): void {
+    if (typeof window === "undefined") return;
+    window.dispatchEvent(new CustomEvent<BackendConnectivityDetail>(
+        BACKEND_CONNECTIVITY_EVENT,
+        {
+            detail: {
+                reachable: backendReachable,
+                offlineSince: backendOfflineSince,
+            },
+        },
+    ));
+}
+
 export function isBackendReachable(): boolean {
     if (!backendReachable && navigator.onLine && backendOfflineSince !== null) {
         return Date.now() - backendOfflineSince > 15_000;
@@ -17,13 +37,21 @@ export function isBackendReachable(): boolean {
 }
 
 export function markBackendOffline(): void {
+    const wasReachable = backendReachable;
     backendReachable = false;
     backendOfflineSince = Date.now();
+    if (wasReachable) {
+        emitBackendConnectivityChange();
+    }
 }
 
 export function markBackendOnline(): void {
+    const wasOffline = !backendReachable;
     backendReachable = true;
     backendOfflineSince = null;
+    if (wasOffline) {
+        emitBackendConnectivityChange();
+    }
 }
 
 export const apiClient = axios.create({

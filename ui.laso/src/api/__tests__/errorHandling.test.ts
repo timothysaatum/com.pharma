@@ -1,6 +1,12 @@
-import { describe, expect, it } from 'vitest';
+/** @vitest-environment jsdom */
+import { describe, expect, it, vi } from 'vitest';
 import { AxiosError } from 'axios';
-import { parseApiError } from '@/api/client';
+import {
+  BACKEND_CONNECTIVITY_EVENT,
+  markBackendOffline,
+  markBackendOnline,
+  parseApiError,
+} from '@/api/client';
 
 function makeAxiosError(status: number, data: unknown): AxiosError {
   return new AxiosError(
@@ -180,5 +186,27 @@ describe('error message quality', () => {
     const msg = "Prescription number 'RX-001' already exists";
     expect(msg).toContain('RX-001');
     expect(msg).toContain('already exists');
+  });
+});
+
+describe('backend connectivity events', () => {
+  it('broadcasts offline and online transitions for sync status consumers', () => {
+    const listener = vi.fn();
+    window.addEventListener(BACKEND_CONNECTIVITY_EVENT, listener);
+
+    markBackendOnline();
+    markBackendOffline();
+    markBackendOffline();
+    markBackendOnline();
+
+    window.removeEventListener(BACKEND_CONNECTIVITY_EVENT, listener);
+
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(listener.mock.calls[0][0].detail.reachable).toBe(false);
+    expect(listener.mock.calls[0][0].detail.offlineSince).toEqual(expect.any(Number));
+    expect(listener.mock.calls[1][0].detail).toEqual({
+      reachable: true,
+      offlineSince: null,
+    });
   });
 });

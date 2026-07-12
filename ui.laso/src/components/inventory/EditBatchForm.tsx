@@ -6,7 +6,8 @@ import type { Resolver } from "react-hook-form";
 import { motion } from "framer-motion";
 import { X, Package, AlertTriangle, Loader2, CalendarDays } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
-import { isOfflineError, parseApiError } from "@/api/client";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { writeLocal } from "@/lib/localWrite";
 import type { DrugBatch } from "@/types";
 
 const today = new Date().toISOString().split("T")[0];
@@ -71,7 +72,31 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
     const onSubmit = async (values: EditBatchFormValues) => {
         setIsSubmitting(true);
         setError(null);
+        const updatedBatch: DrugBatch = {
+            ...batch,
+            batch_number: values.batch_number,
+            quantity: values.quantity,
+            remaining_quantity: values.remaining_quantity,
+            manufacturing_date: values.manufacturing_date || null,
+            expiry_date: values.expiry_date,
+            cost_price: values.cost_price ?? null,
+            selling_price: values.selling_price ?? null,
+            supplier: values.supplier || null,
+            sync_status: "pending",
+            updated_at: new Date().toISOString(),
+        };
+
+        const saveOffline = async () => {
+            await writeLocal.drugBatch(updatedBatch, "update");
+            onSuccess(updatedBatch);
+        };
+
         try {
+            if (!navigator.onLine || !isBackendReachable()) {
+                await saveOffline();
+                return;
+            }
+
             const result = await inventoryApi.updateBatch(batch.id, {
                 batch_number: values.batch_number,
                 quantity: values.quantity,
@@ -85,7 +110,7 @@ export function EditBatchForm({ batch, drugName, onSuccess, onCancel }: EditBatc
             onSuccess(result);
         } catch (err) {
             if (isOfflineError(err)) {
-                setError("Batch editing is not available in offline mode.");
+                await saveOffline();
             } else {
                 setError(parseApiError(err));
             }
