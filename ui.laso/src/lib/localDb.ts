@@ -1294,12 +1294,26 @@ export async function ensureAuditLogSchema(db: Database): Promise<void> {
     )
   `);
   // CREATE TABLE IF NOT EXISTS does not evolve databases created by older
-  // desktop releases. Add the display-only server field idempotently so a
-  // legacy pull cannot abort before advancing its cursor and reaching CRR pull.
-  try {
-    await db.execute("ALTER TABLE audit_logs ADD COLUMN user_full_name TEXT");
-  } catch {
-    // Duplicate-column is expected on every startup after the first repair.
+  // desktop releases. Repair every column used by offline reads/writes; each
+  // ALTER is intentionally idempotent for current installations.
+  const legacyColumns = [
+    "user_full_name TEXT",
+    "changes TEXT",
+    "ip_address TEXT",
+    "user_agent TEXT",
+    "context_metadata TEXT",
+    "updated_at TEXT NOT NULL DEFAULT ''",
+    "sync_status TEXT NOT NULL DEFAULT 'synced'",
+    "sync_version INTEGER NOT NULL DEFAULT 1",
+    "last_synced_at TEXT",
+    "sync_hash TEXT",
+  ];
+  for (const column of legacyColumns) {
+    try {
+      await db.execute(`ALTER TABLE audit_logs ADD COLUMN ${column}`);
+    } catch {
+      // Duplicate-column is expected after the repair has been applied.
+    }
   }
 }
 

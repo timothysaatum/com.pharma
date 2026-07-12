@@ -17,7 +17,7 @@ import {
 import { toast } from "sonner";
 import { auditApi, type AuditLogEntry } from "@/api/audit";
 import { isOfflineError, isBackendReachable, parseApiError } from "@/api/client";
-import { getDb } from "@/lib/localDb";
+import { ensureAuditLogSchema, getDb } from "@/lib/localDb";
 import { cn } from "@/lib/utils";
 
 const PAGE_SIZE = 50;
@@ -33,6 +33,70 @@ function parseAuditRow(row: Record<string, unknown>): AuditLogEntry {
         }
     }
     return parsed as unknown as AuditLogEntry;
+}
+
+async function loadLocalAuditLogs({
+    page,
+    search,
+    action,
+    startDate,
+    endDate,
+}: {
+    page: number;
+    search: string;
+    action: string;
+    startDate: string;
+    endDate: string;
+}): Promise<{ rows: AuditLogEntry[]; total: number }> {
+    const db = await getDb();
+    // Some installations predate the full audit cache schema. Repair it at
+    // point-of-use as well as startup so offline viewing cannot be blocked by
+    // an unrelated earlier migration failure.
+    await ensureAuditLogSchema(db);
+
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+    const addValue = (value: unknown) => {
+        values.push(value);
+        return `$${values.length}`;
+    };
+
+    const term = search.trim().toLowerCase();
+    if (term) {
+        const placeholder = addValue(`%${term.replace(/[%_\\]/g, "\\$&")}%`);
+        clauses.push(`(
+            LOWER(COALESCE(user_full_name, '')) LIKE ${placeholder} ESCAPE '\\' OR
+            LOWER(COALESCE(action, '')) LIKE ${placeholder} ESCAPE '\\' OR
+            LOWER(COALESCE(entity_type, '')) LIKE ${placeholder} ESCAPE '\\' OR
+            LOWER(COALESCE(changes, '')) LIKE ${placeholder} ESCAPE '\\' OR
+            LOWER(COALESCE(context_metadata, '')) LIKE ${placeholder} ESCAPE '\\'
+        )`);
+    }
+    if (action) clauses.push(`action = ${addValue(action)}`);
+    if (startDate) clauses.push(`created_at >= ${addValue(`${startDate}T00:00:00`)}`);
+    if (endDate) clauses.push(`created_at < ${addValue(`${endDate}T23:59:59.999`)}`);
+
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    const countRows = await db.select<{ c: number }[]>(
+        `SELECT COUNT(*) AS c FROM audit_logs ${where}`,
+        values,
+    );
+    const limitPlaceholder = `$${values.length + 1}`;
+    const offsetPlaceholder = `$${values.length + 2}`;
+    const rawRows = await db.select<Record<string, unknown>[]>(
+        `SELECT id, organization_id, user_id, user_full_name, action,
+                entity_type, entity_id, changes, ip_address, user_agent,
+                context_metadata, created_at, updated_at, sync_status,
+                sync_version, last_synced_at, sync_hash
+           FROM audit_logs ${where}
+          ORDER BY created_at DESC
+          LIMIT ${limitPlaceholder} OFFSET ${offsetPlaceholder}`,
+        [...values, PAGE_SIZE, (page - 1) * PAGE_SIZE],
+    );
+    return {
+        rows: rawRows.map(parseAuditRow),
+        total: Number(countRows[0]?.c ?? 0),
+    };
 }
 
 function fmtDateTime(iso: string) {
@@ -329,22 +393,27 @@ export default function AuditLogPage() {
     const fetchLogs = useCallback(async (targetPage = 1) => {
         setLoading(true);
         setError(null);
+        const useLocal = async () => {
+            const result = await loadLocalAuditLogs({
+                page: targetPage,
+                search,
+                action: actionFilter,
+                startDate,
+                endDate,
+            });
+            setLogs(result.rows);
+            setTotal(result.total);
+            setTotalPages(Math.max(1, Math.ceil(result.total / PAGE_SIZE)));
+            setPage(targetPage);
+        };
         try {
             if (!isBackendReachable()) {
                 setIsOffline(true);
-                const db = await getDb();
-                const rawRows = await db.select<Record<string, unknown>[]>(
-                    "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-                    [PAGE_SIZE, (targetPage - 1) * PAGE_SIZE]
-                );
-                const rows = rawRows.map(parseAuditRow);
-                const countRows = await db.select<{ c: number }[]>(
-                    "SELECT COUNT(*) AS c FROM audit_logs"
-                );
-                setLogs(rows);
-                setTotal(countRows[0]?.c ?? 0);
-                setTotalPages(Math.max(1, Math.ceil((countRows[0]?.c ?? 0) / PAGE_SIZE)));
-                setPage(targetPage);
+                try {
+                    await useLocal();
+                } catch (localErr) {
+                    setError(`Could not read cached audit logs: ${parseApiError(localErr)}`);
+                }
                 return;
             }
             setIsOffline(false);
@@ -364,21 +433,9 @@ export default function AuditLogPage() {
             if (isOfflineError(err)) {
                 setIsOffline(true);
                 try {
-                    const db = await getDb();
-                    const rawRows = await db.select<Record<string, unknown>[]>(
-                        "SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-                        [PAGE_SIZE, (targetPage - 1) * PAGE_SIZE]
-                    );
-                    const rows = rawRows.map(parseAuditRow);
-                    const countRows = await db.select<{ c: number }[]>(
-                        "SELECT COUNT(*) AS c FROM audit_logs"
-                    );
-                    setLogs(rows);
-                    setTotal(countRows[0]?.c ?? 0);
-                    setTotalPages(Math.max(1, Math.ceil((countRows[0]?.c ?? 0) / PAGE_SIZE)));
-                    setPage(targetPage);
-                } catch {
-                    setError(parseApiError(err));
+                    await useLocal();
+                } catch (localErr) {
+                    setError(`Could not read cached audit logs: ${parseApiError(localErr)}`);
                 }
             } else {
                 setError(parseApiError(err));
