@@ -122,7 +122,7 @@ function CustomerSearchWidget({
                 }
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
-                    { params: { q, limit: 10 }, signal: controller.signal }
+                    { params: { q, limit: 10 }, signal: controller.signal, timeout: 3000 }
                 );
                 if (!controller.signal.aborted) {
                     setResults(data.matches ?? []);
