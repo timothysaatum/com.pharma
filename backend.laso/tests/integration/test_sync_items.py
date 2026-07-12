@@ -330,9 +330,13 @@ class TestSyncSaleItems:
         adjustment_id = uuid.uuid4()
         inventory_id = uuid.uuid4()
         purchase_order_id = uuid.uuid4()
+        db.add_all([other_branch, supplier])
+        # PostgreSQL enforces these foreign keys during the flush.  The models
+        # intentionally do not expose ORM relationships, so SQLAlchemy cannot
+        # infer that the branch and supplier must be inserted before the rows
+        # below when they are all added in one batch.
+        await db.flush()
         db.add_all([
-            other_branch,
-            supplier,
             Sale(
                 id=sale_id,
                 organization_id=org.id,
@@ -1899,14 +1903,22 @@ class TestSyncSaleItems:
             is_active=True,
             is_deleted=False,
         )
+        supplier = Supplier(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            name="Other Branch Supplier",
+            is_active=True,
+            is_deleted=False,
+        )
         existing_id = uuid.uuid4()
-        db.add(other_branch)
+        db.add_all([other_branch, supplier])
+        await db.flush()
         db.add(PurchaseOrder(
             id=existing_id,
             organization_id=org.id,
             branch_id=other_branch.id,
             po_number="OTHER-BRANCH-PO",
-            supplier_id=uuid.uuid4(),
+            supplier_id=supplier.id,
             subtotal=Decimal("10.00"),
             tax_amount=Decimal("0.00"),
             shipping_cost=Decimal("0.00"),
@@ -1964,6 +1976,7 @@ class TestSyncSaleItems:
         )
         existing_id = uuid.uuid4()
         db.add(other_org)
+        await db.flush()
         db.add(Customer(
             id=existing_id,
             organization_id=other_org.id,

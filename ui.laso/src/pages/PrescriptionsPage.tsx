@@ -191,12 +191,24 @@ export default function PrescriptionsPage() {
     setUpdatingId(rx.id);
     setError(null);
     try {
+      if (!navigator.onLine || !isBackendReachable()) {
+        const updated = { ...rx, status: nextStatus, updated_at: new Date().toISOString() };
+        await writeLocal.prescription(updated, "update");
+        setItems((current) => current.map((item) => item.id === rx.id ? updated : item));
+        return;
+      }
       const updated = await prescriptionsApi.update(rx.id, { status: nextStatus });
       setItems((current) =>
         current.map((item) => (item.id === rx.id ? { ...item, ...updated } : item))
       );
     } catch (err) {
-      setError(parseApiError(err));
+      if (isOfflineError(err)) {
+        const updated = { ...rx, status: nextStatus, updated_at: new Date().toISOString() };
+        await writeLocal.prescription(updated, "update");
+        setItems((current) => current.map((item) => item.id === rx.id ? updated : item));
+      } else {
+        setError(parseApiError(err));
+      }
     } finally {
       setUpdatingId(null);
     }
@@ -206,10 +218,32 @@ export default function PrescriptionsPage() {
     if (!confirm("Are you sure you want to delete this prescription?")) return;
     setUpdatingId(id);
     try {
+      const prescription = items.find((item) => item.id === id);
+      if (prescription && (!navigator.onLine || !isBackendReachable())) {
+        await writeLocal.prescription({
+          ...prescription,
+          status: "cancelled",
+          notes: [prescription.notes, "Cancelled offline"].filter(Boolean).join("\n"),
+          updated_at: new Date().toISOString(),
+        }, "update");
+        setItems((current) => current.filter((item) => item.id !== id));
+        return;
+      }
       await prescriptionsApi.delete(id);
       setItems((current) => current.filter((item) => item.id !== id));
     } catch (err) {
-      setError(parseApiError(err));
+      const prescription = items.find((item) => item.id === id);
+      if (prescription && isOfflineError(err)) {
+        await writeLocal.prescription({
+          ...prescription,
+          status: "cancelled",
+          notes: [prescription.notes, "Cancelled offline"].filter(Boolean).join("\n"),
+          updated_at: new Date().toISOString(),
+        }, "update");
+        setItems((current) => current.filter((item) => item.id !== id));
+      } else {
+        setError(parseApiError(err));
+      }
     } finally {
       setUpdatingId(null);
     }
@@ -477,7 +511,30 @@ export default function PrescriptionsPage() {
       };
 
       if (editingId) {
-        const updated = await prescriptionsApi.update(editingId, data);
+        const current = items.find((item) => item.id === editingId);
+        let updated: Prescription;
+        if (current && (!navigator.onLine || !isBackendReachable())) {
+          updated = {
+            ...current,
+            ...data,
+            branch_id: data.branch_id ?? current.branch_id,
+            updated_at: new Date().toISOString(),
+          };
+          await writeLocal.prescription(updated, "update");
+        } else {
+          try {
+            updated = await prescriptionsApi.update(editingId, data);
+          } catch (err) {
+            if (!current || !isOfflineError(err)) throw err;
+            updated = {
+              ...current,
+              ...data,
+              branch_id: data.branch_id ?? current.branch_id,
+              updated_at: new Date().toISOString(),
+            };
+            await writeLocal.prescription(updated, "update");
+          }
+        }
         setItems((current) =>
           current.map((item) => (item.id === editingId ? { ...item, ...updated } : item))
         );

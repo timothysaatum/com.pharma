@@ -156,6 +156,14 @@ function pickColumns(
     );
 }
 
+export function nextSyncVersion(
+    current: number | undefined,
+    operation: "create" | "update"
+): number {
+    const version = current ?? 1;
+    return operation === "update" ? version + 1 : version;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // INTERNAL — upsert a row and enqueue it
 // ─────────────────────────────────────────────────────────────────────────────
@@ -168,7 +176,12 @@ async function upsertAndEnqueue<T extends Record<string, unknown>>(
 ): Promise<void> {
     const db = await getDb();
     const id = record.id as string;
-    const syncVersion = (record.sync_version as number | undefined) ?? 1;
+    // Updates must advertise the next version.  The server rejects equality
+    // because it means another writer may already have committed that version.
+    const syncVersion = nextSyncVersion(
+        record.sync_version as number | undefined,
+        operation
+    );
     const now = new Date().toISOString();
 
     const payload = {
