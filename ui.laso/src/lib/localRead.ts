@@ -495,7 +495,6 @@ export const localRead = {
     const values: unknown[] = [sqlLike(term), limit];
     const qualifiers = [
       "is_deleted = 0",
-      "is_active = 1",
       `(
         LOWER(first_name) LIKE $1 OR
         LOWER(last_name) LIKE $1 OR
