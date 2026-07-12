@@ -114,7 +114,20 @@ async def crr_pull(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> PullResponse:
+    if not _user_can_sync_branch(current_user, request.branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this branch.",
+        )
+
     shadow = await _require_crr_shadow()
+
+    published = await shadow.publish_server_authoritative_tables(
+        db=db,
+        organization_id=current_user.organization_id,
+    )
+    if published:
+        await db.commit()
 
     max_db = await shadow.max_db_version()
     changes = await shadow.get_changes_since(

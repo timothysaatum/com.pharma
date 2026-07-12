@@ -105,4 +105,119 @@ describe("CRR migration audit sync", () => {
       ["customer_merge_directive_version", "9"],
     );
   });
+
+  it("drains paginated CRR pulls without advancing the local push cursor", async () => {
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const applyChanges = vi.fn().mockResolvedValue(undefined);
+    const crrPull = vi.fn()
+      .mockResolvedValueOnce({
+        crr_changes: [{ table: "audit_logs", pk: "a", cid: "action", val: "one", col_version: 1, db_version: 500, site_id: "server", cl: 1, seq: 1 }],
+        crr_max_db_version: 500,
+        customer_merge_directives: [],
+        customer_merge_max_version: 0,
+        has_more: true,
+      })
+      .mockResolvedValueOnce({
+        crr_changes: [{ table: "audit_logs", pk: "b", cid: "action", val: "two", col_version: 1, db_version: 900, site_id: "server", cl: 1, seq: 2 }],
+        crr_max_db_version: 900,
+        customer_merge_directives: [],
+        customer_merge_max_version: 0,
+        has_more: false,
+      });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPull, crrPush: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({ select: async () => [], execute }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges: empty, applyCrrPullChanges: applyChanges,
+      applyCustomerMergeDirectives: noop,
+      getCrrSiteId: vi.fn().mockResolvedValue("local-site"),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+    await (syncEngine as any).pullCrr();
+
+    expect(crrPull).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      crr_since_db_version: 0,
+    }));
+    expect(crrPull).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      crr_since_db_version: 500,
+    }));
+    expect(applyChanges).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("sync_meta"),
+      ["crr_pull_db_version", "500"],
+    );
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("sync_meta"),
+      ["crr_pull_db_version", "900"],
+    );
+    expect(execute).not.toHaveBeenCalledWith(
+      expect.any(String),
+      expect.arrayContaining(["crr_push_db_version"]),
+    );
+  });
+
+  it("uses the independent CRR push cursor when selecting local changes", async () => {
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const getCrrPushChanges = vi.fn().mockResolvedValue([
+      { table: "sales", pk: "sale-1", cid: "sale_number", val: "S-1", col_version: 1, db_version: 13, site_id: "local-site", cl: 1, seq: 1 },
+    ]);
+    const crrPush = vi.fn().mockResolvedValue({
+      results: [{ table: "sales", row_id: "sale-1", success: true }],
+      total_received: 1,
+      total_accepted: 1,
+      total_failed: 0,
+      sync_timestamp: "2026-07-12T00:00:00Z",
+      merged_row_ids: ["sale-1"],
+      accepted_audit_event_ids: [],
+      audit_errors: {},
+    });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPush, crrPull: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({
+        select: async () => [
+          { key: "crr_push_db_version", value: "7" },
+          { key: "crr_db_version", value: "999" },
+        ],
+        execute,
+      }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+    await (syncEngine as any).pushCrr();
+
+    expect(getCrrPushChanges).toHaveBeenCalledWith(7);
+    expect(execute).toHaveBeenCalledWith(
+      expect.stringContaining("sync_meta"),
+      ["crr_push_db_version", "13"],
+    );
+  });
 });

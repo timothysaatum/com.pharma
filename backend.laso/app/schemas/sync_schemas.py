@@ -431,6 +431,7 @@ class CrrPushRecord(BaseSchema):
     @classmethod
     def validate_crr_table(cls, v: str) -> str:
         allowed = {
+            "drugs", "drug_categories", "price_contracts", "audit_logs",
             "branch_inventory", "drug_batches", "customers",
             "prescriptions", "purchase_orders", "sales",
         }

@@ -31,7 +31,7 @@ from app.schemas.sync_schemas import (
     CrrPushResult,
     CrrPushResponse,
 )
-from app.services.sync.shadow_db import get_shadow_db
+from app.services.sync.shadow_db import get_crr_config, get_shadow_db
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +206,12 @@ class CrrSyncService:
             error: Optional[str] = None
 
             try:
+                cfg = get_crr_config(table)
+                if cfg and cfg.get("server_authoritative"):
+                    raise ValueError(
+                        f"{table} is server-authoritative and cannot be pushed by clients"
+                    )
+
                 # Build the raw tuples for shadow DB insert
                 rows_to_insert: List[Tuple[Any, ...]] = []
                 for ch in group_changes:

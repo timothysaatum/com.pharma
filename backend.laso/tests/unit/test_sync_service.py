@@ -219,3 +219,25 @@ async def test_crr_endpoint_guard_returns_503_when_extension_is_unavailable(monk
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.headers == {"Retry-After": "60"}
+
+
+@pytest.mark.asyncio
+async def test_crr_pull_rejects_unassigned_branch():
+    from fastapi import HTTPException
+    from app.api.v1.endpoints.crr_sync_endpoints import crr_pull
+    from app.schemas.sync_schemas import PullRequest
+
+    branch_id = uuid.uuid4()
+    current_user = type("User", (), {
+        "organization_id": uuid.uuid4(),
+        "assigned_branches": [uuid.uuid4()],
+    })()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await crr_pull(
+            request=PullRequest(branch_id=branch_id),
+            current_user=current_user,
+            db=None,
+        )
+
+    assert exc_info.value.status_code == 403

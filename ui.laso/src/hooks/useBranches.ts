@@ -39,7 +39,7 @@ export function useBranches() {
         setIsOffline(false);
 
         if (!isBackendReachable()) {
-            const cached = await offlineCache.getBranches();
+            const cached = await offlineCache.getBranches({ allowExpired: true });
             if (cached) {
                 setBranches(cached);
                 setIsOffline(true);
@@ -56,7 +56,7 @@ export function useBranches() {
             await offlineCache.setBranches(result.items);
         } catch (err) {
             if (isOfflineError(err)) {
-                const cached = await offlineCache.getBranches();
+                const cached = await offlineCache.getBranches({ allowExpired: true });
                 if (cached) {
                     setBranches(cached);
                     setIsOffline(true);

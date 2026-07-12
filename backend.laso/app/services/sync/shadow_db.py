@@ -16,6 +16,7 @@ Resolution order for the cr-sqlite extension path:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,145 @@ logger = logging.getLogger(__name__)
 #   bk_column     — the single column to renumber (only for keep_both_renumber)
 
 _CRR_TABLE_CONFIG: Dict[str, Dict[str, Any]] = {
+    "drugs": {
+        "ddl": """
+            CREATE TABLE IF NOT EXISTS drugs (
+                id                TEXT NOT NULL PRIMARY KEY,
+                organization_id   TEXT NOT NULL DEFAULT '',
+                name              TEXT NOT NULL DEFAULT '',
+                generic_name      TEXT,
+                brand_name        TEXT,
+                sku               TEXT,
+                barcode           TEXT,
+                category_id       TEXT,
+                drug_type         TEXT NOT NULL DEFAULT 'otc',
+                dosage_form       TEXT,
+                strength          TEXT,
+                manufacturer      TEXT,
+                supplier          TEXT,
+                requires_prescription INTEGER NOT NULL DEFAULT 0,
+                controlled_substance_schedule TEXT,
+                ndc_code          TEXT,
+                unit_price        REAL NOT NULL DEFAULT 0,
+                cost_price        REAL,
+                markup_percentage REAL,
+                tax_rate          REAL NOT NULL DEFAULT 0,
+                reorder_level     INTEGER NOT NULL DEFAULT 10,
+                reorder_quantity  INTEGER NOT NULL DEFAULT 50,
+                max_stock_level   INTEGER,
+                unit_of_measure   TEXT NOT NULL DEFAULT 'unit',
+                description       TEXT,
+                usage_instructions TEXT,
+                side_effects      TEXT,
+                contraindications TEXT,
+                storage_conditions TEXT,
+                image_url         TEXT,
+                is_active         INTEGER NOT NULL DEFAULT 1,
+                is_deleted        INTEGER NOT NULL DEFAULT 0,
+                sync_status       TEXT NOT NULL DEFAULT 'synced',
+                sync_version      INTEGER NOT NULL DEFAULT 1,
+                synced_at         TEXT,
+                updated_at        TEXT NOT NULL DEFAULT '',
+                created_at        TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_drugs_org ON drugs(organization_id);
+        """,
+        "strategy": "lww",
+        "business_key": [],
+        "server_authoritative": True,
+    },
+    "drug_categories": {
+        "ddl": """
+            CREATE TABLE IF NOT EXISTS drug_categories (
+                id              TEXT NOT NULL PRIMARY KEY,
+                organization_id TEXT NOT NULL DEFAULT '',
+                name            TEXT NOT NULL DEFAULT '',
+                description     TEXT,
+                parent_id       TEXT,
+                path            TEXT,
+                level           INTEGER NOT NULL DEFAULT 0,
+                is_deleted      INTEGER NOT NULL DEFAULT 0,
+                sync_status     TEXT NOT NULL DEFAULT 'synced',
+                sync_version    INTEGER NOT NULL DEFAULT 1,
+                synced_at       TEXT,
+                updated_at      TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_drug_categories_org ON drug_categories(organization_id);
+        """,
+        "strategy": "lww",
+        "business_key": [],
+        "server_authoritative": True,
+    },
+    "price_contracts": {
+        "ddl": """
+            CREATE TABLE IF NOT EXISTS price_contracts (
+                id                        TEXT NOT NULL PRIMARY KEY,
+                organization_id           TEXT NOT NULL DEFAULT '',
+                contract_code             TEXT NOT NULL DEFAULT '',
+                contract_name             TEXT NOT NULL DEFAULT '',
+                contract_type             TEXT NOT NULL DEFAULT 'standard',
+                is_default_contract       INTEGER NOT NULL DEFAULT 0,
+                discount_type             TEXT NOT NULL DEFAULT 'percentage',
+                discount_percentage       REAL NOT NULL DEFAULT 0,
+                applies_to_prescription_only INTEGER NOT NULL DEFAULT 0,
+                applies_to_otc            INTEGER NOT NULL DEFAULT 1,
+                applies_to_all_branches   INTEGER NOT NULL DEFAULT 1,
+                applicable_branch_ids     TEXT NOT NULL DEFAULT '[]',
+                effective_from            TEXT NOT NULL DEFAULT '',
+                effective_to              TEXT,
+                requires_verification     INTEGER NOT NULL DEFAULT 0,
+                requires_approval         INTEGER NOT NULL DEFAULT 0,
+                daily_usage_limit         INTEGER,
+                per_customer_usage_limit  INTEGER,
+                insurance_provider_id     TEXT,
+                requires_preauthorization INTEGER NOT NULL DEFAULT 0,
+                minimum_purchase_amount   REAL,
+                maximum_purchase_amount   REAL,
+                status                    TEXT NOT NULL DEFAULT 'active',
+                is_active                 INTEGER NOT NULL DEFAULT 1,
+                copay_amount              REAL,
+                copay_percentage          REAL,
+                is_deleted                INTEGER NOT NULL DEFAULT 0,
+                sync_status               TEXT NOT NULL DEFAULT 'synced',
+                sync_version              INTEGER NOT NULL DEFAULT 1,
+                synced_at                 TEXT,
+                updated_at                TEXT NOT NULL DEFAULT '',
+                created_at                TEXT NOT NULL DEFAULT ''
+            );
+            CREATE INDEX IF NOT EXISTS idx_price_contracts_org ON price_contracts(organization_id);
+        """,
+        "strategy": "lww",
+        "business_key": [],
+        "server_authoritative": True,
+    },
+    "audit_logs": {
+        "ddl": """
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id                TEXT NOT NULL PRIMARY KEY,
+                organization_id   TEXT NOT NULL DEFAULT '',
+                user_id           TEXT,
+                user_full_name    TEXT,
+                action            TEXT NOT NULL DEFAULT '',
+                entity_type       TEXT,
+                entity_id         TEXT,
+                changes           TEXT,
+                ip_address        TEXT,
+                user_agent        TEXT,
+                context_metadata  TEXT,
+                created_at        TEXT NOT NULL DEFAULT '',
+                updated_at        TEXT NOT NULL DEFAULT '',
+                sync_status       TEXT NOT NULL DEFAULT 'synced',
+                sync_version      INTEGER NOT NULL DEFAULT 1,
+                last_synced_at    TEXT,
+                sync_hash         TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_logs_org ON audit_logs(organization_id);
+        """,
+        "strategy": "lww",
+        "business_key": [],
+        "server_authoritative": True,
+    },
     "branch_inventory": {
         "ddl": """
             CREATE TABLE IF NOT EXISTS branch_inventory (
@@ -474,6 +614,14 @@ class ShadowDB:
                     logger.warning(
                         "crsql_as_crr for %s failed: %s", table_name, exc
                     )
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crr_server_row_hashes (
+                table_name TEXT NOT NULL,
+                row_id     TEXT NOT NULL,
+                row_hash   TEXT NOT NULL,
+                PRIMARY KEY (table_name, row_id)
+            )
+        """)
         if conversion_ok:
             try:
                 conn.execute("SELECT 1 FROM crsql_changes LIMIT 1")
@@ -486,6 +634,110 @@ class ShadowDB:
 
         conn.commit()
         self._conn = conn
+
+    async def publish_server_authoritative_tables(
+        self,
+        db: AsyncSession,
+        organization_id: Any,
+    ) -> int:
+        """Publish server-owned Postgres rows into the CRR shadow peer.
+
+        Reference/catalog/audit rows are edited through normal server APIs, not
+        by offline clients. This method makes those Postgres changes visible to
+        CRR clients without keeping the old timestamp pull path alive.
+        """
+        published = 0
+        for table, cfg in _CRR_TABLE_CONFIG.items():
+            if not cfg.get("server_authoritative"):
+                continue
+            result = await db.execute(
+                text(f'SELECT * FROM "{table}" WHERE organization_id = :organization_id'),
+                {"organization_id": str(organization_id)},
+            )
+            for row in result.mappings().all():
+                if await self.upsert_shadow_server_row(table, dict(row)):
+                    published += 1
+        return published
+
+    async def upsert_shadow_server_row(self, table: str, row: Dict[str, Any]) -> bool:
+        """Upsert one Postgres row into shadow SQLite if its content changed."""
+        if table not in _CRR_TABLE_CONFIG:
+            raise ValueError(f"Unknown CRR table: {table}")
+
+        def _json_default(value: Any) -> str:
+            if isinstance(value, (date, datetime, Decimal)):
+                return value.isoformat() if hasattr(value, "isoformat") else str(value)
+            if hasattr(value, "hex"):
+                return str(value)
+            return str(value)
+
+        def _sqlite_value(value: Any) -> Any:
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (date, datetime)):
+                return value.isoformat()
+            if isinstance(value, Decimal):
+                return float(value)
+            if isinstance(value, (dict, list)):
+                return json.dumps(value, sort_keys=True, default=_json_default)
+            if hasattr(value, "hex") and not isinstance(value, str):
+                return str(value)
+            return value
+
+        def _sync() -> bool:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    raise RuntimeError("Shadow DB not initialised")
+                table_columns = [
+                    r[1] for r in conn.execute(f"PRAGMA table_info([{table}])").fetchall()
+                    if r[1] != "rowid"
+                ]
+                shadow_row = {
+                    column: _sqlite_value(row.get(column))
+                    for column in table_columns
+                    if column in row
+                }
+                if "id" not in shadow_row or not shadow_row["id"]:
+                    return False
+                normalized = json.dumps(
+                    shadow_row,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=_json_default,
+                )
+                row_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                current = conn.execute(
+                    """SELECT row_hash FROM crr_server_row_hashes
+                       WHERE table_name = ? AND row_id = ?""",
+                    (table, str(shadow_row["id"])),
+                ).fetchone()
+                if current and current[0] == row_hash:
+                    return False
+
+                columns = list(shadow_row.keys())
+                placeholders = ", ".join("?" for _ in columns)
+                updates = ", ".join(
+                    f"[{column}] = excluded.[{column}]"
+                    for column in columns
+                    if column != "id"
+                )
+                conn.execute(
+                    f"""INSERT INTO [{table}] ({', '.join(f'[{c}]' for c in columns)})
+                        VALUES ({placeholders})
+                        ON CONFLICT(id) DO UPDATE SET {updates}""",
+                    [shadow_row[column] for column in columns],
+                )
+                conn.execute(
+                    """INSERT INTO crr_server_row_hashes(table_name, row_id, row_hash)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(table_name, row_id) DO UPDATE SET row_hash = excluded.row_hash""",
+                    (table, str(shadow_row["id"]), row_hash),
+                )
+                conn.commit()
+                return True
+
+        return await asyncio.to_thread(_sync)
 
     # ── CRR push: insert remote changes, trigger merge ────────────────
 
@@ -643,7 +895,7 @@ class ShadowDB:
                              site_id, cl, seq
                       FROM crsql_changes
                       WHERE db_version > ?
-                      ORDER BY seq
+                      ORDER BY db_version, seq
                       LIMIT ?""",
                     (since_db_version, limit),
                 )

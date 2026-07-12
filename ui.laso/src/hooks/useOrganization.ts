@@ -48,8 +48,8 @@ export function useOrganization() {
 
         if (!isBackendReachable()) {
             const [cachedOrg, cachedStats] = await Promise.all([
-                offlineCache.getOrganization(),
-                offlineCache.getOrganizationStats(),
+                offlineCache.getOrganization({ allowExpired: true }),
+                offlineCache.getOrganizationStats({ allowExpired: true }),
             ]);
             if (cachedOrg) {
                 setOrg(cachedOrg);
@@ -76,8 +76,8 @@ export function useOrganization() {
         } catch (err) {
             if (isOfflineError(err)) {
                 const [cachedOrg, cachedStats] = await Promise.all([
-                    offlineCache.getOrganization(),
-                    offlineCache.getOrganizationStats(),
+                    offlineCache.getOrganization({ allowExpired: true }),
+                    offlineCache.getOrganizationStats({ allowExpired: true }),
                 ]);
                 if (cachedOrg) {
                     setOrg(cachedOrg);

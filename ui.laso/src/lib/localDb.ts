@@ -99,6 +99,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 14) await migrate_v14(db);
       if (user_version < 15) await migrate_v15(db);
       if (user_version < 16) await migrate_v16(db);
+      if (user_version < 17) await migrate_v17(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
@@ -1003,6 +1004,203 @@ export async function migrate_v16(db: Database): Promise<void> {
   }
 }
 
+/// Migration v17: convert remaining legacy-pulled reference/audit tables to CRR.
+/// These are server-authored in practice, but CRR transport now carries their
+/// deltas so the desktop sync loop does not need the legacy /sync/pull path.
+async function migrate_v17(db: Database): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    try {
+      await db.execute("ALTER TABLE drugs ADD COLUMN image_url TEXT");
+    } catch { }
+
+    async function recreateTable(
+      oldName: string,
+      newName: string,
+      ddl: string,
+      selectCols: string,
+    ): Promise<void> {
+      await db.execute(ddl);
+      await db.execute(`
+        INSERT INTO ${newName} (${selectCols})
+        SELECT ${selectCols} FROM ${oldName}
+      `);
+      await db.execute(`DROP TABLE ${oldName}`);
+      await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
+    }
+
+    await recreateTable(
+      "drugs", "drugs_crr",
+      `CREATE TABLE drugs_crr (
+        id                TEXT NOT NULL PRIMARY KEY,
+        organization_id   TEXT NOT NULL DEFAULT '',
+        name              TEXT NOT NULL DEFAULT '',
+        generic_name      TEXT,
+        brand_name        TEXT,
+        sku               TEXT,
+        barcode           TEXT,
+        category_id       TEXT,
+        drug_type         TEXT NOT NULL DEFAULT 'otc',
+        dosage_form       TEXT,
+        strength          TEXT,
+        manufacturer      TEXT,
+        supplier          TEXT,
+        requires_prescription INTEGER NOT NULL DEFAULT 0,
+        controlled_substance_schedule TEXT,
+        ndc_code          TEXT,
+        unit_price        REAL NOT NULL DEFAULT 0,
+        cost_price        REAL,
+        markup_percentage REAL,
+        tax_rate          REAL NOT NULL DEFAULT 0,
+        reorder_level     INTEGER NOT NULL DEFAULT 10,
+        reorder_quantity  INTEGER NOT NULL DEFAULT 50,
+        max_stock_level   INTEGER,
+        unit_of_measure   TEXT NOT NULL DEFAULT 'unit',
+        description       TEXT,
+        usage_instructions TEXT,
+        side_effects      TEXT,
+        contraindications TEXT,
+        storage_conditions TEXT,
+        image_url         TEXT,
+        is_active         INTEGER NOT NULL DEFAULT 1,
+        is_deleted        INTEGER NOT NULL DEFAULT 0,
+        sync_status       TEXT NOT NULL DEFAULT 'synced',
+        sync_version      INTEGER NOT NULL DEFAULT 1,
+        synced_at         TEXT,
+        updated_at        TEXT NOT NULL DEFAULT '',
+        created_at        TEXT NOT NULL DEFAULT ''
+      )`,
+      `id, organization_id, name, generic_name, brand_name, sku, barcode,
+       category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+       requires_prescription, controlled_substance_schedule, ndc_code,
+       unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+       reorder_quantity, max_stock_level, unit_of_measure, description,
+       usage_instructions, side_effects, contraindications, storage_conditions,
+       image_url, is_active, is_deleted, sync_status, sync_version, synced_at,
+       updated_at, created_at`,
+    );
+
+    await recreateTable(
+      "drug_categories", "drug_categories_crr",
+      `CREATE TABLE drug_categories_crr (
+        id              TEXT NOT NULL PRIMARY KEY,
+        organization_id TEXT NOT NULL DEFAULT '',
+        name            TEXT NOT NULL DEFAULT '',
+        description     TEXT,
+        parent_id       TEXT,
+        path            TEXT,
+        level           INTEGER NOT NULL DEFAULT 0,
+        is_deleted      INTEGER NOT NULL DEFAULT 0,
+        sync_status     TEXT NOT NULL DEFAULT 'synced',
+        sync_version    INTEGER NOT NULL DEFAULT 1,
+        synced_at       TEXT,
+        updated_at      TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL DEFAULT ''
+      )`,
+      `id, organization_id, name, description, parent_id, path, level,
+       is_deleted, sync_status, sync_version, synced_at, updated_at, created_at`,
+    );
+
+    await recreateTable(
+      "price_contracts", "price_contracts_crr",
+      `CREATE TABLE price_contracts_crr (
+        id                        TEXT NOT NULL PRIMARY KEY,
+        organization_id           TEXT NOT NULL DEFAULT '',
+        contract_code             TEXT NOT NULL DEFAULT '',
+        contract_name             TEXT NOT NULL DEFAULT '',
+        contract_type             TEXT NOT NULL DEFAULT 'standard',
+        is_default_contract       INTEGER NOT NULL DEFAULT 0,
+        discount_type             TEXT NOT NULL DEFAULT 'percentage',
+        discount_percentage       REAL NOT NULL DEFAULT 0,
+        applies_to_prescription_only INTEGER NOT NULL DEFAULT 0,
+        applies_to_otc            INTEGER NOT NULL DEFAULT 1,
+        applies_to_all_branches   INTEGER NOT NULL DEFAULT 1,
+        applicable_branch_ids     TEXT NOT NULL DEFAULT '[]',
+        effective_from            TEXT NOT NULL DEFAULT '',
+        effective_to              TEXT,
+        requires_verification     INTEGER NOT NULL DEFAULT 0,
+        requires_approval         INTEGER NOT NULL DEFAULT 0,
+        daily_usage_limit         INTEGER,
+        per_customer_usage_limit  INTEGER,
+        insurance_provider_id     TEXT,
+        requires_preauthorization INTEGER NOT NULL DEFAULT 0,
+        minimum_purchase_amount   REAL,
+        maximum_purchase_amount   REAL,
+        status                    TEXT NOT NULL DEFAULT 'active',
+        is_active                 INTEGER NOT NULL DEFAULT 1,
+        copay_amount              REAL,
+        copay_percentage          REAL,
+        is_deleted                INTEGER NOT NULL DEFAULT 0,
+        sync_status               TEXT NOT NULL DEFAULT 'synced',
+        sync_version              INTEGER NOT NULL DEFAULT 1,
+        synced_at                 TEXT,
+        updated_at                TEXT NOT NULL DEFAULT '',
+        created_at                TEXT NOT NULL DEFAULT ''
+      )`,
+      `id, organization_id, contract_code, contract_name, contract_type,
+       is_default_contract, discount_type, discount_percentage,
+       applies_to_prescription_only, applies_to_otc, applies_to_all_branches,
+       applicable_branch_ids, effective_from, effective_to,
+       requires_verification, requires_approval, daily_usage_limit,
+       per_customer_usage_limit, insurance_provider_id,
+       requires_preauthorization, minimum_purchase_amount,
+       maximum_purchase_amount, status, is_active, copay_amount,
+       copay_percentage, is_deleted, sync_status, sync_version, synced_at,
+       updated_at, created_at`,
+    );
+
+    await recreateTable(
+      "audit_logs", "audit_logs_crr",
+      `CREATE TABLE audit_logs_crr (
+        id                TEXT NOT NULL PRIMARY KEY,
+        organization_id   TEXT NOT NULL DEFAULT '',
+        user_id           TEXT,
+        user_full_name    TEXT,
+        action            TEXT NOT NULL DEFAULT '',
+        entity_type       TEXT,
+        entity_id         TEXT,
+        changes           TEXT,
+        ip_address        TEXT,
+        user_agent        TEXT,
+        context_metadata  TEXT,
+        created_at        TEXT NOT NULL DEFAULT '',
+        updated_at        TEXT NOT NULL DEFAULT '',
+        sync_status       TEXT NOT NULL DEFAULT 'synced',
+        sync_version      INTEGER NOT NULL DEFAULT 1,
+        last_synced_at    TEXT,
+        sync_hash         TEXT
+      )`,
+      `id, organization_id, user_id, user_full_name, action, entity_type,
+       entity_id, changes, ip_address, user_agent, context_metadata, created_at,
+       updated_at, sync_status, sync_version, last_synced_at, sync_hash`,
+    );
+
+    for (const table of ["drugs", "drug_categories", "price_contracts", "audit_logs"]) {
+      try {
+        await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
+        await db.execute(
+          "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+          [`crr_enabled_${table}`, "1"]
+        );
+      } catch (e) {
+        console.warn(`[localDb] crsql_as_crr for ${table} not available:`, e);
+        await db.execute(
+          "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+          [`crr_enabled_${table}`, "0"]
+        );
+      }
+    }
+
+    await db.execute("PRAGMA user_version = 17");
+    await db.execute("COMMIT");
+  } catch (error) {
+    try {
+      await db.execute("ROLLBACK");
+    } catch {}
+    throw error;
+  }
+}
+
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
   try {
     await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN event_id TEXT");
@@ -1046,6 +1244,10 @@ async function ensureBranchInventorySchema(db: Database): Promise<void> {
 }
 
 const KNOWN_CRR_TABLES = [
+  "drugs",
+  "drug_categories",
+  "price_contracts",
+  "audit_logs",
   "branch_inventory",
   "drug_batches",
   "customers",

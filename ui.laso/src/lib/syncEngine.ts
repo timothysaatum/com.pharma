@@ -45,10 +45,6 @@ import type {
 import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
 export const LEGACY_SYNC_TABLES = [
-    "drugs",
-    "drug_categories",
-    "price_contracts",
-    "audit_logs",
 ];
 
 export async function getCompatibleLocalColumns(
@@ -66,7 +62,9 @@ export async function getCompatibleLocalColumns(
 
 /** Maximum push attempts before an item is dead-lettered (excluded from sync queue). */
 const MAX_PUSH_ATTEMPTS = 10;
-const CRR_DB_VERSION_KEY = "crr_db_version";
+const LEGACY_CRR_DB_VERSION_KEY = "crr_db_version";
+const CRR_PUSH_DB_VERSION_KEY = "crr_push_db_version";
+const CRR_PULL_DB_VERSION_KEY = "crr_pull_db_version";
 const CUSTOMER_MERGE_VERSION_KEY = "customer_merge_directive_version";
 
 // Re-export SyncStatus so existing callers that import it from this module
@@ -220,7 +218,9 @@ class SyncEngine {
             await this.pushCrr();
             await this.reconcileOfflineSales();
             await this.pullCrr();
-            await this.pull(pushResult.nextPullTimestamp ?? undefined);
+            if (LEGACY_SYNC_TABLES.length > 0) {
+                await this.pull(pushResult.nextPullTimestamp ?? undefined);
+            }
             await this.loadPersistedQueueState();
             this.networkRetryAttempt = 0;
             await this.scheduleNextQueuedRetry();
@@ -463,11 +463,17 @@ class SyncEngine {
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             try {
                 const db = await getDb();
-                const rows = await db.select<{ value: string }[]>(
-                    "SELECT value FROM sync_meta WHERE key = $1",
-                    [CRR_DB_VERSION_KEY]
+                const rows = await db.select<{ key: string; value: string }[]>(
+                    "SELECT key, value FROM sync_meta WHERE key IN ($1, $2)",
+                    [CRR_PUSH_DB_VERSION_KEY, LEGACY_CRR_DB_VERSION_KEY]
                 );
-                const sinceDbVersion = parseInt(rows?.[0]?.value ?? "0", 10);
+                const byKey = new Map(rows.map((row) => [row.key, row.value]));
+                const sinceDbVersion = parseInt(
+                    byKey.get(CRR_PUSH_DB_VERSION_KEY)
+                    ?? byKey.get(LEGACY_CRR_DB_VERSION_KEY)
+                    ?? "0",
+                    10,
+                );
 
                 const changes = await getCrrPushChanges(sinceDbVersion);
                 const auditEvents = await getPendingCrrRenumberAudits();
@@ -505,7 +511,7 @@ class SyncEngine {
                     const maxDbVersion = Math.max(...changes.map((c) => c.db_version), 0);
                     await db.execute(
                         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                        [CRR_DB_VERSION_KEY, String(maxDbVersion)]
+                        [CRR_PUSH_DB_VERSION_KEY, String(maxDbVersion)]
                     );
                 }
 
@@ -517,30 +523,10 @@ class SyncEngine {
                     const delayMs = backoff.getDelay(attempt);
                     await new Promise((r) => setTimeout(r, delayMs));
                 } else {
-                    // Final attempt failed — fall back to sync_queue for each change
-                    try {
-                        const db = await getDb();
-                        const rows = await db.select<{ value: string }[]>(
-                            "SELECT value FROM sync_meta WHERE key = $1",
-                            [CRR_DB_VERSION_KEY]
-                        );
-                        const sinceDbVersion = parseInt(rows?.[0]?.value ?? "0", 10);
-                        const changes = await getCrrPushChanges(sinceDbVersion);
-                        for (const change of changes) {
-                            const pk = Array.isArray(change.pk)
-                                ? String(change.pk[0])
-                                : String(change.pk ?? "");
-                            if (pk) {
-                                await enqueue(change.table, pk, "create", 1, {});
-                            }
-                        }
-                        console.warn(
-                            `[SyncEngine] CRR push failed after ${MAX_RETRIES} attempts; ` +
-                            `re-queued ${changes.length} changes via sync_queue`
-                        );
-                    } catch (fallbackErr) {
-                        this.logError(fallbackErr, "CRR push fallback enqueue");
-                    }
+                    console.warn(
+                        `[SyncEngine] CRR push failed after ${MAX_RETRIES} attempts; ` +
+                        "leaving crsql_changes pending for the next CRR retry"
+                    );
                 }
             }
         }
@@ -570,58 +556,80 @@ class SyncEngine {
         if (!this.branchId) return;
         try {
             const db = await getDb();
-            const rows = await db.select<{ value: string }[]>(
-                "SELECT value FROM sync_meta WHERE key = $1",
-                [CRR_DB_VERSION_KEY]
+            const rows = await db.select<{ key: string; value: string }[]>(
+                "SELECT key, value FROM sync_meta WHERE key IN ($1, $2)",
+                [CRR_PULL_DB_VERSION_KEY, LEGACY_CRR_DB_VERSION_KEY]
             );
-            const sinceDbVersion = parseInt(rows?.[0]?.value ?? "0", 10);
+            const byKey = new Map(rows.map((row) => [row.key, row.value]));
+            let sinceDbVersion = parseInt(
+                byKey.get(CRR_PULL_DB_VERSION_KEY)
+                ?? byKey.get(LEGACY_CRR_DB_VERSION_KEY)
+                ?? "0",
+                10,
+            );
             const mergeRows = await db.select<{ value: string }[]>(
                 "SELECT value FROM sync_meta WHERE key = $1",
                 [CUSTOMER_MERGE_VERSION_KEY]
             );
-            const mergeSinceVersion = parseInt(mergeRows?.[0]?.value ?? "0", 10);
+            let mergeSinceVersion = parseInt(mergeRows?.[0]?.value ?? "0", 10);
             const siteId = await getCrrSiteId();
+            let totalRemoteChanges = 0;
+            let totalMergeDirectives = 0;
+            let hasMore = true;
 
-            const response = await syncApi.crrPull({
-                branch_id: this.branchId,
-                crr_since_db_version: sinceDbVersion,
-                customer_merge_since_version: mergeSinceVersion,
-            } as PullRequest);
+            while (hasMore) {
+                const requestSinceDbVersion = sinceDbVersion;
+                const response = await syncApi.crrPull({
+                    branch_id: this.branchId,
+                    crr_since_db_version: sinceDbVersion,
+                    customer_merge_since_version: mergeSinceVersion,
+                } as PullRequest);
 
-            // Filter out this site's own changes (already merged locally)
-            const remoteChanges = (response.crr_changes ?? []).filter(
-                (c) => c.site_id !== siteId
-            );
-            if (remoteChanges.length > 0) {
-                await applyCrrPullChanges(remoteChanges);
-            }
-            const mergeDirectives = response.customer_merge_directives ?? [];
-            if (mergeDirectives.length > 0) {
-                await applyCustomerMergeDirectives(mergeDirectives);
-            }
-
-            // Update last pulled db_version
-            const newDbVersion = response.crr_max_db_version ?? 0;
-            if (newDbVersion > 0) {
-                await db.execute(
-                    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                    [CRR_DB_VERSION_KEY, String(newDbVersion)]
+                // Filter out this site's own changes (already merged locally)
+                const remoteChanges = (response.crr_changes ?? []).filter(
+                    (c) => c.site_id !== siteId
                 );
-            }
-            const newMergeVersion = response.customer_merge_max_version ?? mergeSinceVersion;
-            if (newMergeVersion > mergeSinceVersion) {
-                await db.execute(
-                    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                    [CUSTOMER_MERGE_VERSION_KEY, String(newMergeVersion)]
-                );
+                if (remoteChanges.length > 0) {
+                    await applyCrrPullChanges(remoteChanges);
+                    totalRemoteChanges += remoteChanges.length;
+                }
+                const mergeDirectives = response.customer_merge_directives ?? [];
+                if (mergeDirectives.length > 0) {
+                    await applyCustomerMergeDirectives(mergeDirectives);
+                    totalMergeDirectives += mergeDirectives.length;
+                }
+
+                // Update last pulled db_version without advancing the local push cursor.
+                const newDbVersion = response.crr_max_db_version ?? 0;
+                if (newDbVersion > sinceDbVersion) {
+                    sinceDbVersion = newDbVersion;
+                    await db.execute(
+                        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+                        [CRR_PULL_DB_VERSION_KEY, String(newDbVersion)]
+                    );
+                }
+                const newMergeVersion = response.customer_merge_max_version ?? mergeSinceVersion;
+                if (newMergeVersion > mergeSinceVersion) {
+                    mergeSinceVersion = newMergeVersion;
+                    await db.execute(
+                        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+                        [CUSTOMER_MERGE_VERSION_KEY, String(newMergeVersion)]
+                    );
+                }
+
+                hasMore = response.has_more && newDbVersion > requestSinceDbVersion;
+                if (response.has_more && !hasMore) {
+                    console.warn(
+                        "[SyncEngine] CRR pull reported has_more without cursor progress; stopping to avoid a tight loop"
+                    );
+                }
             }
 
             console.log(
-                "[SyncEngine] CRR pull: %d changes, %d customer merges applied (db_version %d → %d)",
-                remoteChanges.length,
-                mergeDirectives.length,
+                "[SyncEngine] CRR pull: %d changes, %d customer merges applied (db_version → %d)",
+                totalRemoteChanges,
+                totalMergeDirectives,
                 sinceDbVersion,
-                newDbVersion,
             );
         } catch (err) {
             console.warn("[SyncEngine] CRR pull error:", err);

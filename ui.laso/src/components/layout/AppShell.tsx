@@ -113,7 +113,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             );
 
         void (async () => {
-            const cached = await offlineCache.getBranches();
+            const cached = await offlineCache.getBranches({ allowExpired: true });
             if (!cancelled && cached?.length) {
                 setBranches(
                     canSeeAllBranches
@@ -186,7 +186,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         setOrganizationName(undefined);
 
         void (async () => {
-            const cachedOrg = await offlineCache.getOrganization();
+            const cachedOrg = await offlineCache.getOrganization({ allowExpired: true });
             if (!cancelled && cachedOrg?.id === orgId) {
                 setOrganizationName(cachedOrg.name);
             }

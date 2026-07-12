@@ -113,6 +113,11 @@ const KEYS = {
 } as const;
 
 type CachedUserPage = PaginatedResponse<UserResponse>;
+type CacheEnvelope<T> = {
+    value: T;
+    cached_at: string;
+    expires_at: string;
+};
 
 const CACHE_KEYS = {
     BRANCHES: "cache.branches",
@@ -121,19 +126,58 @@ const CACHE_KEYS = {
     ORGANIZATION_STATS: "cache.organization_stats",
 } as const;
 
+const DEFAULT_REFERENCE_TTL_MS = 6 * 60 * 60 * 1000;
+
+async function cacheSet<T>(
+    key: string,
+    value: T,
+    ttlMs = DEFAULT_REFERENCE_TTL_MS,
+): Promise<void> {
+    const now = Date.now();
+    await storageSet(key, {
+        value,
+        cached_at: new Date(now).toISOString(),
+        expires_at: new Date(now + ttlMs).toISOString(),
+    } satisfies CacheEnvelope<T>);
+}
+
+async function cacheGet<T>(
+    key: string,
+    options: { allowExpired?: boolean } = {},
+): Promise<T | null> {
+    const cached = await storageGet<T | CacheEnvelope<T>>(key);
+    if (!cached) return null;
+    if (
+        typeof cached === "object"
+        && cached !== null
+        && "value" in cached
+        && "expires_at" in cached
+    ) {
+        const envelope = cached as CacheEnvelope<T>;
+        if (options.allowExpired || Date.parse(envelope.expires_at) > Date.now()) {
+            return envelope.value;
+        }
+        return null;
+    }
+    return cached as T;
+}
+
 export const offlineCache = {
-    setBranches: (branches: BranchListItem[]) => storageSet(CACHE_KEYS.BRANCHES, branches),
-    getBranches: () => storageGet<BranchListItem[]>(CACHE_KEYS.BRANCHES),
+    setBranches: (branches: BranchListItem[]) => cacheSet(CACHE_KEYS.BRANCHES, branches),
+    getBranches: (options?: { allowExpired?: boolean }) => cacheGet<BranchListItem[]>(CACHE_KEYS.BRANCHES, options),
     async getBranchName(id: string): Promise<string | null> {
-        const branches = await storageGet<BranchListItem[]>(CACHE_KEYS.BRANCHES);
+        const branches = await cacheGet<BranchListItem[]>(
+            CACHE_KEYS.BRANCHES,
+            { allowExpired: true },
+        );
         return branches?.find((branch) => String(branch.id) === String(id))?.name ?? null;
     },
-    setUsers: (users: CachedUserPage) => storageSet(CACHE_KEYS.USERS, users),
-    getUsers: () => storageGet<CachedUserPage>(CACHE_KEYS.USERS),
-    setOrganization: (org: Organization) => storageSet(CACHE_KEYS.ORGANIZATION, org),
-    getOrganization: () => storageGet<Organization>(CACHE_KEYS.ORGANIZATION),
-    setOrganizationStats: (stats: OrganizationStats) => storageSet(CACHE_KEYS.ORGANIZATION_STATS, stats),
-    getOrganizationStats: () => storageGet<OrganizationStats>(CACHE_KEYS.ORGANIZATION_STATS),
+    setUsers: (users: CachedUserPage) => cacheSet(CACHE_KEYS.USERS, users),
+    getUsers: (options?: { allowExpired?: boolean }) => cacheGet<CachedUserPage>(CACHE_KEYS.USERS, options),
+    setOrganization: (org: Organization) => cacheSet(CACHE_KEYS.ORGANIZATION, org),
+    getOrganization: (options?: { allowExpired?: boolean }) => cacheGet<Organization>(CACHE_KEYS.ORGANIZATION, options),
+    setOrganizationStats: (stats: OrganizationStats) => cacheSet(CACHE_KEYS.ORGANIZATION_STATS, stats),
+    getOrganizationStats: (options?: { allowExpired?: boolean }) => cacheGet<OrganizationStats>(CACHE_KEYS.ORGANIZATION_STATS, options),
 };
 
 export const authStorage = {
