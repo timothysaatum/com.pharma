@@ -22,7 +22,7 @@ import {
 import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
-import { apiClient } from "@/api/client";
+import { apiClient, isBackendReachable } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
@@ -80,6 +80,7 @@ function CustomerSearchWidget({
     const [open, setOpen] = useState(false);
     const [isRegistered, setIsRegistered] = useState(requireRegistered || !!customerId);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const abortRef = useRef<AbortController | null>(null);
     const wrapperRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -97,28 +98,52 @@ function CustomerSearchWidget({
         return () => document.removeEventListener("mousedown", handler);
     }, []);
 
+    // Cancel any in-flight search on unmount
+    useEffect(() => {
+        return () => abortRef.current?.abort();
+    }, []);
+
     const search = (q: string) => {
         if (debounceRef.current) clearTimeout(debounceRef.current);
         if (q.length < 2) { setResults([]); setOpen(false); return; }
+        abortRef.current?.abort();
+        const controller = new AbortController();
+        abortRef.current = controller;
         debounceRef.current = setTimeout(async () => {
             setSearching(true);
             try {
+                if (!navigator.onLine || !isBackendReachable()) {
+                    const matches = await localRead.searchCustomerMatches(q, 10, organizationId);
+                    if (!controller.signal.aborted) {
+                        setResults(matches);
+                        setOpen(true);
+                    }
+                    return;
+                }
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
-                    { params: { q, limit: 10 } }
+                    { params: { q, limit: 10 }, signal: controller.signal }
                 );
-                setResults(data.matches ?? []);
-                setOpen(true);
-            } catch {
-                const matches = await localRead.searchCustomerMatches(
-                    q,
-                    10,
-                    organizationId
-                );
-                setResults(matches);
-                setOpen(true);
+                if (!controller.signal.aborted) {
+                    setResults(data.matches ?? []);
+                    setOpen(true);
+                }
+            } catch (err: unknown) {
+                if (controller.signal.aborted) return;
+                try {
+                    const matches = await localRead.searchCustomerMatches(q, 10, organizationId);
+                    if (!controller.signal.aborted) {
+                        setResults(matches);
+                        setOpen(true);
+                    }
+                } catch {
+                    if (!controller.signal.aborted) {
+                        setResults([]);
+                        setOpen(true);
+                    }
+                }
             } finally {
-                setSearching(false);
+                if (!controller.signal.aborted) setSearching(false);
             }
         }, 300);
     };
