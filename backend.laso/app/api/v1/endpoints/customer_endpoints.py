@@ -221,7 +221,7 @@ async def search_customers_quick(
         le=50,
         description="Maximum results to return (default: 10, max: 50)",
     ),
-    current_user: User = Depends(require_permission("manage_customers")),
+    current_user: User = Depends(require_permission("view_customers")),
     db: AsyncSession = Depends(get_db),
 ):
     """

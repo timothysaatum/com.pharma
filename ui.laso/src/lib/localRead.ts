@@ -494,15 +494,14 @@ export const localRead = {
     const db = await getDb();
     const values: unknown[] = [sqlLike(term), limit];
     const qualifiers = [
-      "is_deleted = 0",
-      "is_active = 1",
+      "COALESCE(is_deleted, 0) = 0",
+      "COALESCE(is_active, 1) = 1",
       `(
-        LOWER(first_name) LIKE $1 OR
-        LOWER(last_name) LIKE $1 OR
+        LOWER(COALESCE(first_name, '')) LIKE $1 OR
+        LOWER(COALESCE(last_name, '')) LIKE $1 OR
         LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE $1 OR
-        LOWER(phone) LIKE $1 OR
-        LOWER(email) LIKE $1 OR
-        LOWER(insurance_member_id) LIKE $1
+        LOWER(COALESCE(phone, '')) LIKE $1 OR
+        LOWER(COALESCE(email, '')) LIKE $1
       )`,
     ];
 
@@ -513,7 +512,7 @@ export const localRead = {
 
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT id, first_name, last_name, phone, email, loyalty_tier,
-              insurance_provider_id, insurance_member_id, preferred_contract_id
+              insurance_provider_id, preferred_contract_id
          FROM customers
         WHERE ${qualifiers.join(" AND ")}
         ORDER BY updated_at DESC

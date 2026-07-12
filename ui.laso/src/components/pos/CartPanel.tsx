@@ -77,6 +77,7 @@ function CustomerSearchWidget({
     const [query, setQuery] = useState("");
     const [results, setResults] = useState<CustomerMatch[]>([]);
     const [searching, setSearching] = useState(false);
+    const [searchError, setSearchError] = useState<string | null>(null);
     const [open, setOpen] = useState(false);
     const [isRegistered, setIsRegistered] = useState(requireRegistered || !!customerId);
     const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -102,36 +103,54 @@ function CustomerSearchWidget({
         if (q.length < 2) { setResults([]); setOpen(false); return; }
         debounceRef.current = setTimeout(async () => {
             setSearching(true);
+            setSearchError(null);
+            let localMatches: CustomerMatch[] = [];
+            let localFailed = false;
             try {
                 // Customers are part of the synced local reference data. Read
                 // SQLite first so POS lookup never depends on network timeout.
-                const localMatches = await localRead.searchCustomerMatches(
+                localMatches = await localRead.searchCustomerMatches(
                     q,
                     10,
                     organizationId
                 );
-                if (localMatches.length > 0 || !navigator.onLine || !isBackendReachable()) {
-                    setResults(localMatches);
-                    setOpen(true);
-                    return;
-                }
+            } catch (error) {
+                localFailed = true;
+                console.error("[POS] Local customer search failed:", error);
+            }
 
+            if (localMatches.length > 0) {
+                setResults(localMatches);
+                setOpen(true);
+                setSearching(false);
+                return;
+            }
+
+            if (!navigator.onLine || !isBackendReachable()) {
+                setResults([]);
+                setOpen(true);
+                if (localFailed) setSearchError("Cached customer search is unavailable on this device.");
+                setSearching(false);
+                return;
+            }
+
+            try {
                 // An online fallback covers a newly-created server customer
                 // that has not reached this device's cache yet.
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
                     { params: { q, limit: 10 } }
                 );
-                setResults(data.matches ?? []);
+                setResults((data.matches ?? []).map((match) => ({
+                    ...match,
+                    full_name: match.full_name || match.phone || match.email || "Customer",
+                })));
                 setOpen(true);
-            } catch {
-                const matches = await localRead.searchCustomerMatches(
-                    q,
-                    10,
-                    organizationId
-                );
-                setResults(matches);
+            } catch (error) {
+                console.error("[POS] Server customer search failed:", error);
+                setResults(localMatches);
                 setOpen(true);
+                setSearchError("Customer search failed. Check your connection and try again.");
             } finally {
                 setSearching(false);
             }
@@ -266,7 +285,7 @@ function CustomerSearchWidget({
 
             {open && query.length >= 2 && results.length === 0 && !searching && (
                 <p className="text-xs text-slate-400 px-1">
-                    {requireRegistered ? "No registered customer found" : "No customers found — sale will be recorded as walk-in"}
+                    {searchError ?? (requireRegistered ? "No registered customer found" : "No customers found — sale will be recorded as walk-in")}
                 </p>
             )}
 
