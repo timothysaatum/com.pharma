@@ -8,10 +8,6 @@ if (import.meta.env.PROD && !configuredBaseUrl.startsWith("https://")) {
 const BASE_URL = configuredBaseUrl.replace(/^http:\/\/127\.0\.0\.1:8000\/?$/, "http://localhost:8000");
 let backendReachable = true;
 let backendOfflineSince: number | null = null;
-// Until at least one API call succeeds, assume the backend is offline.
-// This avoids CORS / connection-refused noise on initial searches
-// before the sync engine has had a chance to confirm reachability.
-let _backendEverConfirmed = false;
 
 export const BACKEND_CONNECTIVITY_EVENT = "backend:connectivity-change";
 
@@ -34,7 +30,6 @@ function emitBackendConnectivityChange(): void {
 }
 
 export function isBackendReachable(): boolean {
-    if (!_backendEverConfirmed) return false;
     if (!backendReachable && navigator.onLine && backendOfflineSince !== null) {
         return Date.now() - backendOfflineSince > 15_000;
     }
@@ -51,7 +46,6 @@ export function markBackendOffline(): void {
 }
 
 export function markBackendOnline(): void {
-    _backendEverConfirmed = true;
     const wasOffline = !backendReachable;
     backendReachable = true;
     backendOfflineSince = null;
