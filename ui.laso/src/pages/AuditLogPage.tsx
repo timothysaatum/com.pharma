@@ -330,7 +330,7 @@ export default function AuditLogPage() {
         setLoading(true);
         setError(null);
         try {
-            if (!isBackendReachable()) {
+            if (!navigator.onLine || !isBackendReachable()) {
                 setIsOffline(true);
                 const db = await getDb();
                 const rawRows = await db.select<Record<string, unknown>[]>(
@@ -361,7 +361,7 @@ export default function AuditLogPage() {
             setTotalPages(result.total_pages);
             setPage(targetPage);
         } catch (err) {
-            if (isOfflineError(err)) {
+            if (isOfflineError(err) || !isBackendReachable()) {
                 setIsOffline(true);
                 try {
                     const db = await getDb();

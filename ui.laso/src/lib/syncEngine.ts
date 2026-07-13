@@ -171,7 +171,7 @@ class SyncEngine {
                 if (!this._isSyncing) {
                     this.sync();
                 }
-            } else if (!navigator.onLine) {
+            } else {
                 this.setStatus("offline");
             }
         }, effectiveIntervalMs);
@@ -989,7 +989,7 @@ class SyncEngine {
             if (!this._isSyncing) {
                 this.sync();
             }
-        } else if (!navigator.onLine) {
+        } else {
             this.setStatus("offline");
         }
     }

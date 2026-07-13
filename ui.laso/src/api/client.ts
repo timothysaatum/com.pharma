@@ -253,6 +253,11 @@ export function isOfflineError(err: unknown): boolean {
             if (err.code === "ERR_CANCELED" || err.code === "ECONNABORTED") return false;
             return true;
         }
+        // Server errors (5xx) are treated as offline — the backend is unavailable
+        // or misbehaving, so fall back to local cache instead of showing an error.
+        if (err.response.status >= 500) {
+            return true;
+        }
         return false;
     }
 

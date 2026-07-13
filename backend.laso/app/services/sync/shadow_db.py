@@ -586,7 +586,16 @@ class ShadowDB:
         if self._ext_path:
             try:
                 conn.enable_load_extension(True)
-                conn.load_extension(self._ext_path)
+                # SQLite automatically appends the platform extension suffix
+                # (.so on Linux, .dylib on macOS, .dll on Windows) to the
+                # extension path, regardless of whether the path already
+                # includes it. Strip it if present to avoid double suffixes.
+                ext_load_path = self._ext_path
+                for suffix in (".so", ".dylib", ".dll"):
+                    if ext_load_path.endswith(suffix):
+                        ext_load_path = ext_load_path[: -len(suffix)]
+                        break
+                conn.load_extension(ext_load_path)
                 extension_loaded = True
                 logger.info("cr-sqlite extension loaded from %s", self._ext_path)
             except Exception as exc:

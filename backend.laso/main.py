@@ -162,11 +162,14 @@ async def lifespan(app: FastAPI):
         async with engine.begin() as conn:
             await conn.execute(text("SELECT 1"))
             logger.info("Database connection established")
-        
-        # Enable required PostgreSQL extensions
-        async with engine.begin() as conn:
-            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
-            logger.info("PostgreSQL extensions verified")
+
+        from app.db.session import is_sqlite
+
+        # Enable required PostgreSQL extensions (skip for SQLite)
+        if not is_sqlite:
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS pg_trgm"))
+                logger.info("PostgreSQL extensions verified")
 
         # Auto-create tables only in development
         from app.db.base import Base
@@ -174,11 +177,12 @@ async def lifespan(app: FastAPI):
             async with engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
 
-                # Create GIN index with trigram operator class (PG 15+ requires explicit ops)
-                await conn.execute(text(
-                    "CREATE INDEX IF NOT EXISTS idx_drug_search "
-                    "ON drugs USING gin (search_vector gin_trgm_ops)"
-                ))
+                # Create GIN index with trigram operator class (skip for SQLite)
+                if not is_sqlite:
+                    await conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS idx_drug_search "
+                        "ON drugs USING gin (search_vector gin_trgm_ops)"
+                    ))
 
                 logger.info("Database tables created/verified (development mode)")
         else:

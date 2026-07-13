@@ -98,8 +98,21 @@ pub fn init_db(
     let mut startup_warning = None;
     if let Some(ext_path) = ext_path {
         // SAFETY: cr-sqlite is a trusted extension shipped with the app
+        // SQLite automatically appends the platform extension suffix
+        // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
+        // whether the path already includes it. Strip it to avoid double
+        // suffixes (e.g. crsqlite.so.so).
+        let ext_load_path = {
+            let p = ext_path.to_string_lossy().to_string();
+            let stripped = p
+                .strip_suffix(".so")
+                .or_else(|| p.strip_suffix(".dylib"))
+                .or_else(|| p.strip_suffix(".dll"))
+                .unwrap_or(&p);
+            std::path::PathBuf::from(stripped)
+        };
         unsafe {
-            if let Err(error) = conn.load_extension(&ext_path, None) {
+            if let Err(error) = conn.load_extension(&ext_load_path, None) {
                 startup_warning = Some(format!(
                     "Cannot load cr-sqlite extension {}: {error}",
                     ext_path.display()
