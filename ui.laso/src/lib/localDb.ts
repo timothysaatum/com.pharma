@@ -992,8 +992,8 @@ export async function migrate_v16(db: Database): Promise<void> {
     }
   }
 
-    await db.execute("PRAGMA user_version = 16");
     await db.execute("COMMIT");
+    await db.execute("PRAGMA user_version = 16");
   } catch (error) {
     try {
       await db.execute("ROLLBACK");
@@ -1191,8 +1191,8 @@ async function migrate_v17(db: Database): Promise<void> {
       }
     }
 
-    await db.execute("PRAGMA user_version = 17");
     await db.execute("COMMIT");
+    await db.execute("PRAGMA user_version = 17");
   } catch (error) {
     try {
       await db.execute("ROLLBACK");
@@ -1202,6 +1202,20 @@ async function migrate_v17(db: Database): Promise<void> {
 }
 
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS crr_renumber_audit (
+      id                INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_id          TEXT NOT NULL UNIQUE,
+      table_name        TEXT NOT NULL,
+      winner_id         TEXT NOT NULL,
+      loser_id          TEXT NOT NULL,
+      business_key_col  TEXT NOT NULL,
+      old_business_key  TEXT NOT NULL,
+      new_business_key  TEXT NOT NULL,
+      renumbered_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      uploaded_at       TEXT
+    )
+  `);
   try {
     await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN event_id TEXT");
   } catch { }

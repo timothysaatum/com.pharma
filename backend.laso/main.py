@@ -284,7 +284,7 @@ app = FastAPI(
 # MIDDLEWARE CONFIGURATION
 # ============================================================================
 
-cors_origins = [
+cors_origins: list[str] = [
     "http://tauri.localhost",
     "tauri://localhost",
     "https://tauri.localhost",
@@ -300,7 +300,28 @@ for origin in settings.CORS_ORIGINS:
     if origin not in cors_origins:
         cors_origins.append(origin)
 
-# Custom middleware added first (will be inner in the stack)
+logger.info("CORS origins: %s", cors_origins)
+
+# CORS must be added *before* the custom middleware so that OPTIONS
+# preflight requests are intercepted by CORSMiddleware at the ASGI
+# level — closure-based @app.middleware("http") wraps via
+# BaseHTTPMiddleware which does not short-circuit preflight correctly
+# when it is the outermost handler.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_origin_regex=(
+        None
+        if settings.is_production
+        else r"^http://(localhost|127\.0\.0\.1):\d+$"
+    ),
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
+)
+
+# Custom middleware — these wrap inside CORS so they don't interfere
+# with preflight handling.
 @app.middleware("http")
 async def add_request_id_middleware(request: Request, call_next):
     import uuid
@@ -333,20 +354,6 @@ async def log_requests_middleware(request: Request, call_next):
 
 if settings.RATE_LIMIT_ENABLED:
     app.add_middleware(RateLimitMiddleware)
-
-# CORS added last so it becomes the outermost middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=cors_origins,
-    allow_origin_regex=(
-        None
-        if settings.is_production
-        else r"^http://(localhost|127\.0\.0\.1):\d+$"
-    ),
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
-)
 
 
 # ============================================================================
