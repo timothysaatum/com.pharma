@@ -167,8 +167,12 @@ class SyncEngine {
         }
 
         this.intervalId = setInterval(() => {
-            if (navigator.onLine && isBackendReachable() && !this._isSyncing) {
-                this.sync();
+            if (navigator.onLine && isBackendReachable()) {
+                if (!this._isSyncing) {
+                    this.sync();
+                }
+            } else if (!navigator.onLine) {
+                this.setStatus("offline");
             }
         }, effectiveIntervalMs);
     }
@@ -981,8 +985,12 @@ class SyncEngine {
         }
 
         await this.loadPersistedQueueState();
-        if (navigator.onLine && isBackendReachable() && !this._isSyncing) {
-            this.sync();
+        if (navigator.onLine && isBackendReachable()) {
+            if (!this._isSyncing) {
+                this.sync();
+            }
+        } else if (!navigator.onLine) {
+            this.setStatus("offline");
         }
     }
 

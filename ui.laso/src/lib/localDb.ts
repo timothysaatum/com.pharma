@@ -105,6 +105,7 @@ async function runMigrations(db: Database): Promise<void> {
       await ensureBranchInventorySchema(db);
       await ensureCrrMeta(db);
       await ensureAuditLogSchema(db);
+      await ensureCrrTablesEnabled(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
   }
@@ -1318,6 +1319,57 @@ export async function ensureAuditLogSchema(db: Database): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+const CRR_TABLES: readonly string[] = [
+  "branch_inventory",
+  "drug_batches",
+  "customers",
+  "prescriptions",
+  "purchase_orders",
+  "sales",
+  "drugs",
+  "drug_categories",
+  "price_contracts",
+  "audit_logs",
+];
+
+/** Repair missing CRR triggers and reset the pull cursor if any table was missing. */
+async function ensureCrrTablesEnabled(db: Database): Promise<void> {
+  let repaired = false;
+  for (const table of CRR_TABLES) {
+    const rows = await db.select<{ value: string }[]>(
+      "SELECT value FROM sync_meta WHERE key = $1",
+      [`crr_enabled_${table}`]
+    );
+    if (rows.length > 0 && rows[0].value === "1") continue;
+
+    const exists = await db.select<{ name: string }[]>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
+      [table]
+    );
+    if (exists.length === 0) continue;
+
+    try {
+      await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        [`crr_enabled_${table}`, "1"]
+      );
+      console.log(`[localDb] CRR enabled for ${table}`);
+      repaired = true;
+    } catch (e) {
+      console.warn(`[localDb] crsql_as_crr for ${table} not available (repair):`, e);
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        [`crr_enabled_${table}`, "0"]
+      );
+    }
+  }
+  if (repaired) {
+    console.log("[localDb] CRR repair applied — resetting pull cursor");
+    await db.execute("DELETE FROM sync_meta WHERE key = 'crr_pull_db_version'");
+  }
+}
 
 function syncMetaKey(table?: string, branchId?: string): string {
   if (branchId) {
