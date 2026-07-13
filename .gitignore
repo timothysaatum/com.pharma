@@ -1,1 +1,5 @@
 .aider*
+
+# SQLite runtime files
+*.db-wal
+*.db-shm
