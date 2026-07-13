@@ -1,6 +1,6 @@
 [package]
 name = "pharmacare"
-version = "1.2.33"
+version = "1.2.34"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
