@@ -85,6 +85,17 @@ type StatusListener = (
     lastSync: string | null
 ) => void;
 
+function promiseWithTimeout<T>(promise: Promise<T>, timeoutMs = 15000): Promise<T> {
+    return Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+            setTimeout(() => {
+                reject(new Error(`Sync timeout after ${timeoutMs}ms`));
+            }, timeoutMs);
+        }),
+    ]);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SYNC ENGINE
 // ─────────────────────────────────────────────────────────────────────────────
@@ -333,10 +344,10 @@ class SyncEngine {
 
             let response: PushResponse;
             try {
-                response = await syncApi.push({
+                response = await promiseWithTimeout(syncApi.push({
                     branch_id: this.branchId!,
                     records,
-                });
+                }), 15000);
                 lastPullTimestamp = response.next_pull_timestamp;
             } catch (err) {
                 console.warn("[SyncEngine] Push network error:", err);
@@ -454,7 +465,7 @@ class SyncEngine {
                     request.last_sync_at = since;
                 }
 
-                response = await syncApi.pull(request as PullRequest);
+                response = await promiseWithTimeout(syncApi.pull(request as PullRequest), 15000);
                 console.log(
                     `[SyncEngine] Pull response: drugs=${response.drugs.length}, ` +
                     `categories=${response.drug_categories.length}, contracts=${response.price_contracts.length}, ` +
@@ -516,11 +527,11 @@ class SyncEngine {
                 for (let batchIndex = 0; batchIndex < iterations; batchIndex++) {
                     const i = batchIndex * batchSize;
                     const batch = changes.slice(i, i + batchSize);
-                    const response = await syncApi.crrPush({
+                    const response = await promiseWithTimeout(syncApi.crrPush({
                         branch_id: this.branchId,
                         changes: batch as any[],
                         audit_events: batchIndex === 0 ? auditEvents : [],
-                    });
+                    }), 15000);
 
                     if (response.accepted_audit_event_ids?.length) {
                         await markCrrRenumberAuditsUploaded(
@@ -619,11 +630,11 @@ class SyncEngine {
 
             while (hasMore) {
                 const requestSinceDbVersion = sinceDbVersion;
-                const response = await syncApi.crrPull({
+                const response = await promiseWithTimeout(syncApi.crrPull({
                     branch_id: this.branchId,
                     crr_since_db_version: sinceDbVersion,
                     customer_merge_since_version: mergeSinceVersion,
-                } as PullRequest);
+                } as PullRequest), 15000);
 
                 // Filter out this site's own changes (already merged locally)
                 const remoteChanges = (response.crr_changes ?? []).filter(
@@ -691,73 +702,89 @@ class SyncEngine {
                 db, table, columns
             );
             
-            for (const row of rows) {
-                const r = row as Record<string, unknown>;
-                const localId = r.id;
-                if (typeof localId === "string") {
-                    const existing = table === "purchase_orders"
-                        ? await db.select<{ sync_status: string; po_number?: string }[]>(
-                            "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
-                            [localId]
-                        )
-                        : await db.select<{ sync_status: string; po_number?: string }[]>(
-                            `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
-                            [localId]
+            await db.execute("BEGIN TRANSACTION");
+            try {
+                for (const row of rows) {
+                    const r = row as Record<string, unknown>;
+                    const localId = r.id;
+                    if (typeof localId === "string") {
+                        const existing = table === "purchase_orders"
+                            ? await db.select<{ sync_status: string; po_number?: string }[]>(
+                                "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
+                                [localId]
+                            )
+                            : await db.select<{ sync_status: string; po_number?: string }[]>(
+                                `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
+                                [localId]
+                            );
+                        const localStatus = existing[0]?.sync_status;
+                        const isProtectedOfflinePurchaseOrder =
+                            table === "purchase_orders"
+                            && (existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false);
+                        if (
+                            (localStatus === "pending" || localStatus === "conflict")
+                            && (table !== "purchase_orders" || isProtectedOfflinePurchaseOrder)
+                        ) {
+                            continue;
+                        }
+                    }
+                    const vals = compatibleColumns.map((c) => {
+                        const v = r[c];
+                        if (typeof v === "boolean") return v ? 1 : 0;
+                        if (Array.isArray(v) || (typeof v === "object" && v !== null)) {
+                            return JSON.stringify(v);
+                        }
+                        if (v === null || v === undefined) {
+                            if (c === "is_deleted") return 0;
+                            if (c === "is_active") return 1;
+                            if (c === "discount_amount") return 0;
+                            if (c === "tax_amount") return 0;
+                            if (c === "subtotal") return 0;
+                            if (c === "total_amount") return 0;
+                            if (c === "insurance_verified") return 0;
+                            if (c === "requires_prescription") return 0;
+                            if (c === "requires_verification") return 0;
+                            if (c === "requires_approval") return 0;
+                            if (c === "requires_preauthorization") return 0;
+                            if (c === "receipt_printed") return 0;
+                            if (c === "receipt_emailed") return 0;
+                            if (c === "status") return "completed";
+                            if (c === "payment_status") return "completed";
+                            if (c === "payment_method") return "cash";
+                            if (c === "sync_version") return 1;
+                            if (c === "sync_status") return "synced";
+                            return null;
+                        }
+                        return v;
+                    });
+                    const placeholders = compatibleColumns.map((_, i) => `$${i + 1}`).join(", ");
+                    const updates = compatibleColumns
+                        .filter((c) => c !== "id")
+                        .map((c) => `${c} = excluded.${c}`)
+                        .join(", ");
+
+                    try {
+                        await db.execute(
+                            `INSERT INTO ${table} (${compatibleColumns.join(", ")}) VALUES (${placeholders})
+                             ON CONFLICT(id) DO UPDATE SET ${updates}`,
+                            vals
                         );
-                    const localStatus = existing[0]?.sync_status;
-                    const isProtectedOfflinePurchaseOrder =
-                        table === "purchase_orders"
-                        && (existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false);
-                    if (
-                        (localStatus === "pending" || localStatus === "conflict")
-                        && (table !== "purchase_orders" || isProtectedOfflinePurchaseOrder)
-                    ) {
-                        continue;
+                    } catch (rowError: any) {
+                        const msg = rowError instanceof Error ? rowError.message : String(rowError);
+                        console.error(
+                            `[SyncEngine] Row insertion failed in transactional upsert. ` +
+                            `Table: ${table}, Primary Key: ${localId}, Operation: UPSERT, Error: ${msg}`
+                        );
+                        throw rowError;
                     }
                 }
-                const vals = compatibleColumns.map((c) => {
-                    const v = r[c];
-                    if (typeof v === "boolean") return v ? 1 : 0;
-                    if (Array.isArray(v) || (typeof v === "object" && v !== null)) {
-                        return JSON.stringify(v);
-                    }
-                    if (v === null || v === undefined) {
-                        if (c === "is_deleted") return 0;
-                        if (c === "is_active") return 1;
-                        if (c === "discount_amount") return 0;
-                        if (c === "tax_amount") return 0;
-                        if (c === "subtotal") return 0;
-                        if (c === "total_amount") return 0;
-                        if (c === "insurance_verified") return 0;
-                        if (c === "requires_prescription") return 0;
-                        if (c === "requires_verification") return 0;
-                        if (c === "requires_approval") return 0;
-                        if (c === "requires_preauthorization") return 0;
-                        if (c === "receipt_printed") return 0;
-                        if (c === "receipt_emailed") return 0;
-                        if (c === "status") return "completed";
-                        if (c === "payment_status") return "completed";
-                        if (c === "payment_method") return "cash";
-                        if (c === "sync_version") return 1;
-                        if (c === "sync_status") return "synced";
-                        return null;
-                    }
-                    return v;
-                });
-                const placeholders = compatibleColumns.map((_, i) => `$${i + 1}`).join(", ");
-                const updates = compatibleColumns
-                    .filter((c) => c !== "id")
-                    .map((c) => `${c} = excluded.${c}`)
-                    .join(", ");
-
-                await db.execute(
-                    `INSERT INTO ${table} (${compatibleColumns.join(", ")}) VALUES (${placeholders})
-                     ON CONFLICT(id) DO UPDATE SET ${updates}`,
-                    vals
-                );
+                await db.execute("COMMIT");
+                console.log(`[SyncEngine] Transaction committed: Upserted ${rows.length} rows into ${table}`);
+            } catch (err) {
+                await db.execute("ROLLBACK");
+                console.error(`[SyncEngine] Transaction rolled back for table ${table}. Error:`, err);
+                throw err;
             }
-            
-            console.log(`[SyncEngine] Upserted ${rows.length} rows into ${table}`);
         };
 
         // ── Org-level (pull-only) ──────────────────────────────────────
