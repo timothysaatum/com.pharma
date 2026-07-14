@@ -2,6 +2,7 @@ import uuid
 import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -227,14 +228,17 @@ def test_shadow_pg_row_drops_crr_only_aggregate_columns():
 
 
 def test_server_resolves_tracked_monorepo_crsqlite_extension(monkeypatch, tmp_path):
-    from app.services.sync.shadow_db import _resolve_extension_path
+    from app.services.sync.shadow_db import _crsqlite_platform_dir, _resolve_extension_path
 
     monkeypatch.delenv("CRSQLITE_EXTENSION_PATH", raising=False)
     monkeypatch.chdir(tmp_path)
 
     resolved = _resolve_extension_path()
+    platform_dir = _crsqlite_platform_dir()
     assert resolved is not None
-    assert resolved.endswith("ui.laso/src-tauri/crsqlite.so")
+    assert platform_dir is not None
+    assert resolved.endswith(f"crsqlite/{platform_dir}/crsqlite.so")
+    assert Path(resolved).exists()
 
 
 @pytest.mark.asyncio

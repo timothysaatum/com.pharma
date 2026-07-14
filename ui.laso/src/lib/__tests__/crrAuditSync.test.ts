@@ -220,4 +220,56 @@ describe("CRR migration audit sync", () => {
       ["crr_push_db_version", "13"],
     );
   });
+
+  it("does not advance the CRR push cursor when any row fails", async () => {
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const getCrrPushChanges = vi.fn().mockResolvedValue([
+      { table: "sales", pk: "sale-1", cid: "sale_number", val: "S-1", col_version: 1, db_version: 13, site_id: "local-site", cl: 1, seq: 1 },
+    ]);
+    const crrPush = vi.fn().mockResolvedValue({
+      results: [{ table: "sales", row_id: "sale-1", success: false, error: "validation failed" }],
+      total_received: 1,
+      total_accepted: 0,
+      total_failed: 1,
+      sync_timestamp: "2026-07-12T00:00:00Z",
+      merged_row_ids: [],
+      accepted_audit_event_ids: [],
+      audit_errors: {},
+    });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPush, crrPull: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({
+        select: async () => [
+          { key: "crr_push_db_version", value: "7" },
+        ],
+        execute,
+      }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      isCrrTable: vi.fn().mockResolvedValue(true), enqueue: noop,
+      SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+    const result = await (syncEngine as any).pushCrr();
+
+    expect(result).toEqual({ hadFailures: true });
+    expect(getCrrPushChanges).toHaveBeenCalledWith(7);
+    expect(execute).not.toHaveBeenCalledWith(
+      expect.any(String),
+      ["crr_push_db_version", "13"],
+    );
+  });
 });

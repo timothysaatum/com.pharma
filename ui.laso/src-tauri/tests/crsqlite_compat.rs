@@ -8,14 +8,70 @@ use std::time::{Duration, Instant};
 static NEXT_DB_ID: AtomicU64 = AtomicU64::new(0);
 
 fn extension_path() -> PathBuf {
-    let library_name = if cfg!(target_os = "windows") {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("crsqlite")
+        .join(platform_dir())
+        .join(library_name())
+}
+
+fn extension_load_path() -> PathBuf {
+    let path = extension_path().to_string_lossy().to_string();
+    let stripped = path
+        .strip_suffix(".so")
+        .or_else(|| path.strip_suffix(".dylib"))
+        .or_else(|| path.strip_suffix(".dll"))
+        .unwrap_or(&path);
+    PathBuf::from(stripped)
+}
+
+fn library_name() -> &'static str {
+    if cfg!(target_os = "windows") {
         "crsqlite.dll"
     } else if cfg!(target_os = "macos") {
         "crsqlite.dylib"
     } else {
         "crsqlite.so"
+    }
+}
+
+fn platform_dir() -> &'static str {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => "linux-x86_64",
+        ("linux", "aarch64") => "linux-aarch64",
+        ("windows", "x86_64") => "windows-x86_64",
+        ("macos", "aarch64") => "darwin-aarch64",
+        ("macos", "x86_64") => "darwin-x86_64",
+        (os, arch) => panic!("unsupported CR-SQLite test target: {os}/{arch}"),
+    }
+}
+
+fn extension_matches_current_arch() -> bool {
+    let Ok(bytes) = std::fs::read(extension_path()) else {
+        return false;
     };
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(library_name)
+    if bytes.len() < 20 || &bytes[0..4] != b"\x7fELF" {
+        return true;
+    }
+    let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+    match std::env::consts::ARCH {
+        "x86_64" => machine == 62,
+        "aarch64" => machine == 183,
+        _ => true,
+    }
+}
+
+fn skip_if_extension_incompatible() -> bool {
+    if extension_matches_current_arch() {
+        return false;
+    }
+    eprintln!(
+        "skipping CR-SQLite compatibility test: {} is not compatible with {}",
+        extension_path().display(),
+        std::env::consts::ARCH,
+    );
+    true
 }
 
 fn temp_db_path(label: &str) -> PathBuf {
@@ -35,7 +91,7 @@ fn open_db(path: &Path, load_crsqlite: bool) -> Connection {
         .expect("pragmas");
     if load_crsqlite {
         unsafe {
-            conn.load_extension(extension_path(), None)
+            conn.load_extension(extension_load_path(), None)
                 .expect("load cr-sqlite");
         }
     }
@@ -51,7 +107,7 @@ fn connect_existing(path: &Path, load_crsqlite: bool) -> Connection {
         .expect("pragmas");
     if load_crsqlite {
         unsafe {
-            conn.load_extension(extension_path(), None)
+            conn.load_extension(extension_load_path(), None)
                 .expect("load cr-sqlite");
         }
     }
@@ -98,6 +154,10 @@ fn measure_latency(label: &str, iterations: usize, mut f: impl FnMut()) {
 
 #[test]
 fn step3_latency_measurement() {
+    if skip_if_extension_incompatible() {
+        return;
+    }
+
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("STEP 3: Latency Measurement");
     println!("═══════════════════════════════════════════════════════════════\n");
@@ -164,6 +224,10 @@ fn step3_latency_measurement() {
 
 #[test]
 fn step4_wal_savepoint_crsqlite() {
+    if skip_if_extension_incompatible() {
+        return;
+    }
+
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("STEP 4: WAL + Savepoint + cr-sqlite Compatibility");
     println!("═══════════════════════════════════════════════════════════════\n");
@@ -320,6 +384,10 @@ fn step4_wal_savepoint_crsqlite() {
 
 #[test]
 fn step5_concurrency() {
+    if skip_if_extension_incompatible() {
+        return;
+    }
+
     println!("\n═══════════════════════════════════════════════════════════════");
     println!("STEP 5: Concurrency Check (WAL mode readers + writer)");
     println!("═══════════════════════════════════════════════════════════════\n");
@@ -443,6 +511,10 @@ fn step5_concurrency() {
 
 #[test]
 fn full_integration() {
+    if skip_if_extension_incompatible() {
+        return;
+    }
+
     step3_latency_measurement();
     step4_wal_savepoint_crsqlite();
     step5_concurrency();

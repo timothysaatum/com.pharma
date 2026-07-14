@@ -65,6 +65,7 @@ export async function getDb(): Promise<Database> {
     await (_db as any).load("");
   } catch (err) {
     console.error("[localDb] Migration error:", err);
+    throw err;
   }
 
   return _db;
@@ -1271,8 +1272,14 @@ const KNOWN_CRR_TABLES = [
   "sales",
 ];
 
-async function ensureCrrMeta(db: Database): Promise<void> {
+export async function ensureCrrMeta(db: Database): Promise<void> {
   for (const table of KNOWN_CRR_TABLES) {
+    const exists = await db.select<{ name: string }[]>(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
+      [table]
+    );
+    if (exists.length === 0) continue;
+
     const rows = await db.select<{ key: string }[]>(
       "SELECT key FROM sync_meta WHERE key = $1",
       [`crr_enabled_${table}`]
@@ -1280,7 +1287,7 @@ async function ensureCrrMeta(db: Database): Promise<void> {
     if (rows.length === 0) {
       await db.execute(
         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        [`crr_enabled_${table}`, "1"]
+        [`crr_enabled_${table}`, "0"]
       );
     }
   }
@@ -1333,15 +1340,50 @@ const CRR_TABLES: readonly string[] = [
   "audit_logs",
 ];
 
+async function hasCrrChangeTracking(db: Database, table: string): Promise<boolean> {
+  let savepointStarted = false;
+  try {
+    await db.execute("SAVEPOINT crr_tracking_probe");
+    savepointStarted = true;
+
+    const before = await db.select<{ count: number }[]>(
+      `SELECT COUNT(*) as count FROM crsql_changes WHERE "table" = $1`,
+      [table]
+    );
+    await db.execute(
+      `INSERT INTO ${table} (id) VALUES ($1)`,
+      [`__crr_probe_${crypto.randomUUID()}`]
+    );
+    const after = await db.select<{ count: number }[]>(
+      `SELECT COUNT(*) as count FROM crsql_changes WHERE "table" = $1`,
+      [table]
+    );
+
+    await db.execute("ROLLBACK TO crr_tracking_probe");
+    await db.execute("RELEASE crr_tracking_probe");
+    return (after[0]?.count ?? 0) > (before[0]?.count ?? 0);
+  } catch {
+    if (savepointStarted) {
+      try { await db.execute("ROLLBACK TO crr_tracking_probe"); } catch { }
+      try { await db.execute("RELEASE crr_tracking_probe"); } catch { }
+    }
+    return false;
+  }
+}
+
 /** Repair missing CRR triggers and reset the pull cursor if any table was missing. */
-async function ensureCrrTablesEnabled(db: Database): Promise<void> {
+export async function ensureCrrTablesEnabled(
+  db: Database,
+  options: { strict?: boolean } = { strict: IS_TAURI },
+): Promise<void> {
   let repaired = false;
+  const failures: string[] = [];
+
   for (const table of CRR_TABLES) {
     const rows = await db.select<{ value: string }[]>(
       "SELECT value FROM sync_meta WHERE key = $1",
       [`crr_enabled_${table}`]
     );
-    if (rows.length > 0 && rows[0].value === "1") continue;
 
     const exists = await db.select<{ name: string }[]>(
       "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
@@ -1349,8 +1391,22 @@ async function ensureCrrTablesEnabled(db: Database): Promise<void> {
     );
     if (exists.length === 0) continue;
 
+    if (await hasCrrChangeTracking(db, table)) {
+      if (rows[0]?.value !== "1") {
+        await db.execute(
+          "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+          [`crr_enabled_${table}`, "1"]
+        );
+        repaired = true;
+      }
+      continue;
+    }
+
     try {
       await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
+      if (!(await hasCrrChangeTracking(db, table))) {
+        throw new Error("crsql_as_crr completed but no crsql_changes were produced");
+      }
       await db.execute(
         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
         [`crr_enabled_${table}`, "1"]
@@ -1358,16 +1414,27 @@ async function ensureCrrTablesEnabled(db: Database): Promise<void> {
       console.log(`[localDb] CRR enabled for ${table}`);
       repaired = true;
     } catch (e) {
-      console.warn(`[localDb] crsql_as_crr for ${table} not available (repair):`, e);
+      const message = e instanceof Error ? e.message : String(e);
+      failures.push(`${table}: ${message}`);
+      console.error(`[localDb] CRR required for ${table} but unavailable:`, e);
       await db.execute(
         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
         [`crr_enabled_${table}`, "0"]
       );
     }
   }
+
   if (repaired) {
     console.log("[localDb] CRR repair applied — resetting pull cursor");
     await db.execute("DELETE FROM sync_meta WHERE key = 'crr_pull_db_version'");
+  }
+  resetCrrCache();
+
+  if (failures.length > 0 && options.strict !== false) {
+    throw new Error(
+      "CR-SQLite change tracking is required for offline sync but could not be enabled: "
+      + failures.join("; ")
+    );
   }
 }
 

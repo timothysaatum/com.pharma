@@ -7,7 +7,6 @@ All rows use random IDs/business keys and are removed in ``finally``.
 
 import asyncio
 import json
-import os
 import uuid
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -16,7 +15,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from app.db.session import AsyncSessionLocal
-from app.services.sync.shadow_db import ShadowDB
+from app.services.sync.shadow_db import ShadowDB, _resolve_extension_path
 
 
 TABLES = {
@@ -59,9 +58,8 @@ async def _shadow_row(shadow, db, table, row_id, key_updates, field_updates=None
 
 async def main():
     suffix = uuid.uuid4().hex[:10]
-    extension = os.environ.get("CRSQLITE_EXTENSION_PATH") or str(
-        Path(__file__).parents[2] / "ui.laso" / "src-tauri" / "crsqlite.so"
-    )
+    extension = _resolve_extension_path()
+    assert extension is not None
     shadow = ShadowDB()
     await shadow.initialize(f"/tmp/e2e-production-dispatch-{suffix}.db", extension)
     assert shadow.crr_available

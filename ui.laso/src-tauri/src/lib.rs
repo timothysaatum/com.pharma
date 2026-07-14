@@ -1,7 +1,7 @@
 mod db;
 
-use tauri::Manager;
 use std::io::Write;
+use tauri::Manager;
 
 const KEYRING_SERVICE: &str = "com.vermithor.pharmacare";
 
@@ -64,7 +64,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
 
             // Initialize the local SQLite database with rusqlite + cr-sqlite
             let db_dir = app.path().app_data_dir().ok();

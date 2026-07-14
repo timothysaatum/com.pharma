@@ -241,7 +241,7 @@ class SyncEngine {
 
         try {
             const pushResult = await this.push();
-            await this.pushCrr();
+            const crrPushResult = await this.pushCrr();
             await this.reconcileOfflineSales();
             await this.pullCrr();
             if (LEGACY_SYNC_TABLES.length > 0) {
@@ -254,7 +254,9 @@ class SyncEngine {
             const pending = await getPendingCount(this.queueScope());
             this.notify(pending);
             this.setStatus(
-                pushResult.hadFailures || this.pendingFailures.length > 0
+                pushResult.hadFailures
+                    || crrPushResult?.hadFailures
+                    || this.pendingFailures.length > 0
                     ? "error"
                     : "idle"
             );
@@ -483,8 +485,8 @@ class SyncEngine {
 
     // ── PUSH CRR (cr-sqlite changes) ────────────────────────────────
 
-    private async pushCrr(): Promise<void> {
-        if (!this.branchId) return;
+    private async pushCrr(): Promise<{ hadFailures: boolean }> {
+        if (!this.branchId) return { hadFailures: false };
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             try {
@@ -503,11 +505,14 @@ class SyncEngine {
 
                 const changes = await getCrrPushChanges(sinceDbVersion);
                 const auditEvents = await getPendingCrrRenumberAudits();
-                if (changes.length === 0 && auditEvents.length === 0) return;
+                if (changes.length === 0 && auditEvents.length === 0) {
+                    return { hadFailures: false };
+                }
 
                 // Group by table and push in batches
                 const batchSize = 500;
                 const iterations = Math.max(1, Math.ceil(changes.length / batchSize));
+                let hadFailures = false;
                 for (let batchIndex = 0; batchIndex < iterations; batchIndex++) {
                     const i = batchIndex * batchSize;
                     const batch = changes.slice(i, i + batchSize);
@@ -524,6 +529,7 @@ class SyncEngine {
                     }
 
                     if (response.total_failed > 0) {
+                        hadFailures = true;
                         console.warn(
                             "[SyncEngine] CRR push: %d accepted, %d failed",
                             response.total_accepted,
@@ -532,16 +538,23 @@ class SyncEngine {
                     }
                 }
 
-                // Update last pushed db_version
-                if (changes.length > 0) {
+                // Only advance the global CRR cursor after a fully successful
+                // batch. Advancing past a failed row would make that local
+                // mutation unreachable on later retries.
+                if (changes.length > 0 && !hadFailures) {
                     const maxDbVersion = Math.max(...changes.map((c) => c.db_version), 0);
                     await db.execute(
                         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
                         [CRR_PUSH_DB_VERSION_KEY, String(maxDbVersion)]
                     );
+                } else if (hadFailures) {
+                    console.warn(
+                        "[SyncEngine] CRR push had failed rows; retaining push cursor at %d",
+                        sinceDbVersion,
+                    );
                 }
 
-                return;
+                return { hadFailures };
             } catch (err) {
                 this.logError(err, `CRR push attempt ${attempt + 1}/${MAX_RETRIES}`);
                 if (attempt < MAX_RETRIES - 1) {
@@ -556,6 +569,7 @@ class SyncEngine {
                 }
             }
         }
+        return { hadFailures: true };
     }
 
     // ── Reconcile offline sales that were never synced ──────────────

@@ -12,12 +12,11 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 from sqlalchemy import bindparam, text
 
 from app.db.session import AsyncSessionLocal
-from app.services.sync.shadow_db import ShadowDB
+from app.services.sync.shadow_db import ShadowDB, _resolve_extension_path
 
 
 TEST_PREFIX = "e2e-crr-customer-"
@@ -69,9 +68,8 @@ async def main() -> None:
     phone = f"+233{suffix[:9]}"
     now = datetime.now(timezone.utc)
     shadow_path = f"/tmp/{TEST_PREFIX}{suffix}.db"
-    extension = str(
-        Path(__file__).parents[2] / "ui.laso" / "src-tauri" / "crsqlite.so"
-    )
+    extension = _resolve_extension_path()
+    assert extension is not None
     shadow = ShadowDB()
     await shadow.initialize(shadow_path, extension)
 

@@ -9,7 +9,7 @@ Environment: PostgreSQL 14.23 on ARM64, native cr-sqlite extension, current
 Command:
 
 ```bash
-PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../ui.laso/src-tauri/crsqlite.so \
+PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../crsqlite/linux-aarch64/crsqlite.so \
   python3.12 tests/e2e_crr_production_dispatch.py
 ```
 

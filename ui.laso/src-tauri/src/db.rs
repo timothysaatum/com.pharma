@@ -1,14 +1,14 @@
-use rusqlite::{Connection, params_from_iter};
+use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::State;
-use std::path::PathBuf;
 
 pub struct DbState {
     pub conn: Mutex<Connection>,
-    /// Diagnostic captured during startup.  The UI can continue in degraded
-    /// (non-CRR) mode instead of the desktop process disappearing.
+    /// Reserved for startup diagnostics. CR-SQLite is required for offline
+    /// sync, so initialization now returns an error instead of degrading.
     pub startup_warning: Option<String>,
 }
 
@@ -25,8 +25,43 @@ pub struct DbError {
 
 impl From<rusqlite::Error> for DbError {
     fn from(e: rusqlite::Error) -> Self {
-        DbError { message: e.to_string() }
+        DbError {
+            message: e.to_string(),
+        }
     }
+}
+
+fn crsqlite_library_name() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "crsqlite.dll"
+    } else if cfg!(target_os = "macos") {
+        "crsqlite.dylib"
+    } else {
+        "crsqlite.so"
+    }
+}
+
+fn crsqlite_platform_dir() -> Result<&'static str, String> {
+    match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => Ok("linux-x86_64"),
+        ("linux", "aarch64") => Ok("linux-aarch64"),
+        ("windows", "x86_64") => Ok("windows-x86_64"),
+        ("macos", "aarch64") => Ok("darwin-aarch64"),
+        ("macos", "x86_64") => Ok("darwin-x86_64"),
+        (os, arch) => Err(format!(
+            "cr-sqlite extension is not packaged for {os}/{arch}"
+        )),
+    }
+}
+
+fn extension_load_path(ext_path: &std::path::Path) -> PathBuf {
+    let p = ext_path.to_string_lossy().to_string();
+    let stripped = p
+        .strip_suffix(".so")
+        .or_else(|| p.strip_suffix(".dylib"))
+        .or_else(|| p.strip_suffix(".dll"))
+        .unwrap_or(&p);
+    PathBuf::from(stripped)
 }
 
 /// Resolve the cr-sqlite shared-library path at runtime.
@@ -34,8 +69,8 @@ impl From<rusqlite::Error> for DbError {
 /// Resolution order (first match wins):
 ///   1. `CRSQLITE_EXTENSION_PATH` environment variable
 ///   2. Tauri resource directory — for production bundling
-///   3. Parent directory — works with `tauri dev`
-///   4. Current directory — general fallback
+///   3. Repository-relative layouts — works with `cargo test` and `tauri dev`
+///   4. Current/parent directory fallbacks using the explicit architecture dir
 pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, String> {
     // 1. Environment variable (highest priority)
     if let Ok(val) = std::env::var("CRSQLITE_EXTENSION_PATH") {
@@ -45,27 +80,37 @@ pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, 
         }
     }
 
-    let library_name = if cfg!(target_os = "windows") {
-        "crsqlite.dll"
-    } else if cfg!(target_os = "macos") {
-        "crsqlite.dylib"
-    } else {
-        "crsqlite.so"
-    };
+    let library_name = crsqlite_library_name();
+    let platform_dir = crsqlite_platform_dir()?;
 
     // Build candidate list
     let mut candidates: Vec<PathBuf> = Vec::new();
 
     // 2. Tauri resource directory (used in production bundles)
     if let Some(dir) = &resource_dir {
-        candidates.push(dir.join(library_name));
+        candidates.push(dir.join("crsqlite").join(platform_dir).join(library_name));
+        candidates.push(dir.join(platform_dir).join(library_name));
     }
 
-    // 3. Relative from src-tauri (works with `tauri dev`)
-    candidates.push(PathBuf::from("..").join(library_name));
-
-    // 4. Current working directory fallback
-    candidates.push(PathBuf::from(library_name));
+    // 3. Working-directory fallbacks for repo root, ui.laso, and src-tauri.
+    candidates.push(
+        PathBuf::from("crsqlite")
+            .join(platform_dir)
+            .join(library_name),
+    );
+    candidates.push(
+        PathBuf::from("..")
+            .join("crsqlite")
+            .join(platform_dir)
+            .join(library_name),
+    );
+    candidates.push(
+        PathBuf::from("..")
+            .join("..")
+            .join("crsqlite")
+            .join(platform_dir)
+            .join(library_name),
+    );
 
     for p in &candidates {
         if p.exists() {
@@ -78,96 +123,84 @@ pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, 
     ))
 }
 
-pub fn init_db(
-    db_dir: Option<PathBuf>,
-    ext_path: Option<PathBuf>,
-) -> Result<DbState, String> {
+pub fn init_db(db_dir: Option<PathBuf>, ext_path: Option<PathBuf>) -> Result<DbState, String> {
     // Resolve DB path: use app's data dir or fallback to CWD
     let db_dir = db_dir.unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&db_dir).map_err(|e| format!("Cannot create DB dir: {e}"))?;
 
     let db_path = db_dir.join("laso.db");
-    let conn = Connection::open(&db_path)
-        .map_err(|e| format!("Cannot open SQLite DB: {e}"))?;
+    let conn = Connection::open(&db_path).map_err(|e| format!("Cannot open SQLite DB: {e}"))?;
 
     // Enable WAL mode
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("Cannot set pragmas: {e}"))?;
 
-    // Load cr-sqlite extension (if a path was resolved)
-    let mut startup_warning = None;
-    if let Some(ext_path) = ext_path {
-        // SAFETY: cr-sqlite is a trusted extension shipped with the app
-        // SQLite automatically appends the platform extension suffix
-        // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
-        // whether the path already includes it. Strip it to avoid double
-        // suffixes (e.g. crsqlite.so.so).
-        let ext_load_path = {
-            let p = ext_path.to_string_lossy().to_string();
-            let stripped = p
-                .strip_suffix(".so")
-                .or_else(|| p.strip_suffix(".dylib"))
-                .or_else(|| p.strip_suffix(".dll"))
-                .unwrap_or(&p);
-            std::path::PathBuf::from(stripped)
-        };
-        unsafe {
-            if let Err(error) = conn.load_extension(&ext_load_path, None) {
-                startup_warning = Some(format!(
-                    "Cannot load cr-sqlite extension {}: {error}",
-                    ext_path.display()
-                ));
-            }
-        }
-        if startup_warning.is_none() {
-            match conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0)) {
-                Ok(site_id) => {
-                    let site_id_hex: String = site_id.iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect();
-                    println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
-                }
-                Err(error) => startup_warning = Some(format!(
-                    "cr-sqlite loaded but crsql_site_id() failed: {error}"
-                )),
-            }
-        }
-    } else {
-        println!("[db] cr-sqlite extension not found, running without CRDT support");
+    let ext_path = ext_path.ok_or_else(|| {
+        "CR-SQLite extension is required for offline synchronization but was not found".to_string()
+    })?;
+
+    // SAFETY: cr-sqlite is a trusted extension shipped with the app.
+    // SQLite automatically appends the platform extension suffix
+    // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
+    // whether the path already includes it. Strip it to avoid double
+    // suffixes (e.g. crsqlite.so.so).
+    let ext_load_path = extension_load_path(&ext_path);
+    unsafe {
+        conn.load_extension(&ext_load_path, None).map_err(|error| {
+            format!(
+                "Cannot load cr-sqlite extension {}: {error}",
+                ext_path.display()
+            )
+        })?;
     }
+
+    let site_id = conn
+        .query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0))
+        .map_err(|error| format!("cr-sqlite loaded but crsql_site_id() failed: {error}"))?;
+    let site_id_hex: String = site_id.iter().map(|byte| format!("{byte:02x}")).collect();
+    println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
 
     Ok(DbState {
         conn: Mutex::new(conn),
-        startup_warning,
+        startup_warning: None,
     })
 }
 
 #[cfg(test)]
 mod startup_tests {
-    use super::init_db;
-    use std::path::PathBuf;
+    use super::{crsqlite_platform_dir, init_db, resolve_extension_path};
+    use std::path::Path;
 
     #[test]
     fn real_crsqlite_extension_loads_without_degraded_warning() {
-        let library_name = if cfg!(target_os = "windows") {
-            "crsqlite.dll"
-        } else if cfg!(target_os = "macos") {
-            "crsqlite.dylib"
-        } else {
-            "crsqlite.so"
-        };
-        let extension = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(library_name);
+        let expected_platform_dir = crsqlite_platform_dir().expect("supported test architecture");
+        let extension =
+            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
         assert!(extension.exists(), "test requires {}", extension.display());
-        let temp = std::env::temp_dir().join(format!(
-            "pharmacare-valid-extension-{}", std::process::id()
-        ));
+        assert!(
+            extension.to_string_lossy().contains(expected_platform_dir),
+            "{} should use {expected_platform_dir}",
+            extension.display(),
+        );
+        assert!(
+            extension_matches_current_arch(&extension),
+            "{} must match the current target architecture",
+            extension.display(),
+        );
+
+        let temp =
+            std::env::temp_dir().join(format!("pharmacare-valid-extension-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
 
         let state = init_db(Some(temp.clone()), Some(extension))
             .expect("real cr-sqlite extension should initialize");
         assert_eq!(state.startup_warning, None);
-        let site_id: Vec<u8> = state.conn.lock().unwrap()
-            .query_row("SELECT crsql_site_id()", [], |row| row.get(0)).unwrap();
+        let site_id: Vec<u8> = state
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT crsql_site_id()", [], |row| row.get(0))
+            .unwrap();
         assert!(!site_id.is_empty());
 
         drop(state);
@@ -175,25 +208,53 @@ mod startup_tests {
     }
 
     #[test]
-    fn invalid_extension_degrades_without_crashing_desktop_startup() {
+    fn invalid_extension_fails_desktop_startup() {
         let temp = std::env::temp_dir().join(format!(
-            "pharmacare-invalid-extension-{}", std::process::id()
+            "pharmacare-invalid-extension-{}",
+            std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&temp);
         std::fs::create_dir_all(&temp).unwrap();
         let invalid = temp.join("crsqlite.invalid");
         std::fs::write(&invalid, b"not a shared library").unwrap();
 
-        let state = init_db(Some(temp.clone()), Some(invalid))
-            .expect("SQLite itself should remain available");
-        assert!(state.startup_warning.as_deref().unwrap_or_default()
-            .contains("Cannot load cr-sqlite extension"));
-        let value: i64 = state.conn.lock().unwrap()
-            .query_row("SELECT 1", [], |row| row.get(0)).unwrap();
-        assert_eq!(value, 1);
+        let err = init_db(Some(temp.clone()), Some(invalid))
+            .err()
+            .expect("invalid cr-sqlite extension must fail startup");
+        assert!(err.contains("Cannot load cr-sqlite extension"));
 
-        drop(state);
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn missing_extension_fails_desktop_startup() {
+        let temp = std::env::temp_dir().join(format!(
+            "pharmacare-missing-extension-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+
+        let err = init_db(Some(temp.clone()), None)
+            .err()
+            .expect("missing cr-sqlite extension must fail startup");
+        assert!(err.contains("CR-SQLite extension is required"));
+
+        let _ = std::fs::remove_dir_all(temp);
+    }
+
+    fn extension_matches_current_arch(path: &Path) -> bool {
+        let Ok(bytes) = std::fs::read(path) else {
+            return false;
+        };
+        if bytes.len() < 20 || &bytes[0..4] != b"\x7fELF" {
+            return true;
+        }
+        let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
+        match std::env::consts::ARCH {
+            "x86_64" => machine == 62,
+            "aarch64" => machine == 183,
+            _ => true,
+        }
     }
 }
 
@@ -209,10 +270,7 @@ pub fn db_execute(
         message: format!("Lock error: {e}"),
     })?;
 
-    let params: Vec<rusqlite::types::Value> = values
-        .into_iter()
-        .map(json_to_rusqlite)
-        .collect();
+    let params: Vec<rusqlite::types::Value> = values.into_iter().map(json_to_rusqlite).collect();
 
     let mut stmt = conn.prepare(&sql)?;
     let rows_affected = stmt.execute(params_from_iter(params.iter()))?;
@@ -241,10 +299,7 @@ pub fn db_select(
         message: format!("Lock error: {e}"),
     })?;
 
-    let params: Vec<rusqlite::types::Value> = values
-        .into_iter()
-        .map(json_to_rusqlite)
-        .collect();
+    let params: Vec<rusqlite::types::Value> = values.into_iter().map(json_to_rusqlite).collect();
 
     let mut stmt = conn.prepare(&sql)?;
     let col_count = stmt.column_count();
@@ -280,10 +335,9 @@ pub fn db_execute_batch(db: State<DbState>, sql: String) -> Result<(), DbError> 
     let conn = db.conn.lock().map_err(|e| DbError {
         message: format!("Lock error: {e}"),
     })?;
-    conn.execute_batch(&sql)
-        .map_err(|e| DbError {
-            message: format!("Batch execute error: {e}"),
-        })
+    conn.execute_batch(&sql).map_err(|e| DbError {
+        message: format!("Batch execute error: {e}"),
+    })
 }
 
 /// Run a savepoint-wrapped operation for testing cr-sqlite compatibility.
@@ -312,13 +366,19 @@ pub fn db_test_savepoint(
 
     Ok(ExecResult {
         rows_affected,
-        last_insert_id: if last_insert_id == 0 { None } else { Some(last_insert_id) },
+        last_insert_id: if last_insert_id == 0 {
+            None
+        } else {
+            Some(last_insert_id)
+        },
     })
 }
 
 /// Check crsql_changes table for entries (for testing)
 #[tauri::command]
-pub fn db_get_crsql_changes(db: State<DbState>) -> Result<Vec<serde_json::Map<String, JsonValue>>, DbError> {
+pub fn db_get_crsql_changes(
+    db: State<DbState>,
+) -> Result<Vec<serde_json::Map<String, JsonValue>>, DbError> {
     let conn = db.conn.lock().map_err(|e| DbError {
         message: format!("Lock error: {e}"),
     })?;
@@ -337,10 +397,14 @@ pub fn db_get_crsql_changes(db: State<DbState>) -> Result<Vec<serde_json::Map<St
             }
             Ok(obj)
         })
-        .map_err(|e| DbError { message: format!("Query error: {e}") })?;
+        .map_err(|e| DbError {
+            message: format!("Query error: {e}"),
+        })?;
     let mut result = Vec::new();
     for row in rows {
-        result.push(row.map_err(|e| DbError { message: format!("Row error: {e}") })?);
+        result.push(row.map_err(|e| DbError {
+            message: format!("Row error: {e}"),
+        })?);
     }
     Ok(result)
 }
@@ -392,9 +456,7 @@ fn row_to_json(row: &rusqlite::Row, i: usize) -> JsonValue {
             let s = std::str::from_utf8(s).unwrap_or("");
             JsonValue::String(s.to_string())
         }
-        Ok(rusqlite::types::ValueRef::Blob(b)) => {
-            JsonValue::String(base64_encode(b))
-        }
+        Ok(rusqlite::types::ValueRef::Blob(b)) => JsonValue::String(base64_encode(b)),
         Err(_) => JsonValue::Null,
     }
 }

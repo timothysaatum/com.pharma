@@ -36,6 +36,10 @@ import { statsApi } from "@/api/stats";
 import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { toast } from "sonner";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
+import {
+    shouldFallbackToOfflineSaleAfterError,
+    shouldUseOfflineSalePath,
+} from "@/lib/offlineFallback";
 import { appEvents, useAppEvent } from "@/lib/events";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
@@ -347,7 +351,11 @@ export default function POSPage() {
         try {
             let result: ProcessSaleResponse;
 
-            if (!navigator.onLine) {
+            if (shouldUseOfflineSalePath({
+                browserOnline: navigator.onLine,
+                appOffline: isOffline,
+                backendReachable: backendWasReachable,
+            })) {
                 // ── Offline path ─────────────────────────────────────────────
                 if (requiresOnlineContractVerification) {
                     throw new Error("This contract requires online verification before checkout.");
@@ -379,9 +387,13 @@ export default function POSPage() {
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
         } catch (err) {
-            const shouldRecordOffline =
-                isOfflineError(err) &&
-                (!navigator.onLine || isOffline || !backendWasReachable);
+            const shouldRecordOffline = shouldFallbackToOfflineSaleAfterError({
+                offlineError: isOfflineError(err),
+                browserOnline: navigator.onLine,
+                appOffline: isOffline,
+                backendReachable: isBackendReachable(),
+                backendReachableBeforeAttempt: backendWasReachable,
+            });
 
             if (shouldRecordOffline) {
                 if (requiresOnlineContractVerification) {

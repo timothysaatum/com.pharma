@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import platform
 import sys
 import uuid
 from datetime import date, datetime
@@ -54,10 +55,31 @@ PG_COLUMNS = [
 ]
 
 
+def _crsqlite_platform_dir() -> Optional[str]:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "linux-x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "linux-aarch64"
+    return None
+
+
 def _find_extension() -> Optional[str]:
     if val := os.environ.get("CRSQLITE_EXTENSION_PATH"):
         if os.path.exists(val):
             return val
+    platform_dir = _crsqlite_platform_dir()
+    if not platform_dir:
+        return None
+    repo_root = Path(__file__).resolve().parents[2]
+    candidates = [
+        repo_root / "crsqlite" / platform_dir / "crsqlite.so",
+        Path("crsqlite") / platform_dir / "crsqlite.so",
+        Path("..") / "crsqlite" / platform_dir / "crsqlite.so",
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p.resolve())
     return None
 
 

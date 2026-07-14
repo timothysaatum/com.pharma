@@ -8,7 +8,7 @@
 
 **Database:** PostgreSQL 14.23 (Ubuntu 14.23-0ubuntu0.22.04.1), real local PostgreSQL via `asyncpg`
 
-**cr-sqlite extension:** `ui.laso/src-tauri/crsqlite.so`
+**cr-sqlite extension:** `crsqlite/linux-aarch64/crsqlite.so`
 
 The working tree contained the in-progress CRR migration changes when these tests
 were run. This report intentionally records the base commit as well as that fact,
@@ -21,7 +21,7 @@ Command, run from `backend.laso/`:
 ```sh
 set -a
 source .env
-export CRSQLITE_EXTENSION_PATH=/home/ubuntu/projects/com.pharma/ui.laso/src-tauri/crsqlite.so
+export CRSQLITE_EXTENSION_PATH=/home/ubuntu/projects/com.pharma/crsqlite/linux-aarch64/crsqlite.so
 python3.12 tests/e2e_crr_sync_pg.py
 ```
 
@@ -57,7 +57,7 @@ Command, run from `backend.laso/`:
 ```sh
 set -a
 source .env
-export CRSQLITE_EXTENSION_PATH=/home/ubuntu/projects/com.pharma/ui.laso/src-tauri/crsqlite.so
+export CRSQLITE_EXTENSION_PATH=/home/ubuntu/projects/com.pharma/crsqlite/linux-aarch64/crsqlite.so
 python3.12 tests/e2e_crr_drug_batches.py
 ```
 

@@ -9,8 +9,8 @@ Per ADR 0002, a single connection (Mutex-serialised) is used — no pooling.
 
 Resolution order for the cr-sqlite extension path:
   1. CRSQLITE_EXTENSION_PATH env var
-  2. crsqlite.so next to this module (app/services/sync/crsqlite.so)
-  3. crsqlite.so in the working directory
+  2. Explicit monorepo layout (crsqlite/linux-<arch>/crsqlite.so)
+  3. Explicit packaged/current-working-directory layouts
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import platform
 import re
 import sqlite3
 from datetime import date, datetime
@@ -420,21 +421,35 @@ def get_crr_config(table: str) -> Optional[Dict[str, Any]]:
 
 # ─── Extension resolution (same logic as client db.rs) ────────────────
 
+def _crsqlite_platform_dir() -> Optional[str]:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "linux-x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "linux-aarch64"
+    return None
+
+
 def _resolve_extension_path() -> Optional[str]:
     if val := os.environ.get("CRSQLITE_EXTENSION_PATH"):
         if os.path.exists(val):
             return val
 
+    platform_dir = _crsqlite_platform_dir()
+    if not platform_dir:
+        logger.warning(
+            "Unsupported CR-SQLite host architecture: %s",
+            platform.machine(),
+        )
+        return None
+
+    repo_root = Path(__file__).resolve().parents[4]
+    backend_root = Path(__file__).resolve().parents[3]
     candidates = [
-        Path(__file__).parent / "crsqlite.so",
-        Path("crsqlite.so"),
-        # Monorepo deployment fallback: the Tauri build keeps the vetted
-        # Linux server-compatible extension here. This avoids silently
-        # disabling CRR when systemd does not define an explicit path.
-        Path(__file__).resolve().parents[4]
-        / "ui.laso"
-        / "src-tauri"
-        / "crsqlite.so",
+        repo_root / "crsqlite" / platform_dir / "crsqlite.so",
+        backend_root / "crsqlite" / platform_dir / "crsqlite.so",
+        Path(__file__).parent / "crsqlite" / platform_dir / "crsqlite.so",
+        Path("crsqlite") / platform_dir / "crsqlite.so",
     ]
     for p in candidates:
         if p.exists():

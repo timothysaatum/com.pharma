@@ -21,7 +21,7 @@ Command:
 set -a
 . .env
 set +a
-PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../ui.laso/src-tauri/crsqlite.so \
+PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../crsqlite/linux-aarch64/crsqlite.so \
   python3.12 tests/e2e_crr_production_dispatch.py
 ```
 
@@ -45,7 +45,7 @@ Command:
 set -a
 . .env
 set +a
-PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../ui.laso/src-tauri/crsqlite.so \
+PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../crsqlite/linux-aarch64/crsqlite.so \
   python3.12 /tmp/crr_server_authoritative_scale_check.py
 ```
 
@@ -72,7 +72,7 @@ cursors and paginated CRR pull draining.
 set -a
 . .env
 set +a
-PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../ui.laso/src-tauri/crsqlite.so \
+PYTHONPATH=. CRSQLITE_EXTENSION_PATH=../crsqlite/linux-aarch64/crsqlite.so \
   python3.12 /tmp/crr_thousand_record_check.py
 ```
 

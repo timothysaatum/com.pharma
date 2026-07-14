@@ -41,10 +41,12 @@ jobs:
           - platform: ubuntu-22.04
             args: ''
             crsqlite_asset: crsqlite-linux-x86_64.zip
+            crsqlite_platform: linux-x86_64
             test_crsqlite: true
           - platform: windows-latest
             args: ''
             crsqlite_asset: crsqlite-win-x86_64.zip
+            crsqlite_platform: windows-x86_64
             # A successful compile does not prove that the packaged native DLL
             # can be loaded on Windows. This smoke test prevents releases that
             # immediately exit during database startup.
@@ -52,10 +54,12 @@ jobs:
           - platform: macos-latest
             args: '--target aarch64-apple-darwin'  # Apple Silicon
             crsqlite_asset: crsqlite-darwin-aarch64.zip
+            crsqlite_platform: darwin-aarch64
             test_crsqlite: true
           - platform: macos-latest
             args: '--target x86_64-apple-darwin'   # Intel Mac
             crsqlite_asset: crsqlite-darwin-x86_64.zip
+            crsqlite_platform: darwin-x86_64
             test_crsqlite: false
 
     runs-on: ${{ matrix.platform }}
@@ -97,7 +101,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release download v0.16.3 --repo vlcn-io/cr-sqlite --pattern "${{ matrix.crsqlite_asset }}" --dir ui.laso/src-tauri/crsqlite-download
-          node ui.laso/scripts/install-crsqlite-extension.mjs "ui.laso/src-tauri/crsqlite-download/${{ matrix.crsqlite_asset }}" ui.laso/src-tauri/crsqlite.so
+          node ui.laso/scripts/install-crsqlite-extension.mjs "ui.laso/src-tauri/crsqlite-download/${{ matrix.crsqlite_asset }}" crsqlite "${{ matrix.crsqlite_platform }}"
 
       - name: Validate production API URL
         run: node -e "if (!process.env.VITE_API_URL?.startsWith('https://')) throw new Error('VITE_API_URL must be an HTTPS URL')"

@@ -34,6 +34,7 @@ import base64
 import json
 import logging
 import os
+import platform
 import sqlite3
 import sys
 import tempfile
@@ -52,20 +53,40 @@ logger = logging.getLogger("e2e_crr_sync")
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────────
 
+def _crsqlite_platform_dir() -> Optional[str]:
+    machine = platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        return "linux-x86_64"
+    if machine in {"aarch64", "arm64"}:
+        return "linux-aarch64"
+    return None
+
+
 # Resolve crsqlite.so path (same logic as shadow_db.py)
 def _find_extension() -> Optional[str]:
     if val := os.environ.get("CRSQLITE_EXTENSION_PATH"):
         if os.path.exists(val):
             return val
+    platform_dir = _crsqlite_platform_dir()
+    if not platform_dir:
+        return None
+    repo_root = Path(__file__).resolve().parents[2]
     candidates = [
-        Path(__file__).parent.parent / "app" / "services" / "sync" / "crsqlite.so",
-        Path(__file__).parent.parent / "ui.laso" / "src-tauri" / "crsqlite.so",
-        Path("crsqlite.so"),
+        repo_root / "crsqlite" / platform_dir / "crsqlite.so",
+        Path("crsqlite") / platform_dir / "crsqlite.so",
+        Path("..") / "crsqlite" / platform_dir / "crsqlite.so",
     ]
     for p in candidates:
         if p.exists():
             return str(p.resolve())
     return None
+
+
+def _sqlite_load_path(extension: str) -> str:
+    for suffix in (".so", ".dylib", ".dll"):
+        if extension.endswith(suffix):
+            return extension[: -len(suffix)]
+    return extension
 
 
 def create_sqlite_db(path: str, schema: str, load_crsqlite: bool = False) -> sqlite3.Connection:
@@ -77,7 +98,7 @@ def create_sqlite_db(path: str, schema: str, load_crsqlite: bool = False) -> sql
         ext = _find_extension()
         if ext:
             conn.enable_load_extension(True)
-            conn.load_extension(ext)
+            conn.load_extension(_sqlite_load_path(ext))
             conn.execute("SELECT crsql_as_crr('branch_inventory')")
     conn.commit()
     return conn
