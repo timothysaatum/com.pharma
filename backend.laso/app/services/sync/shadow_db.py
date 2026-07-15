@@ -685,7 +685,14 @@ class ShadowDB:
         """
         published = 0
         for table, cfg in _CRR_TABLE_CONFIG.items():
-            columns = cfg["ddl"].lower()
+            table_model = Base.metadata.tables.get(table)
+            if table_model is None:
+                logger.warning(
+                    "Skipping CRR publication for %s: table is not mapped in SQLAlchemy metadata",
+                    table,
+                )
+                continue
+            columns = set(table_model.columns.keys())
 
             if "organization_id" in columns and "branch_id" in columns and branch_id:
                 stmt = f'SELECT * FROM "{table}" WHERE organization_id = :organization_id AND branch_id = :branch_id'
