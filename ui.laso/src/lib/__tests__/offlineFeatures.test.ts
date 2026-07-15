@@ -63,7 +63,7 @@ describe("Offline First Capabilities and Search Integration", () => {
 
   it("should write local audit logs upon offline actions", async () => {
     const mockDb = await getDb();
-    const executeSpy = vi.spyOn(mockDb, "execute").mockResolvedValue({ rowsAffected: 1, lastInsertRowId: 1 });
+    const executeSpy = vi.spyOn(mockDb, "execute").mockResolvedValue({ rowsAffected: 1, lastInsertId: 1 });
 
     await writeLocal.auditLog({
       organization_id: "org-123",
@@ -80,7 +80,7 @@ describe("Offline First Capabilities and Search Integration", () => {
   });
 
   it("should exit from 'Syncing...' state via timeout when a network call hangs", async () => {
-    const hangingPromise = new Promise<string>((resolve) => {
+    const hangingPromise = new Promise<string>(() => {
       // simulate network call that never resolves
     });
 
