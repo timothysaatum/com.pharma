@@ -411,6 +411,32 @@ _CRR_TABLE_CONFIG: Dict[str, Dict[str, Any]] = {
 }
 
 
+def _crr_table_columns(table: str) -> set[str]:
+    """Return exact column names declared in the CRR SQLite table DDL."""
+    cfg = _CRR_TABLE_CONFIG.get(table)
+    if not cfg:
+        return set()
+
+    ddl = cfg["ddl"]
+    match = re.search(
+        rf"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS\s+{re.escape(table)}\s*\((.*?)\)\s*;",
+        ddl,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not match:
+        return set()
+
+    columns: set[str] = set()
+    for line in match.group(1).splitlines():
+        line = line.strip().rstrip(",")
+        if not line:
+            continue
+        column_match = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s+", line)
+        if column_match:
+            columns.add(column_match.group(1).lower())
+    return columns
+
+
 def get_crr_table_names() -> List[str]:
     return list(_CRR_TABLE_CONFIG.keys())
 
@@ -685,14 +711,7 @@ class ShadowDB:
         """
         published = 0
         for table, cfg in _CRR_TABLE_CONFIG.items():
-            table_model = Base.metadata.tables.get(table)
-            if table_model is None:
-                logger.warning(
-                    "Skipping CRR publication for %s: table is not mapped in SQLAlchemy metadata",
-                    table,
-                )
-                continue
-            columns = set(table_model.columns.keys())
+            columns = _crr_table_columns(table)
 
             if "organization_id" in columns and "branch_id" in columns and branch_id:
                 stmt = f'SELECT * FROM "{table}" WHERE organization_id = :organization_id AND branch_id = :branch_id'

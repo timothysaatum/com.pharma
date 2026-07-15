@@ -15,7 +15,7 @@ from app.schemas.sync_schemas import (
     PushResult,
 )
 from app.services.sync.sync_service import SyncService
-from app.services.sync.shadow_db import ShadowDB, _CRR_TABLE_CONFIG
+from app.services.sync.shadow_db import ShadowDB, _CRR_TABLE_CONFIG, _crr_table_columns
 
 
 class _Dialect:
@@ -72,6 +72,25 @@ class _AuditSession:
         self.flushed = True
 
 
+class _EmptyMappings:
+    def all(self):
+        return []
+
+
+class _EmptyResult:
+    def mappings(self):
+        return _EmptyMappings()
+
+
+class _RecordingSession:
+    def __init__(self):
+        self.executed = []
+
+    async def execute(self, statement, params):
+        self.executed.append((str(statement), params))
+        return _EmptyResult()
+
+
 @pytest.mark.asyncio
 async def test_pull_uses_fresh_session_when_request_session_already_has_transaction(monkeypatch):
     request_session = _ActiveSession()
@@ -104,6 +123,38 @@ def test_sync_branch_access_normalizes_uuid_assignments():
 
     assert _user_can_sync_branch(user, branch_id)
     assert _user_can_sync_branch(user, str(branch_id))
+
+
+def test_crr_table_columns_do_not_match_partial_column_names():
+    columns = _crr_table_columns("price_contracts")
+
+    assert "organization_id" in columns
+    assert "applicable_branch_ids" in columns
+    assert "branch_id" not in columns
+
+
+@pytest.mark.asyncio
+async def test_publish_server_authoritative_price_contracts_are_not_branch_scoped(monkeypatch):
+    only_price_contracts = {"price_contracts": _CRR_TABLE_CONFIG["price_contracts"]}
+    monkeypatch.setattr(
+        "app.services.sync.shadow_db._CRR_TABLE_CONFIG",
+        only_price_contracts,
+    )
+
+    db = _RecordingSession()
+    shadow = ShadowDB()
+
+    published = await shadow.publish_server_authoritative_tables(
+        db,
+        organization_id="org-1",
+        branch_id="branch-1",
+    )
+
+    assert published == 0
+    assert db.executed == [(
+        'SELECT * FROM "price_contracts" WHERE organization_id = :organization_id',
+        {"organization_id": "org-1"},
+    )]
 
 
 def test_crr_push_record_decodes_binary_transport_fields():
