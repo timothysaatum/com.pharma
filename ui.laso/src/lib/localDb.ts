@@ -101,6 +101,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 15) await migrate_v15(db);
       if (user_version < 16) await migrate_v16(db);
       if (user_version < 17) await migrate_v17(db);
+      if (user_version < 18) await migrate_v18(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
@@ -1203,6 +1204,18 @@ async function migrate_v17(db: Database): Promise<void> {
   }
 }
 
+async function migrate_v18(db: Database): Promise<void> {
+  // v1.2.38 and older decoded pulled CRR BLOB fields into Uint8Array values,
+  // but the Tauri SQLite bridge stored those arrays as JSON text. Affected
+  // devices may have advanced this cursor without actually merging remote rows.
+  // Reset only the pull cursor; the independent push cursor remains unchanged.
+  await db.execute(
+    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+    ["crr_pull_db_version", "0"],
+  );
+  await db.execute("PRAGMA user_version = 18");
+}
+
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS crr_renumber_audit (
@@ -2079,14 +2092,15 @@ export async function getCrrPushChanges(
  * Insert changes from the server into local crsql_changes, triggering
  * cr-sqlite's auto-merge into the local table.
  */
+const BLOB_TRANSPORT_KEY = "__laso_blob_b64";
+
+function blobTransportValue(encoded: string): Record<typeof BLOB_TRANSPORT_KEY, string> {
+  return { [BLOB_TRANSPORT_KEY]: encoded.slice(4) };
+}
+
 function decodeCrrValue(v: unknown): unknown {
   if (typeof v === "string" && v.startsWith("b64:")) {
-    const binaryStr = atob(v.slice(4));
-    const bytes = new Uint8Array(binaryStr.length);
-    for (let i = 0; i < binaryStr.length; i++) {
-      bytes[i] = binaryStr.charCodeAt(i);
-    }
-    return bytes;
+    return blobTransportValue(v);
   }
   return v;
 }
@@ -2116,7 +2130,7 @@ export async function applyCrrPullChangesToDb(
           decodeCrrValue(ch.val),
           ch.col_version,
           ch.db_version,
-          ch.site_id,
+          decodeCrrValue(ch.site_id),
           ch.cl,
           ch.seq,
         ]

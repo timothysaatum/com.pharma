@@ -684,6 +684,8 @@ class SyncEngine {
             );
         } catch (err) {
             console.warn("[SyncEngine] CRR pull error:", err);
+            this.logError(err, "CRR pull failed");
+            throw err;
         }
     }
 

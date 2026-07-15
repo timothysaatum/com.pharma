@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rusqlite::{params_from_iter, Connection};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
@@ -18,7 +19,7 @@ pub struct ExecResult {
     pub last_insert_id: Option<i64>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct DbError {
     pub message: String,
 }
@@ -168,7 +169,8 @@ pub fn init_db(db_dir: Option<PathBuf>, ext_path: Option<PathBuf>) -> Result<DbS
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{crsqlite_platform_dir, init_db, resolve_extension_path};
+    use super::{crsqlite_platform_dir, init_db, json_to_rusqlite, resolve_extension_path};
+    use rusqlite::types::Value;
     use std::path::Path;
 
     #[test]
@@ -242,6 +244,35 @@ mod startup_tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
+    #[test]
+    fn json_blob_transport_marker_decodes_to_sqlite_blob() {
+        let value = json_to_rusqlite(serde_json::json!({
+            "__laso_blob_b64": "AQIDBA=="
+        }))
+        .expect("valid blob transport should decode");
+
+        assert_eq!(value, Value::Blob(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn blob_transport_does_not_decode_b64_prefixed_plain_strings() {
+        let value = json_to_rusqlite(serde_json::json!("b64:AQIDBA=="))
+            .expect("plain string should remain text");
+
+        assert_eq!(value, Value::Text("b64:AQIDBA==".to_string()));
+    }
+
+    #[test]
+    fn invalid_json_blob_transport_marker_is_rejected() {
+        let err = json_to_rusqlite(serde_json::json!({
+            "__laso_blob_b64": "not valid base64"
+        }))
+        .err()
+        .expect("invalid blob transport should fail");
+
+        assert!(err.message.contains("Invalid SQLite blob transport value"));
+    }
+
     fn extension_matches_current_arch(path: &Path) -> bool {
         let Ok(bytes) = std::fs::read(path) else {
             return false;
@@ -270,7 +301,10 @@ pub fn db_execute(
         message: format!("Lock error: {e}"),
     })?;
 
-    let params: Vec<rusqlite::types::Value> = values.into_iter().map(json_to_rusqlite).collect();
+    let params: Vec<rusqlite::types::Value> = values
+        .into_iter()
+        .map(json_to_rusqlite)
+        .collect::<Result<_, _>>()?;
 
     let mut stmt = conn.prepare(&sql)?;
     let rows_affected = stmt.execute(params_from_iter(params.iter()))?;
@@ -299,7 +333,10 @@ pub fn db_select(
         message: format!("Lock error: {e}"),
     })?;
 
-    let params: Vec<rusqlite::types::Value> = values.into_iter().map(json_to_rusqlite).collect();
+    let params: Vec<rusqlite::types::Value> = values
+        .into_iter()
+        .map(json_to_rusqlite)
+        .collect::<Result<_, _>>()?;
 
     let mut stmt = conn.prepare(&sql)?;
     let col_count = stmt.column_count();
@@ -411,32 +448,42 @@ pub fn db_get_crsql_changes(
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-fn json_to_rusqlite(v: JsonValue) -> rusqlite::types::Value {
+fn json_to_rusqlite(v: JsonValue) -> Result<rusqlite::types::Value, DbError> {
     match v {
-        JsonValue::Null => rusqlite::types::Value::Null,
-        JsonValue::Bool(b) => rusqlite::types::Value::Integer(if b { 1 } else { 0 }),
+        JsonValue::Null => Ok(rusqlite::types::Value::Null),
+        JsonValue::Bool(b) => Ok(rusqlite::types::Value::Integer(if b { 1 } else { 0 })),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
-                rusqlite::types::Value::Integer(i)
+                Ok(rusqlite::types::Value::Integer(i))
             } else if let Some(f) = n.as_f64() {
-                rusqlite::types::Value::Real(f)
+                Ok(rusqlite::types::Value::Real(f))
             } else {
                 // Fallback: try to parse as integer or real from string
                 if let Ok(i) = n.to_string().parse::<i64>() {
-                    rusqlite::types::Value::Integer(i)
+                    Ok(rusqlite::types::Value::Integer(i))
                 } else if let Ok(f) = n.to_string().parse::<f64>() {
-                    rusqlite::types::Value::Real(f)
+                    Ok(rusqlite::types::Value::Real(f))
                 } else {
-                    rusqlite::types::Value::Text(n.to_string())
+                    Ok(rusqlite::types::Value::Text(n.to_string()))
                 }
             }
         }
-        JsonValue::String(s) => rusqlite::types::Value::Text(s),
-        JsonValue::Array(arr) => {
-            rusqlite::types::Value::Text(serde_json::to_string(&arr).unwrap_or_default())
-        }
+        JsonValue::String(s) => Ok(rusqlite::types::Value::Text(s)),
+        JsonValue::Array(arr) => Ok(rusqlite::types::Value::Text(
+            serde_json::to_string(&arr).unwrap_or_default(),
+        )),
         JsonValue::Object(obj) => {
-            rusqlite::types::Value::Text(serde_json::to_string(&obj).unwrap_or_default())
+            if obj.len() == 1 {
+                if let Some(JsonValue::String(encoded)) = obj.get("__laso_blob_b64") {
+                    let bytes = BASE64_STANDARD.decode(encoded).map_err(|error| DbError {
+                        message: format!("Invalid SQLite blob transport value: {error}"),
+                    })?;
+                    return Ok(rusqlite::types::Value::Blob(bytes));
+                }
+            }
+            Ok(rusqlite::types::Value::Text(
+                serde_json::to_string(&obj).unwrap_or_default(),
+            ))
         }
     }
 }

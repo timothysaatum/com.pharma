@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
-import { isOfflineError, parseApiError } from "@/api/client";
+import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { DrugCategory, DrugCategoryTree } from "@/types";
 
@@ -24,6 +24,57 @@ function scopeCategoryCaches(organizationId: string | null): void {
     flatInflight = null;
     treeCache = null;
     treeInflight = null;
+}
+
+function shouldReadCategoriesFromLocal(): boolean {
+    if (typeof navigator === "undefined") return false;
+    return !navigator.onLine || !isBackendReachable();
+}
+
+function readLocalCategories(organizationId: string | null): Promise<DrugCategory[]> {
+    return localRead.getDrugCategories(undefined, organizationId ?? undefined);
+}
+
+function readLocalCategoryTree(organizationId: string | null): Promise<DrugCategoryTree[]> {
+    return localRead.getDrugCategoryTree(organizationId ?? undefined);
+}
+
+async function loadFlatCategories(organizationId: string | null): Promise<DrugCategory[]> {
+    if (shouldReadCategoriesFromLocal()) {
+        return readLocalCategories(organizationId);
+    }
+
+    try {
+        const remote = await drugApi.listCategories();
+        if (remote.length > 0) return remote;
+
+        const local = await readLocalCategories(organizationId).catch(() => [] as DrugCategory[]);
+        return local.length > 0 ? local : remote;
+    } catch (err) {
+        if (isOfflineError(err)) {
+            return readLocalCategories(organizationId);
+        }
+        throw err;
+    }
+}
+
+async function loadCategoryTree(organizationId: string | null): Promise<DrugCategoryTree[]> {
+    if (shouldReadCategoriesFromLocal()) {
+        return readLocalCategoryTree(organizationId);
+    }
+
+    try {
+        const remote = await drugApi.listCategoriesTree();
+        if (remote.length > 0) return remote;
+
+        const local = await readLocalCategoryTree(organizationId).catch(() => [] as DrugCategoryTree[]);
+        return local.length > 0 ? local : remote;
+    } catch (err) {
+        if (isOfflineError(err)) {
+            return readLocalCategoryTree(organizationId);
+        }
+        throw err;
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -50,26 +101,19 @@ export function useCategories() {
 
     useEffect(() => {
         mounted.current = true;
+        const preferLocal = shouldReadCategoriesFromLocal();
 
-        if (flatCache !== null) {
+        if (flatCache !== null && !preferLocal) {
             setCategories(flatCache);
             setIsLoading(false);
             return;
         }
-        setCategories([]);
+        setCategories(flatCache ?? []);
         setIsLoading(true);
         setError(null);
 
-        if (!flatInflight) {
-            flatInflight = drugApi.listCategories().catch(async (err) => {
-                if (isOfflineError(err)) {
-                    return localRead.getDrugCategories(
-                        undefined,
-                        organizationId ?? undefined
-                    );
-                }
-                throw err;
-            });
+        if (!flatInflight || preferLocal) {
+            flatInflight = loadFlatCategories(organizationId);
         }
 
         flatInflight
@@ -98,8 +142,8 @@ export function useCategories() {
         flatInflight = null;
         setIsLoading(true);
         setError(null);
-        drugApi
-            .listCategories()
+
+        loadFlatCategories(organizationId)
             .then((data) => {
                 flatCache = data;
                 if (mounted.current) {
@@ -122,10 +166,10 @@ export function useCategories() {
                         })
                         .catch(() => {
                             if (mounted.current) {
-                    setError(parseApiError(err));
-                    setIsLoading(false);
-                }
-            });
+                                setError(parseApiError(err));
+                                setIsLoading(false);
+                            }
+                        });
                     return;
                 }
                 if (mounted.current) {
@@ -159,25 +203,19 @@ export function useCategoryTree() {
 
     useEffect(() => {
         mounted.current = true;
+        const preferLocal = shouldReadCategoriesFromLocal();
 
-        if (treeCache !== null) {
+        if (treeCache !== null && !preferLocal) {
             setTree(treeCache);
             setIsLoading(false);
             return;
         }
-        setTree([]);
+        setTree(treeCache ?? []);
         setIsLoading(true);
         setError(null);
 
-        if (!treeInflight) {
-            treeInflight = drugApi.listCategoriesTree().catch(async (err) => {
-                if (isOfflineError(err)) {
-                    return localRead.getDrugCategoryTree(
-                        organizationId ?? undefined
-                    );
-                }
-                throw err;
-            });
+        if (!treeInflight || preferLocal) {
+            treeInflight = loadCategoryTree(organizationId);
         }
 
         treeInflight
@@ -208,8 +246,8 @@ export function useCategoryTree() {
         treeInflight = null;
         setIsLoading(true);
         setError(null);
-        drugApi
-            .listCategoriesTree()
+
+        loadCategoryTree(organizationId)
             .then((data) => {
                 treeCache = data;
                 if (mounted.current) {

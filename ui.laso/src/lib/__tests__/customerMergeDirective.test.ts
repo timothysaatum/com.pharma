@@ -12,6 +12,44 @@ function params(sql: string): string {
 }
 
 describe("customer merge directives", () => {
+  it("passes CRR b64 transport values to the DB bridge as explicit blob markers", async () => {
+    const calls: Array<{ sql: string; values: unknown[] }> = [];
+    const db: Database = {
+      execute: async (sql, values = []) => {
+        calls.push({ sql, values });
+        return { rowsAffected: 1 };
+      },
+      select: async <T>() => [] as T,
+      execute_batch: async () => {},
+      load: async () => db,
+    };
+
+    await applyCrrPullChangesToDb(db, [{
+      table: "customers",
+      pk: "b64:AQID",
+      cid: "first_name",
+      val: "b64:Q2Fzc2ll",
+      col_version: 4,
+      db_version: 9,
+      site_id: "b64:BwgJ",
+      cl: 1,
+      seq: 7,
+    }]);
+
+    const insert = calls.find((call) => call.sql.includes("INSERT INTO crsql_changes"));
+    expect(insert?.values).toEqual([
+      "customers",
+      { __laso_blob_b64: "AQID" },
+      "first_name",
+      { __laso_blob_b64: "Q2Fzc2ll" },
+      4,
+      9,
+      { __laso_blob_b64: "BwgJ" },
+      1,
+      7,
+    ]);
+  });
+
   it("atomically repoints references, deletes loser, is idempotent, and repairs delayed rows", async () => {
     const sqlite = new DatabaseSync(":memory:");
     sqlite.exec(`

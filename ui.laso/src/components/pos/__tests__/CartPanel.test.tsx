@@ -1,18 +1,21 @@
 /** @vitest-environment jsdom */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AvailableContract } from "@/api/contracts";
+import { apiClient } from "@/api/client";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { localRead } from "@/lib/localRead";
 import type { CartItem, CartTotals } from "@/hooks/useCart";
 import type { Drug } from "@/types";
 
+let backendReachable = false;
+
 vi.mock("@/api/client", () => ({
   apiClient: {
     get: vi.fn(),
   },
-  isBackendReachable: () => false,
+  isBackendReachable: () => backendReachable,
 }));
 
 vi.mock("@/lib/localRead", () => ({
@@ -128,6 +131,11 @@ function renderCartPanel(overrides: Partial<React.ComponentProps<typeof CartPane
 }
 
 describe("CartPanel customer search", () => {
+  beforeEach(() => {
+    backendReachable = false;
+    vi.clearAllMocks();
+  });
+
   it("shows offline customer search results in the visible POS customer control", async () => {
     vi.mocked(localRead.searchCustomerMatches).mockResolvedValue([
       {
@@ -157,6 +165,38 @@ describe("CartPanel customer search", () => {
     await waitFor(() => {
       expect(onSetCustomerName).toHaveBeenCalledWith("Cassie1 Nam");
       expect(onSetCustomerId).toHaveBeenCalledWith("cust-123");
+    });
+  });
+
+  it("keeps local customer results when the online API returns no matches", async () => {
+    backendReachable = true;
+    vi.mocked(localRead.searchCustomerMatches).mockResolvedValue([
+      {
+        id: "cust-123",
+        full_name: "Cassie1 Nam",
+        phone: "+2335555555",
+        email: "cassie@example.com",
+        loyalty_tier: "gold",
+        has_insurance: true,
+        contract_name: "Corporate Contract",
+      },
+    ]);
+    vi.mocked(apiClient.get).mockResolvedValue({ data: { matches: [] } });
+
+    renderCartPanel();
+
+    fireEvent.change(screen.getByPlaceholderText(/search by name, phone, email/i), {
+      target: { value: "cass" },
+    });
+
+    expect(await screen.findByText("Cassie1 Nam")).toBeTruthy();
+    await waitFor(() => {
+      expect(apiClient.get).toHaveBeenCalledWith(
+        "/customers/search",
+        expect.objectContaining({
+          params: { q: "cass", limit: 10 },
+        }),
+      );
     });
   });
 });

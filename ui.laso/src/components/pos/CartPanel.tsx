@@ -58,6 +58,18 @@ interface CustomerMatch {
     contract_name: string | null;
 }
 
+function mergeCustomerMatches(
+    primary: CustomerMatch[],
+    secondary: CustomerMatch[],
+    limit: number,
+): CustomerMatch[] {
+    const byId = new Map<string, CustomerMatch>();
+    for (const match of [...primary, ...secondary]) {
+        if (!byId.has(match.id)) byId.set(match.id, match);
+    }
+    return [...byId.values()].slice(0, limit);
+}
+
 interface CustomerSearchWidgetProps {
     customerName: string;
     customerId: string | null;
@@ -112,20 +124,30 @@ function CustomerSearchWidget({
         debounceRef.current = setTimeout(async () => {
             setSearching(true);
             try {
+                const localMatches = await localRead
+                    .searchCustomerMatches(q, 10, organizationId)
+                    .catch(() => [] as CustomerMatch[]);
+
+                if (!controller.signal.aborted && localMatches.length > 0) {
+                    setResults(localMatches);
+                    setOpen(true);
+                }
+
                 if (!navigator.onLine || !isBackendReachable()) {
-                    const matches = await localRead.searchCustomerMatches(q, 10, organizationId);
                     if (!controller.signal.aborted) {
-                        setResults(matches);
+                        setResults(localMatches);
                         setOpen(true);
                     }
                     return;
                 }
+
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
                     { params: { q, limit: 10 }, signal: controller.signal, timeout: 3000 }
                 );
                 if (!controller.signal.aborted) {
-                    setResults(data.matches ?? []);
+                    const serverMatches = data.matches ?? [];
+                    setResults(mergeCustomerMatches(serverMatches, localMatches, 10));
                     setOpen(true);
                 }
             } catch (err: unknown) {

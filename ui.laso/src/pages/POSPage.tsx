@@ -105,17 +105,32 @@ export default function POSPage() {
     const loadContracts = useCallback(async () => {
         if (!activeBranchId) return;
         setContractsLoading(true);
+        const loadLocalContracts = () =>
+            localRead.getAvailableContractsForPos(
+                activeBranchId,
+                user?.organization_id,
+            );
         try {
+            if (isOffline || !navigator.onLine || !isBackendReachable()) {
+                setContracts(await loadLocalContracts());
+                return;
+            }
+
             const data = await contractsApi.getAvailableForPos(activeBranchId);
-            setContracts(data);
+            if (data.length > 0) {
+                setContracts(data);
+                return;
+            }
+
+            const fallback = await loadLocalContracts();
+            setContracts(fallback.length > 0 ? fallback : data);
         } catch {
             // Non-blocking — cashier can still proceed with empty list
-            const fallback = await localRead.getAvailableContractsForPos(activeBranchId, user?.organization_id);
-            setContracts(fallback);
+            setContracts(await loadLocalContracts());
         } finally {
             setContractsLoading(false);
         }
-    }, [activeBranchId]);
+    }, [activeBranchId, isOffline, user?.organization_id]);
 
     useEffect(() => {
         loadContracts();

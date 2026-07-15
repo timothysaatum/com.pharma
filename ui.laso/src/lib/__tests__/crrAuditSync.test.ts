@@ -170,6 +170,52 @@ describe("CRR migration audit sync", () => {
     );
   });
 
+  it("does not advance the CRR pull cursor when local apply fails", async () => {
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const applyChanges = vi.fn().mockRejectedValue(new Error("blob insert failed"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const crrPull = vi.fn().mockResolvedValue({
+      crr_changes: [{ table: "customers", pk: "b64:AQID", cid: "first_name", val: "Cassie", col_version: 1, db_version: 500, site_id: "server", cl: 1, seq: 1 }],
+      crr_max_db_version: 500,
+      customer_merge_directives: [],
+      customer_merge_max_version: 0,
+      has_more: false,
+    });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPull, crrPush: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({ select: async () => [], execute }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges: empty, applyCrrPullChanges: applyChanges,
+      applyCustomerMergeDirectives: noop,
+      getCrrSiteId: vi.fn().mockResolvedValue("local-site"),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+
+    await expect((syncEngine as any).pullCrr()).rejects.toThrow("blob insert failed");
+    expect(execute).not.toHaveBeenCalledWith(
+      expect.any(String),
+      ["crr_pull_db_version", "500"],
+    );
+
+    warn.mockRestore();
+    error.mockRestore();
+  });
+
   it("uses the independent CRR push cursor when selecting local changes", async () => {
     const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
     const noop = vi.fn().mockResolvedValue(undefined);
