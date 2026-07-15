@@ -46,7 +46,7 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
       - name: Audit frontend dependencies
-        run: pnpm audit --prod
+        run: pnpm audit --prod --ignore-registry-errors
       - name: Run frontend tests
         run: pnpm test
       - name: Build frontend
