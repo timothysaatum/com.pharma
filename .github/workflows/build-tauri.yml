@@ -112,7 +112,7 @@ jobs:
 
       - name: Audit frontend dependencies
         working-directory: ui.laso
-        run: pnpm audit --prod
+        run: pnpm audit --prod --ignore-registry-errors
 
       - name: Test Rust commands
         working-directory: ui.laso/src-tauri

@@ -451,8 +451,11 @@ export const localRead = {
       qualifiers.push(`(
         LOWER(first_name) LIKE $${values.length} OR
         LOWER(last_name) LIKE $${values.length} OR
+        LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE $${values.length} OR
         LOWER(phone) LIKE $${values.length} OR
-        LOWER(email) LIKE $${values.length}
+        LOWER(email) LIKE $${values.length} OR
+        LOWER(insurance_member_id) LIKE $${values.length} OR
+        LOWER(id) LIKE $${values.length}
       )`);
     }
 
@@ -501,7 +504,8 @@ export const localRead = {
         LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE $1 OR
         LOWER(phone) LIKE $1 OR
         LOWER(email) LIKE $1 OR
-        LOWER(insurance_member_id) LIKE $1
+        LOWER(insurance_member_id) LIKE $1 OR
+        LOWER(id) LIKE $1
       )`,
     ];
 

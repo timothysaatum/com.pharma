@@ -659,27 +659,53 @@ class ShadowDB:
         conn.commit()
         self._conn = conn
 
+    async def row_exists_in_shadow(self, table: str, row_id: str) -> bool:
+        """Check if a row ID exists in a shadow DB table."""
+        def _sync() -> bool:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    return False
+                row = conn.execute(
+                    f"SELECT 1 FROM [{table}] WHERE id = ? LIMIT 1", (row_id,)
+                ).fetchone()
+                return row is not None
+        return await asyncio.to_thread(_sync)
+
     async def publish_server_authoritative_tables(
         self,
         db: AsyncSession,
         organization_id: Any,
+        branch_id: Any = None,
     ) -> int:
-        """Publish server-owned Postgres rows into the CRR shadow peer.
+        """Publish server-owned and client-writable Postgres rows into the CRR shadow peer.
 
-        Reference/catalog/audit rows are edited through normal server APIs, not
-        by offline clients. This method makes those Postgres changes visible to
-        CRR clients without keeping the old timestamp pull path alive.
+        Makes both Postgres server-authoritative catalog changes and any other server-created
+        client-writable data visible to CRR clients so they can be synced completely.
         """
         published = 0
         for table, cfg in _CRR_TABLE_CONFIG.items():
-            if not cfg.get("server_authoritative"):
+            columns = cfg["ddl"].lower()
+
+            if "organization_id" in columns and "branch_id" in columns and branch_id:
+                stmt = f'SELECT * FROM "{table}" WHERE organization_id = :organization_id AND branch_id = :branch_id'
+                params = {"organization_id": str(organization_id), "branch_id": str(branch_id)}
+            elif "organization_id" in columns:
+                stmt = f'SELECT * FROM "{table}" WHERE organization_id = :organization_id'
+                params = {"organization_id": str(organization_id)}
+            elif "branch_id" in columns and branch_id:
+                stmt = f'SELECT * FROM "{table}" WHERE branch_id = :branch_id'
+                params = {"branch_id": str(branch_id)}
+            else:
                 continue
-            result = await db.execute(
-                text(f'SELECT * FROM "{table}" WHERE organization_id = :organization_id'),
-                {"organization_id": str(organization_id)},
-            )
+
+            result = await db.execute(text(stmt), params)
             for row in result.mappings().all():
-                if await self.upsert_shadow_server_row(table, dict(row)):
+                row_dict = dict(row)
+                if not cfg.get("server_authoritative"):
+                    if await self.row_exists_in_shadow(table, str(row_dict["id"])):
+                        continue
+                if await self.upsert_shadow_server_row(table, row_dict):
                     published += 1
         return published
 

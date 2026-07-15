@@ -21,6 +21,26 @@ import type {
     PurchaseOrder, Customer, Prescription,
 } from "@/types";
 
+const AUDIT_LOG_COLUMNS = new Set([
+    "id",
+    "organization_id",
+    "user_id",
+    "user_full_name",
+    "action",
+    "entity_type",
+    "entity_id",
+    "changes",
+    "ip_address",
+    "user_agent",
+    "context_metadata",
+    "created_at",
+    "updated_at",
+    "sync_status",
+    "sync_version",
+    "last_synced_at",
+    "sync_hash",
+]);
+
 const SALE_COLUMNS = new Set([
     "id",
     "organization_id",
@@ -230,6 +250,58 @@ export const writeLocal = {
      * `items_json` (TEXT) so offline receipt rendering can read it back
      * without hitting the server.
      */
+    auditLog: async (
+        log: {
+            id?: string;
+            organization_id: string;
+            user_id?: string | null;
+            user_full_name?: string | null;
+            action: string;
+            entity_type?: string | null;
+            entity_id?: string | null;
+            changes?: string | null;
+            ip_address?: string | null;
+            user_agent?: string | null;
+            context_metadata?: string | null;
+            created_at?: string;
+            updated_at?: string;
+        }
+    ): Promise<void> => {
+        const db = await getDb();
+        const id = log.id || crypto.randomUUID();
+        const now = new Date().toISOString();
+        const payload = pickColumns(
+            {
+                ...log,
+                id,
+                sync_status: "synced",
+                sync_version: 1,
+                created_at: log.created_at || now,
+                updated_at: log.updated_at || now,
+            } as Record<string, unknown>,
+            AUDIT_LOG_COLUMNS
+        );
+
+        const cols = Object.keys(payload);
+        const vals = cols.map((c) => {
+            const v = payload[c];
+            if (typeof v === "boolean") return v ? 1 : 0;
+            if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
+            return v ?? null;
+        });
+        const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+        const updates = cols
+            .filter((c) => c !== "id")
+            .map((c) => `${c} = excluded.${c}`)
+            .join(", ");
+
+        await db.execute(
+            `INSERT INTO audit_logs (${cols.join(", ")}) VALUES (${placeholders})
+             ON CONFLICT(id) DO UPDATE SET ${updates}`,
+            vals
+        );
+    },
+
     sale: async (
         sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string }
     ): Promise<void> => {
@@ -262,6 +334,20 @@ export const writeLocal = {
                 sync_protocol_version: 2,
             }
         );
+
+        await writeLocal.auditLog({
+            organization_id: sale.organization_id,
+            action: "create_sale_offline",
+            entity_type: "sales",
+            entity_id: sale.id,
+            user_id: sale.cashier_id,
+            user_full_name: sale.customer_name || "Walk-in Customer",
+            changes: JSON.stringify({
+                sale_number: sale.sale_number,
+                total_amount: rawPayload.total_amount,
+                items_count: rawPayload.items_count,
+            }),
+        });
     },
 
     /**
@@ -594,5 +680,17 @@ export const writeLocal = {
         );
 
         await upsertAndEnqueue("customers", payload, operation);
+
+        await writeLocal.auditLog({
+            organization_id: customer.organization_id,
+            action: `${operation}_customer_offline`,
+            entity_type: "customers",
+            entity_id: customer.id,
+            changes: JSON.stringify({
+                first_name: customer.first_name,
+                last_name: customer.last_name,
+                customer_type: customer.customer_type,
+            }),
+        });
     },
 };

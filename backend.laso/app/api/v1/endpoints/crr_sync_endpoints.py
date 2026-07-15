@@ -125,6 +125,7 @@ async def crr_pull(
     published = await shadow.publish_server_authoritative_tables(
         db=db,
         organization_id=current_user.organization_id,
+        branch_id=request.branch_id,
     )
     if published:
         await db.commit()
