@@ -384,6 +384,47 @@ async def test_crr_pull_rejects_unassigned_branch():
 
 
 @pytest.mark.asyncio
+async def test_shadow_publication_uses_mapped_columns_not_ddl_substrings():
+    class _Result:
+        def mappings(self):
+            return self
+
+        def all(self):
+            return []
+
+    class _Db:
+        def __init__(self):
+            self.calls = []
+
+        async def execute(self, statement, params):
+            self.calls.append((str(statement), params))
+            return _Result()
+
+    db = _Db()
+    shadow = ShadowDB()
+
+    await shadow.publish_server_authoritative_tables(
+        db=db,
+        organization_id=uuid.uuid4(),
+        branch_id=uuid.uuid4(),
+    )
+
+    statements = {statement for statement, _params in db.calls}
+    assert (
+        'SELECT * FROM "price_contracts" WHERE organization_id = :organization_id'
+        in statements
+    )
+    assert not any(
+        'FROM "price_contracts"' in statement and "branch_id" in statement
+        for statement in statements
+    )
+    assert any(
+        'FROM "branch_inventory"' in statement and "branch_id" in statement
+        for statement in statements
+    )
+
+
+@pytest.mark.asyncio
 async def test_reconcile_skips_server_authoritative_tables(tmp_path, monkeypatch):
     shadow = ShadowDB()
     await shadow.initialize(
