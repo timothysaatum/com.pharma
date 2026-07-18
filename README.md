@@ -77,6 +77,21 @@ cd backend.laso
 alembic upgrade head
 ```
 
+### Seed a Demo Drug Catalog
+
+The catalog seed uses the configured API database and targets the organization
+belonging to a specific UI login. It is repeat-safe and also adds opening stock
+to every active branch in that organization.
+
+```bash
+cd backend.laso
+.venv/bin/python scripts/seed_test_catalog.py status
+.venv/bin/python scripts/seed_test_catalog.py seed --username <ui-login>
+```
+
+Run artifacts and the rollback snapshot are written to
+`/tmp/drug-catalog-seed/`.
+
 ### 3. Frontend Setup
 
 ```bash
