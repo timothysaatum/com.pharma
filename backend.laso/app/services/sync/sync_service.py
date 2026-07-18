@@ -65,7 +65,7 @@ from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, St
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.pricing.pricing_model import InsuranceProvider, PriceContract
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 from app.models.sales.sales_model import (
     PurchaseOrder,
     PurchaseOrderItem,

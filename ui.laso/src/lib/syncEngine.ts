@@ -264,10 +264,15 @@ class SyncEngine {
 
             const pending = await getPendingCount(this.queueScope());
             this.notify(pending);
+
+            // Only count non-blocked failures for status — blocked records
+            // (dead-lettered after MAX_PUSH_ATTEMPTS) show separately in the
+            // indicator but should not keep the sync state in "error".
+            const activeFailures = this.pendingFailures.filter((f) => !f.is_blocked);
             this.setStatus(
                 pushResult.hadFailures
                     || crrPushResult?.hadFailures
-                    || this.pendingFailures.length > 0
+                    || activeFailures.length > 0
                     ? "error"
                     : "idle"
             );

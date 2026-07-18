@@ -7,7 +7,6 @@ asyncpg==0.31.0
 argon2-cffi==25.1.0
 argon2-cffi-bindings==25.1.0
 billiard==4.2.4
-black==26.3.1
 celery==5.3.6
 certifi==2026.1.4
 cffi==2.0.0
@@ -17,19 +16,15 @@ click==8.3.3
 click-didyoumean==0.3.1
 click-plugins==1.1.1.2
 click-repl==0.3.0
-coverage==7.13.1
 cryptography==48.0.1
 dnspython==2.8.0
 email-validator==2.1.0
 et_xmlfile==2.0.0
-Faker==22.0.0
 fastapi==0.138.1
-flake8==7.0.0
 greenlet==3.3.0
 h11==0.16.0
 httpcore==1.0.9
 httptools==0.7.1
-httpx==0.28.1
 idna==3.15
 iniconfig==2.3.0
 Jinja2==3.1.6
@@ -37,8 +32,6 @@ kombu==5.6.2
 Mako==1.3.12
 MarkupSafe==3.0.3
 mccabe==0.7.0
-mypy==1.8.0
-mypy_extensions==1.1.0
 numpy==1.26.4
 openpyxl==3.1.2
 packaging==25.0
@@ -57,9 +50,6 @@ pyflakes==3.2.0
 PyJWT==2.13.0
 pypdf==6.13.3
 pypng==0.20220715.0
-pytest==9.0.3
-pytest-asyncio==1.4.0
-pytest-cov==7.1.0
 PyOTP==2.9.0
 python-dateutil==2.8.2
 python-dotenv==1.2.2

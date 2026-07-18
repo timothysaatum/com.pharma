@@ -54,8 +54,9 @@ function deriveSetupState(user: User): SetupState {
     }
 
 
-    // Super admins are platform operators — they must onboard an org first.
-    if (user.is_super_admin) {
+    // Super admins are platform operators — they must onboard an org first,
+    // unless they already have branches assigned (org already set up).
+    if (user.is_super_admin && (user.assigned_branches?.length ?? 0) === 0) {
         return "needs_onboard";
     }
 

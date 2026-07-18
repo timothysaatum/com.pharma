@@ -129,3 +129,155 @@ async def setup_test_data(db: AsyncSession):
     await db.commit()
 
     return org, branch, user, drugs, customer
+
+
+@pytest_asyncio.fixture(scope="function")
+async def admin_role(db: AsyncSession, setup_test_data):
+    from app.models.user.user_model import Role
+    org = setup_test_data[0]
+    role = Role(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        name="Admin",
+        description="Administrator",
+        level=30,
+        permissions=["*"]
+    )
+    db.add(role)
+    await db.commit()
+    return role
+
+
+@pytest_asyncio.fixture(scope="function")
+async def pharmacist_role(db: AsyncSession, setup_test_data):
+    from app.models.user.user_model import Role
+    org = setup_test_data[0]
+    role = Role(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        name="Pharmacist",
+        description="Pharmacist role",
+        level=20,
+        permissions=["manage_prescriptions", "view_drugs", "view_inventory", "process_sales"]
+    )
+    db.add(role)
+    await db.commit()
+    return role
+
+
+@pytest_asyncio.fixture(scope="function")
+async def cashier_role(db: AsyncSession, setup_test_data):
+    from app.models.user.user_model import Role
+    org = setup_test_data[0]
+    role = Role(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        name="Cashier",
+        description="Cashier role",
+        level=10,
+        permissions=["process_sales", "view_drugs", "view_inventory"]
+    )
+    db.add(role)
+    await db.commit()
+    return role
+
+
+@pytest_asyncio.fixture(scope="function")
+async def admin_user(db: AsyncSession, setup_test_data, admin_role):
+    from app.models.user.user_model import User, UserRole
+    from app.core.security import hash_password
+    org, branch = setup_test_data[0], setup_test_data[1]
+    user = User(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        username="admin_user",
+        email="admin@pharmacy.com",
+        password_hash=hash_password("AdminPass123!"),
+        full_name="Admin User",
+        is_super_admin=False,
+        is_active=True,
+        must_change_password=False,
+        assigned_branches=[branch.id],
+    )
+    db.add(user)
+    await db.flush()
+    user_role = UserRole(user_id=user.id, role_id=admin_role.id)
+    db.add(user_role)
+    await db.commit()
+    return user
+
+
+@pytest_asyncio.fixture(scope="function")
+async def pharmacist_user(db: AsyncSession, setup_test_data, pharmacist_role):
+    from app.models.user.user_model import User, UserRole
+    from app.core.security import hash_password
+    org, branch = setup_test_data[0], setup_test_data[1]
+    user = User(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        username="pharmacist_user",
+        email="pharmacist@pharmacy.com",
+        password_hash=hash_password("PharmacistPass123!"),
+        full_name="Pharmacist User",
+        is_super_admin=False,
+        is_active=True,
+        must_change_password=False,
+        assigned_branches=[branch.id],
+    )
+    db.add(user)
+    await db.flush()
+    user_role = UserRole(user_id=user.id, role_id=pharmacist_role.id)
+    db.add(user_role)
+    await db.commit()
+    return user
+
+
+@pytest_asyncio.fixture(scope="function")
+async def cashier_user(db: AsyncSession, setup_test_data, cashier_role):
+    from app.models.user.user_model import User, UserRole
+    from app.core.security import hash_password
+    org, branch = setup_test_data[0], setup_test_data[1]
+    user = User(
+        id=uuid.uuid4(),
+        organization_id=org.id,
+        username="cashier_user",
+        email="cashier@pharmacy.com",
+        password_hash=hash_password("CashierPass123!"),
+        full_name="Cashier User",
+        is_super_admin=False,
+        is_active=True,
+        must_change_password=False,
+        assigned_branches=[branch.id],
+    )
+    db.add(user)
+    await db.flush()
+    user_role = UserRole(user_id=user.id, role_id=cashier_role.id)
+    db.add(user_role)
+    await db.commit()
+    return user
+
+
+@pytest_asyncio.fixture(scope="function")
+async def auth_headers(db: AsyncSession):
+    from app.core.security import create_access_token, hash_token
+    from app.models.user.user_model import UserSession
+    
+    async def _helper(user) -> dict[str, str]:
+        token = create_access_token(data={"sub": str(user.id), "username": user.username})
+        session = UserSession(
+            id=uuid.uuid4(),
+            user_id=user.id,
+            token_hash=hash_token(token),
+            refresh_token_hash=hash_token("dummy-refresh-token"),
+            ip_address="127.0.0.1",
+            user_agent="pytest",
+            expires_at=datetime.now(timezone.utc) + timedelta(days=1),
+            is_revoked=False,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc)
+        )
+        db.add(session)
+        await db.commit()
+        return {"Authorization": f"Bearer {token}"}
+        
+    return _helper

@@ -19,7 +19,7 @@ from app.models.inventory.inventory_model import Drug
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.customer.customer_model import Customer
 from app.models.user.user_model import User
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 from app.models.pricing.pricing_model import PriceContract
 from app.schemas.sales_schemas import SaleCreate, SaleItemCreate, RefundSaleRequest, SaleResponse
 from app.services.contracts.contract_verification_tokens import create_contract_verification_token

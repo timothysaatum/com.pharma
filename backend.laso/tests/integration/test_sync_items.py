@@ -18,7 +18,7 @@ from app.models.inventory.branch_inventory import (
 )
 from app.models.inventory.ledger import InventoryMovement
 from app.models.pharmacy.pharmacy_model import Branch, Organization
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.sales.sales_model import PurchaseOrder, Supplier
 from app.models.system_md.sys_models import SyncOperationReceipt

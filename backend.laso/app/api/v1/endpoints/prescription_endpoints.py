@@ -21,7 +21,7 @@ import uuid
 from app.core.deps import get_current_user, require_any_permission, require_permission
 from app.db.dependencies import get_db
 from app.models.user.user_model import User
-from app.models.precriptions.prescription_model import Prescription
+from app.models.prescriptions.prescription_model import Prescription
 from app.models.customer.customer_model import Customer
 from app.models.pharmacy.pharmacy_model import Organization
 from app.schemas.sales_schemas import SaleCreate

@@ -1,0 +1,16 @@
+-r requirements.txt
+
+# ── Development-only tools ──────────────────────────────────────────────────
+black==26.3.1
+flake8==7.0.0
+mypy==1.8.0
+mypy_extensions==1.1.0
+pytest==9.0.3
+pytest-asyncio==1.4.0
+pytest-cov==7.1.0
+pytest-json-report==1.5.0
+pytest-html==4.1.1
+pytest-metadata==3.1.1
+Faker==22.0.0
+coverage==7.13.1
+httpx==0.28.1

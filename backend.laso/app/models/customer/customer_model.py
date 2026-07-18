@@ -11,7 +11,7 @@ from app.models.core.mixins import SoftDeleteMixin, SoftDeleteMixin, SyncTrackin
 from app.models.pricing.pricing_model import InsuranceProvider, PriceContract
 
 if TYPE_CHECKING:
-    from app.models.precriptions.prescription_model import Prescription
+    from app.models.prescriptions.prescription_model import Prescription
     from app.models.sales.sales_model import Sale
 
 class Customer(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
