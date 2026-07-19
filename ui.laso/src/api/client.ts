@@ -239,6 +239,21 @@ export function parseApiError(err: unknown): string {
         if (Array.isArray(data.detail)) {
             return data.detail.map((d: { msg: string }) => d.msg).join(", ");
         }
+        // FastAPI detail object with nested message/errors
+        if (typeof data.detail === "object" && data.detail !== null) {
+            const dd = data.detail as Record<string, unknown>;
+            if (typeof dd.message === "string") return dd.message;
+            if (Array.isArray(dd.errors)) {
+                const msgs = dd.errors
+                    .map((e: unknown) => {
+                        if (!e || typeof e !== "object") return null;
+                        const err = e as { error?: string; error_type?: string };
+                        return typeof err.error === "string" ? err.error : null;
+                    })
+                    .filter((m: string | null): m is string => Boolean(m));
+                if (msgs.length > 0) return msgs.join("; ");
+            }
+        }
         if (typeof data.message === "string") return data.message;
         if (typeof data.error === "string") return data.error;
     }
