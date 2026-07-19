@@ -200,4 +200,37 @@ describe("CartPanel customer search", () => {
       );
     });
   });
+
+  it("shows local customers when offline without making an API call", async () => {
+    vi.mocked(localRead.searchCustomerMatches).mockResolvedValue([
+      {
+        id: "cust-456",
+        full_name: "Offline Customer",
+        phone: "+2339999999",
+        email: "offline@example.com",
+        loyalty_tier: "silver",
+        has_insurance: false,
+        contract_name: null,
+      },
+    ]);
+
+    // Simulate browser offline state
+    const originalOnLine = navigator.onLine;
+    Object.defineProperty(navigator, "onLine", { value: false, configurable: true });
+
+    renderCartPanel();
+
+    fireEvent.change(screen.getByPlaceholderText(/search by name, phone, email/i), {
+      target: { value: "offline" },
+    });
+
+    expect(await screen.findByText("Offline Customer")).toBeTruthy();
+    expect(screen.getByText(/\+2339999999/)).toBeTruthy();
+    expect(localRead.searchCustomerMatches).toHaveBeenCalledWith("offline", 10, "org-abc");
+    // API must NOT be called when browser reports offline
+    expect(apiClient.get).not.toHaveBeenCalled();
+
+    // Restore navigator.onLine for other tests
+    Object.defineProperty(navigator, "onLine", { value: originalOnLine, configurable: true });
+  });
 });
