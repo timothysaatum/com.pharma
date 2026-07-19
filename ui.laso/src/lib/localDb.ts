@@ -135,7 +135,10 @@ async function runMigrations(db: Database): Promise<void> {
       await ensureCrrMeta(db);
       await ensureAuditLogSchema(db);
   } catch (e) {
-      console.error("[localDb] Migration failed:", e);
+      const msg = (e && typeof e === "object" && "message" in e)
+        ? (e as { message: unknown }).message
+        : String(e);
+      console.error("[localDb] Migration failed:", msg);
       throw e;
   }
 }
@@ -1298,14 +1301,6 @@ async function tableExists(db: Database, name: string): Promise<boolean> {
   return rows.length > 0;
 }
 
-async function hasNonPkUniqueIndex(db: Database, table: string): Promise<string[]> {
-  const indexes = await db.select<{ name: string; unique: number; origin: string }[]>(
-    `PRAGMA index_list(${table})`
-  );
-  return indexes
-    .filter(idx => idx.unique === 1 && idx.origin !== 'pk')
-    .map(idx => idx.name);
-}
 
 /// Migration v22: unconditionally rebuild every CRR table with an explicit NOT
 /// NULL primary key, remove any forbidden UNIQUE indexes, and clear tracking
@@ -1318,14 +1313,11 @@ async function migrate_v22(db: Database): Promise<void> {
     // Collect table definitions for all CRR tables that exist.
     // Each definition uses TEXT NOT NULL PRIMARY KEY and DEFAULTs on all NOT
     // NULL non-PK columns, with no UNIQUE constraints.
+    // NOTE: we do NOT pre-drop unique indexes — inline UNIQUE constraints
+    // create auto-indexes that cannot be dropped independently. The table
+    // rebuild naturally drops them since the new DDL omits UNIQUE.
     for (const table of CRR_TABLES) {
       if (!(await tableExists(db, table))) continue;
-
-      // Drop any non-PK unique indexes on this table
-      const uniqueIndexes = await hasNonPkUniqueIndex(db, table);
-      for (const idx of uniqueIndexes) {
-        await db.execute(`DROP INDEX IF EXISTS "${idx}"`);
-      }
 
       // Build the corrected DDL and column list from a map so we don't repeat
       // the long literal blocks for every table.
