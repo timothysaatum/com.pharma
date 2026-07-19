@@ -929,6 +929,17 @@ export async function migrate_v16(db: Database): Promise<void> {
 
   // ── sales ─────────────────────────────────────────────────────────
   // Remove UNIQUE on sale_number, add DEFAULTs
+  // Ensure columns that v1's sales table doesn't have exist before SELECT
+  const addSaleCol = async (col: string) => {
+    try { await db.execute(`ALTER TABLE sales ADD COLUMN ${col}`); } catch { }
+  };
+  await addSaleCol("contract_type TEXT");
+  await addSaleCol("split_payment_details TEXT");
+  await addSaleCol("insurance_preauth_number TEXT");
+  await addSaleCol("prescriber_license TEXT");
+  await addSaleCol("refunded_by TEXT");
+  await addSaleCol("refund_reason TEXT");
+  await addSaleCol("refund_reference TEXT");
   const saleCols = `id, organization_id, branch_id, sale_number, customer_id,
     customer_name, subtotal, discount_amount, tax_amount, total_amount,
     price_contract_id, contract_name, contract_discount_percentage, contract_type,
