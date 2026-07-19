@@ -111,6 +111,7 @@ class SyncEngine {
     private _status: SyncStatus = "idle";
     private _isSyncing = false;
     private networkRetryAttempt = 0;
+    private _dbInitError: string | null = null;
 
     // Bound references kept so addEventListener and removeEventListener
     // receive the exact same function object — arrow functions passed inline
@@ -128,7 +129,9 @@ class SyncEngine {
         }
     };
     private readonly _onQueueChanged = () => {
-        void this.loadPersistedQueueState();
+        this.loadPersistedQueueState().catch((err) => {
+            console.warn("[SyncEngine] Queue change handler error:", err);
+        });
     };
 
     // Pending conflict records that need manual resolution
@@ -171,10 +174,18 @@ class SyncEngine {
         );
         window.addEventListener(SYNC_QUEUE_CHANGED_EVENT, this._onQueueChanged);
 
-        void this.loadPersistedQueueState();
+        this._dbInitError = null;
+        this.loadPersistedQueueState().catch((err) => {
+            this._dbInitError = err instanceof Error ? err.message : String(err);
+            console.error("[SyncEngine] Database initialization error:", this._dbInitError);
+        });
 
         if (navigator.onLine && isBackendReachable()) {
-            this.sync();
+            if (!this._dbInitError) {
+                this.sync();
+            } else {
+                this.setStatus("error");
+            }
         } else {
             this.setStatus("offline");
         }
@@ -229,13 +240,14 @@ class SyncEngine {
                 this.listeners = this.listeners.filter((l) => l !== fn);
             };
         }
-        void getPendingCount(scope).then((count) => {
-            getLastSyncAt(undefined, branchId ?? undefined).then((last) => {
-                if (active && this.listeners.includes(fn)) {
-                    if (branchId !== this.branchId || organizationId !== this.organizationId) return;
-                    fn(this._status, count, last);
-                }
-            });
+        Promise.all([
+            getPendingCount(scope).catch(() => 0),
+            getLastSyncAt(undefined, branchId ?? undefined).catch(() => null),
+        ]).then(([count, last]) => {
+            if (active && this.listeners.includes(fn)) {
+                if (branchId !== this.branchId || organizationId !== this.organizationId) return;
+                fn(this._status, count, last);
+            }
         });
         return () => {
             active = false;
@@ -249,6 +261,11 @@ class SyncEngine {
 
     async sync(): Promise<void> {
         if (!this.branchId || this._isSyncing) return;
+        if (this._dbInitError) {
+            console.warn("[SyncEngine] Sync skipped: database init failed:", this._dbInitError);
+            this.setStatus("error");
+            return;
+        }
         this._isSyncing = true;
         this.setStatus("syncing");
 
@@ -285,10 +302,24 @@ class SyncEngine {
             this.logError(err, "Sync failed");
             if (isOfflineError(err)) {
                 this.setStatus("offline");
+                this.scheduleNetworkRetry();
             } else {
                 this.setStatus("error");
+                // Fatal schema/init errors are non-retryable — they persist
+                // until the application is restarted.
+                const msg = err instanceof Error ? err.message : String(err);
+                const isSchemaError =
+                    msg.includes("CR-SQLite") ||
+                    msg.includes("cr-sqlite") ||
+                    msg.includes("crsql_as_crr") ||
+                    msg.includes("primary key") ||
+                    msg.includes("NOT NULL") ||
+                    msg.includes("unique index") ||
+                    this._dbInitError !== null;
+                if (!isSchemaError) {
+                    this.scheduleNetworkRetry();
+                }
             }
-            this.scheduleNetworkRetry();
         } finally {
             this._isSyncing = false;
         }
@@ -1008,13 +1039,22 @@ class SyncEngine {
             this.notify(0, null);
             return;
         }
-        const scope = this.queueScope();
-        this.pendingConflicts = await getPendingConflicts(scope);
-        this.pendingFailures = await getPendingFailures(MAX_PUSH_ATTEMPTS, scope);
-        this.notify(
-            await getPendingCount(scope),
-            await getLastSyncAt(undefined, this.branchId ?? undefined)
-        );
+        try {
+            const scope = this.queueScope();
+            this.pendingConflicts = await getPendingConflicts(scope);
+            this.pendingFailures = await getPendingFailures(MAX_PUSH_ATTEMPTS, scope);
+            this.notify(
+                await getPendingCount(scope),
+                await getLastSyncAt(undefined, this.branchId ?? undefined)
+            );
+        } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            this._dbInitError = msg;
+            this.pendingConflicts = [];
+            this.pendingFailures = [];
+            this.notify(0, null);
+            throw err;
+        }
     }
 
     async resolveConflict(
@@ -1081,6 +1121,11 @@ class SyncEngine {
     private onOnline(): void {
         console.info("[SyncEngine] Back online — triggering sync");
         this.networkRetryAttempt = 0;
+        if (this._dbInitError) {
+            console.warn("[SyncEngine] Online but DB init failed:", this._dbInitError);
+            this.setStatus("error");
+            return;
+        }
         this.sync();
     }
 
@@ -1099,11 +1144,12 @@ class SyncEngine {
         const branchId = this.branchId;
         const organizationId = this.organizationId;
         const scope = this.queueScope();
-        getPendingCount(scope).then((count) => {
-            getLastSyncAt(undefined, branchId ?? undefined).then((last) => {
-                if (branchId !== this.branchId || organizationId !== this.organizationId) return;
-                this.notify(count, last);
-            });
+        Promise.all([
+            getPendingCount(scope).catch(() => 0),
+            getLastSyncAt(undefined, branchId ?? undefined).catch(() => null),
+        ]).then(([count, last]) => {
+            if (branchId !== this.branchId || organizationId !== this.organizationId) return;
+            this.notify(count, last);
         });
     }
 
@@ -1125,11 +1171,15 @@ class SyncEngine {
     }
 
     private logError(err: unknown, context: string): void {
-        try {
-            const serialized = JSON.stringify(err, Object.getOwnPropertyNames(err), 2);
-            console.error(`[SyncEngine] ${context} details:`, serialized);
-        } catch (_) {
-            console.error(`[SyncEngine] ${context} details (non-serializable error):`, err);
+        const normalized =
+            err instanceof Error
+                ? err
+                : err && typeof err === "object" && "message" in err
+                    ? new Error(String((err as { message: unknown }).message))
+                    : new Error(String(err));
+        console.error(`[SyncEngine] ${context}:`, normalized.message);
+        if (normalized.stack) {
+            console.error(`[SyncEngine] ${context} stack:`, normalized.stack);
         }
     }
 

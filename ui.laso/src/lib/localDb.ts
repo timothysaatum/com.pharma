@@ -78,6 +78,7 @@ export async function getDb(): Promise<Database> {
     load: async (_path: string): Promise<Database> => {
       // Connection is already opened by Rust setup; the path arg is ignored.
       await runMigrations(_db!);
+      await ensureCrrTablesEnabled(_db!);
       return _db!;
     },
   };
@@ -125,16 +126,16 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 18) await migrate_v18(db);
       if (user_version < 19) await migrate_v19(db);
       if (user_version < 20) await migrate_v20(db);
+      if (user_version < 21) await migrate_v21(db);
       await ensureSuppressedCrrChangesSchema(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
       await ensureCrrMeta(db);
       await ensureAuditLogSchema(db);
-      await ensureCrrTablesEnabled(db);
   } catch (e) {
-      console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
-      if (IS_TAURI) throw e;
+      console.error("[localDb] Migration failed:", e);
+      throw e;
   }
 }
 
@@ -1279,6 +1280,480 @@ export async function ensureSuppressedCrrChangesSchema(db: Database): Promise<vo
     "CREATE INDEX IF NOT EXISTS idx_suppressed_crr_version ON suppressed_crr_changes(table_name, db_version)",
   );
 }
+// ─────────────────────────────────────────────────────────────────────────────
+// CRR TABLE SCHEMA HELPERS (used by migrate_v19)
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function tableExists(db: Database, name: string): Promise<boolean> {
+  const rows = await db.select<{ name: string }[]>(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name=$1", [name]
+  );
+  return rows.length > 0;
+}
+
+async function pkColumnIsNotNull(db: Database, table: string): Promise<boolean> {
+  const cols = await db.select<{ pk: number; notnull: number }[]>(
+    `PRAGMA table_info(${table})`
+  );
+  const pkCols = cols.filter(c => c.pk > 0);
+  if (pkCols.length === 0) return false;
+  return pkCols.every(c => c.notnull === 1);
+}
+
+async function hasNonPkUniqueIndex(db: Database, table: string): Promise<string[]> {
+  const indexes = await db.select<{ name: string; unique: number; origin: string }[]>(
+    `PRAGMA index_list(${table})`
+  );
+  return indexes
+    .filter(idx => idx.unique === 1 && idx.origin !== 'pk')
+    .map(idx => idx.name);
+}
+
+async function rebuildCrrTable(
+  db: Database,
+  table: string,
+  ddl: string,
+  selectCols: string,
+): Promise<void> {
+  const tmpName = `${table}_v19_fix`;
+  await db.execute(`DROP TABLE IF EXISTS ${tmpName}`);
+  await db.execute(ddl);
+  await db.execute(
+    `INSERT INTO ${tmpName} (${selectCols}) SELECT ${selectCols} FROM ${table}`
+  );
+  await db.execute(`DROP TABLE ${table}`);
+  await db.execute(`ALTER TABLE ${tmpName} RENAME TO ${table}`);
+}
+
+/// Migration v21: ensure every CRR table has an explicit NOT NULL primary key
+/// and no forbidden UNIQUE indexes.
+async function migrate_v21(db: Database): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    // ── Fix drug_batches ──────────────────────────────────────────────
+    if (await tableExists(db, "drug_batches") && !(await pkColumnIsNotNull(db, "drug_batches"))) {
+      await rebuildCrrTable(db, "drug_batches", `
+        CREATE TABLE drug_batches_v19_fix (
+          id                  TEXT NOT NULL PRIMARY KEY,
+          branch_id           TEXT NOT NULL DEFAULT '',
+          drug_id             TEXT NOT NULL DEFAULT '',
+          batch_number        TEXT NOT NULL DEFAULT '',
+          quantity            INTEGER NOT NULL DEFAULT 0,
+          remaining_quantity  INTEGER NOT NULL DEFAULT 0,
+          manufacturing_date  TEXT,
+          expiry_date         TEXT NOT NULL DEFAULT '',
+          cost_price          REAL,
+          selling_price       REAL,
+          supplier            TEXT,
+          purchase_order_id   TEXT,
+          sync_status         TEXT NOT NULL DEFAULT 'synced',
+          sync_version        INTEGER NOT NULL DEFAULT 1,
+          synced_at           TEXT,
+          updated_at          TEXT NOT NULL DEFAULT '',
+          created_at          TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, branch_id, drug_id, batch_number, quantity, remaining_quantity,
+         manufacturing_date, expiry_date, cost_price, selling_price, supplier,
+         purchase_order_id, sync_status, sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix customers ─────────────────────────────────────────────────
+    if (await tableExists(db, "customers") && !(await pkColumnIsNotNull(db, "customers"))) {
+      await rebuildCrrTable(db, "customers", `
+        CREATE TABLE customers_v19_fix (
+          id                      TEXT NOT NULL PRIMARY KEY,
+          organization_id         TEXT NOT NULL DEFAULT '',
+          customer_type           TEXT NOT NULL DEFAULT 'walk_in',
+          first_name              TEXT,
+          last_name               TEXT,
+          phone                   TEXT,
+          email                   TEXT,
+          date_of_birth           TEXT,
+          loyalty_points          INTEGER NOT NULL DEFAULT 0,
+          loyalty_tier            TEXT NOT NULL DEFAULT 'bronze',
+          insurance_provider_id   TEXT,
+          insurance_member_id     TEXT,
+          preferred_contract_id   TEXT,
+          is_active               INTEGER NOT NULL DEFAULT 1,
+          is_deleted              INTEGER NOT NULL DEFAULT 0,
+          sync_status             TEXT NOT NULL DEFAULT 'synced',
+          sync_version            INTEGER NOT NULL DEFAULT 1,
+          synced_at               TEXT,
+          updated_at              TEXT NOT NULL DEFAULT '',
+          created_at              TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, customer_type, first_name, last_name, phone, email,
+         date_of_birth, loyalty_points, loyalty_tier, insurance_provider_id,
+         insurance_member_id, preferred_contract_id, is_active, is_deleted,
+         sync_status, sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix prescriptions (PK + remove UNIQUE) ─────────────────────────
+    if (await tableExists(db, "prescriptions")) {
+      let needsRebuild = !(await pkColumnIsNotNull(db, "prescriptions"));
+      const uniqueIndexes = await hasNonPkUniqueIndex(db, "prescriptions");
+      if (uniqueIndexes.length > 0) {
+        // Drop any non-PK unique indexes first
+        for (const idx of uniqueIndexes) {
+          await db.execute(`DROP INDEX IF EXISTS "${idx}"`);
+        }
+        needsRebuild = true; // force rebuild since DDL included inline unique
+      }
+
+      if (needsRebuild) {
+        await rebuildCrrTable(db, "prescriptions", `
+          CREATE TABLE prescriptions_v19_fix (
+            id                    TEXT NOT NULL PRIMARY KEY,
+            organization_id       TEXT NOT NULL DEFAULT '',
+            branch_id             TEXT NOT NULL DEFAULT '',
+            prescription_number   TEXT NOT NULL DEFAULT '',
+            customer_id           TEXT NOT NULL DEFAULT '',
+            prescriber_name       TEXT NOT NULL DEFAULT '',
+            prescriber_license    TEXT NOT NULL DEFAULT '',
+            prescriber_phone      TEXT,
+            prescriber_address    TEXT,
+            issue_date            TEXT NOT NULL DEFAULT '',
+            expiry_date           TEXT NOT NULL DEFAULT '',
+            medications           TEXT NOT NULL DEFAULT '[]',
+            diagnosis             TEXT,
+            notes                 TEXT,
+            special_instructions  TEXT,
+            refills_allowed       INTEGER NOT NULL DEFAULT 0,
+            refills_remaining     INTEGER NOT NULL DEFAULT 0,
+            last_refill_date      TEXT,
+            status                TEXT NOT NULL DEFAULT 'active',
+            verified_by           TEXT,
+            verified_at           TEXT,
+            sync_status           TEXT NOT NULL DEFAULT 'synced',
+            sync_version          INTEGER NOT NULL DEFAULT 1,
+            synced_at             TEXT,
+            updated_at            TEXT NOT NULL DEFAULT '',
+            created_at            TEXT NOT NULL DEFAULT ''
+          )`,
+          `id, organization_id, branch_id, prescription_number, customer_id,
+           prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
+           issue_date, expiry_date, medications, diagnosis, notes, special_instructions,
+           refills_allowed, refills_remaining, last_refill_date, status, verified_by,
+           verified_at, sync_status, sync_version, synced_at, updated_at, created_at`
+        );
+      }
+    }
+
+    // ── Fix purchase_orders ────────────────────────────────────────────
+    if (await tableExists(db, "purchase_orders") && !(await pkColumnIsNotNull(db, "purchase_orders"))) {
+      await rebuildCrrTable(db, "purchase_orders", `
+        CREATE TABLE purchase_orders_v19_fix (
+          id                    TEXT NOT NULL PRIMARY KEY,
+          organization_id       TEXT NOT NULL DEFAULT '',
+          branch_id             TEXT NOT NULL DEFAULT '',
+          po_number             TEXT NOT NULL DEFAULT '',
+          supplier_id           TEXT NOT NULL DEFAULT '',
+          subtotal              REAL NOT NULL DEFAULT 0,
+          tax_amount            REAL NOT NULL DEFAULT 0,
+          shipping_cost         REAL NOT NULL DEFAULT 0,
+          total_amount          REAL NOT NULL DEFAULT 0,
+          status                TEXT NOT NULL DEFAULT 'draft',
+          ordered_by            TEXT NOT NULL DEFAULT '',
+          approved_by           TEXT,
+          approved_at           TEXT,
+          expected_delivery_date TEXT,
+          received_date         TEXT,
+          notes                 TEXT,
+          items_json            TEXT NOT NULL DEFAULT '[]',
+          sync_status           TEXT NOT NULL DEFAULT 'synced',
+          sync_version          INTEGER NOT NULL DEFAULT 1,
+          synced_at             TEXT,
+          updated_at            TEXT NOT NULL DEFAULT '',
+          created_at            TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, branch_id, po_number, supplier_id, subtotal, tax_amount,
+         shipping_cost, total_amount, status, ordered_by, approved_by, approved_at,
+         expected_delivery_date, received_date, notes, items_json, sync_status,
+         sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix drug_categories ────────────────────────────────────────────
+    if (await tableExists(db, "drug_categories") && !(await pkColumnIsNotNull(db, "drug_categories"))) {
+      await rebuildCrrTable(db, "drug_categories", `
+        CREATE TABLE drug_categories_v19_fix (
+          id              TEXT NOT NULL PRIMARY KEY,
+          organization_id TEXT NOT NULL DEFAULT '',
+          name            TEXT NOT NULL DEFAULT '',
+          description     TEXT,
+          parent_id       TEXT,
+          path            TEXT,
+          level           INTEGER NOT NULL DEFAULT 0,
+          is_deleted      INTEGER NOT NULL DEFAULT 0,
+          sync_status     TEXT NOT NULL DEFAULT 'synced',
+          sync_version    INTEGER NOT NULL DEFAULT 1,
+          synced_at       TEXT,
+          updated_at      TEXT NOT NULL DEFAULT '',
+          created_at      TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, name, description, parent_id, path, level,
+         is_deleted, sync_status, sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix price_contracts ──────────────────────────────────────────────
+    if (await tableExists(db, "price_contracts") && !(await pkColumnIsNotNull(db, "price_contracts"))) {
+      await rebuildCrrTable(db, "price_contracts", `
+        CREATE TABLE price_contracts_v19_fix (
+          id                        TEXT NOT NULL PRIMARY KEY,
+          organization_id           TEXT NOT NULL DEFAULT '',
+          contract_code             TEXT NOT NULL DEFAULT '',
+          contract_name             TEXT NOT NULL DEFAULT '',
+          contract_type             TEXT NOT NULL DEFAULT 'standard',
+          is_default_contract       INTEGER NOT NULL DEFAULT 0,
+          discount_type             TEXT NOT NULL DEFAULT 'percentage',
+          discount_percentage       REAL NOT NULL DEFAULT 0,
+          applies_to_prescription_only INTEGER NOT NULL DEFAULT 0,
+          applies_to_otc            INTEGER NOT NULL DEFAULT 1,
+          applies_to_all_branches   INTEGER NOT NULL DEFAULT 1,
+          applicable_branch_ids     TEXT NOT NULL DEFAULT '[]',
+          effective_from            TEXT NOT NULL DEFAULT '',
+          effective_to              TEXT,
+          requires_verification     INTEGER NOT NULL DEFAULT 0,
+          requires_approval         INTEGER NOT NULL DEFAULT 0,
+          daily_usage_limit         INTEGER,
+          per_customer_usage_limit  INTEGER,
+          insurance_provider_id     TEXT,
+          requires_preauthorization INTEGER NOT NULL DEFAULT 0,
+          minimum_purchase_amount   REAL,
+          maximum_purchase_amount   REAL,
+          status                    TEXT NOT NULL DEFAULT 'active',
+          is_active                 INTEGER NOT NULL DEFAULT 1,
+          copay_amount              REAL,
+          copay_percentage          REAL,
+          is_deleted                INTEGER NOT NULL DEFAULT 0,
+          sync_status               TEXT NOT NULL DEFAULT 'synced',
+          sync_version              INTEGER NOT NULL DEFAULT 1,
+          synced_at                 TEXT,
+          updated_at                TEXT NOT NULL DEFAULT '',
+          created_at                TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, contract_code, contract_name, contract_type,
+         is_default_contract, discount_type, discount_percentage,
+         applies_to_prescription_only, applies_to_otc, applies_to_all_branches,
+         applicable_branch_ids, effective_from, effective_to,
+         requires_verification, requires_approval, daily_usage_limit,
+         per_customer_usage_limit, insurance_provider_id,
+         requires_preauthorization, minimum_purchase_amount,
+         maximum_purchase_amount, status, is_active, copay_amount,
+         copay_percentage, is_deleted, sync_status, sync_version, synced_at,
+         updated_at, created_at`
+      );
+    }
+
+    // ── Fix sales (PK + remove UNIQUE on sale_number) ──────────────────
+    if (await tableExists(db, "sales") && !(await pkColumnIsNotNull(db, "sales"))) {
+      const salesUniqueIndexes = await hasNonPkUniqueIndex(db, "sales");
+      for (const idx of salesUniqueIndexes) {
+        await db.execute(`DROP INDEX IF EXISTS "${idx}"`);
+      }
+      await rebuildCrrTable(db, "sales", `
+        CREATE TABLE sales_v19_fix (
+          id                            TEXT NOT NULL PRIMARY KEY,
+          organization_id               TEXT NOT NULL DEFAULT '',
+          branch_id                     TEXT NOT NULL DEFAULT '',
+          sale_number                   TEXT NOT NULL DEFAULT '',
+          customer_id                   TEXT,
+          customer_name                 TEXT,
+          subtotal                      REAL NOT NULL DEFAULT 0,
+          discount_amount               REAL NOT NULL DEFAULT 0,
+          tax_amount                    REAL NOT NULL DEFAULT 0,
+          total_amount                  REAL NOT NULL DEFAULT 0,
+          price_contract_id             TEXT,
+          contract_name                 TEXT,
+          contract_discount_percentage  REAL,
+          contract_type                 TEXT,
+          payment_method                TEXT NOT NULL DEFAULT 'cash',
+          payment_status                TEXT NOT NULL DEFAULT 'completed',
+          amount_paid                   REAL,
+          change_amount                 REAL NOT NULL DEFAULT 0,
+          payment_reference             TEXT,
+          split_payment_details         TEXT,
+          insurance_preauth_number      TEXT,
+          prescription_id               TEXT,
+          prescription_number           TEXT,
+          prescriber_name               TEXT,
+          prescriber_license            TEXT,
+          cashier_id                    TEXT NOT NULL DEFAULT '',
+          pharmacist_id                 TEXT,
+          insurance_claim_number        TEXT,
+          patient_copay_amount          REAL,
+          insurance_covered_amount      REAL,
+          insurance_verified            INTEGER NOT NULL DEFAULT 0,
+          insurance_verified_at         TEXT,
+          insurance_verified_by         TEXT,
+          notes                         TEXT,
+          status                        TEXT NOT NULL DEFAULT 'completed',
+          cancelled_at                  TEXT,
+          cancelled_by                  TEXT,
+          cancellation_reason           TEXT,
+          refund_amount                 REAL,
+          refunded_at                   TEXT,
+          refunded_by                   TEXT,
+          refund_reason                 TEXT,
+          refund_reference              TEXT,
+          receipt_printed               INTEGER NOT NULL DEFAULT 0,
+          receipt_emailed               INTEGER NOT NULL DEFAULT 0,
+          items_json                    TEXT NOT NULL DEFAULT '[]',
+          items_count                   INTEGER NOT NULL DEFAULT 0,
+          sync_status                   TEXT NOT NULL DEFAULT 'synced',
+          sync_version                  INTEGER NOT NULL DEFAULT 1,
+          synced_at                     TEXT,
+          updated_at                    TEXT NOT NULL DEFAULT '',
+          created_at                    TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, branch_id, sale_number, customer_id,
+         customer_name, subtotal, discount_amount, tax_amount, total_amount,
+         price_contract_id, contract_name, contract_discount_percentage,
+         contract_type, payment_method, payment_status, amount_paid,
+         change_amount, payment_reference, split_payment_details,
+         insurance_preauth_number, prescription_id, prescription_number,
+         prescriber_name, prescriber_license, cashier_id, pharmacist_id,
+         insurance_claim_number, patient_copay_amount, insurance_covered_amount,
+         insurance_verified, insurance_verified_at, insurance_verified_by,
+         notes, status, cancelled_at, cancelled_by, cancellation_reason,
+         refund_amount, refunded_at, refunded_by, refund_reason,
+         refund_reference, receipt_printed, receipt_emailed, items_json,
+         items_count, sync_status, sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix drugs ───────────────────────────────────────────────────────
+    if (await tableExists(db, "drugs") && !(await pkColumnIsNotNull(db, "drugs"))) {
+      const drugsUniqueIndexes = await hasNonPkUniqueIndex(db, "drugs");
+      for (const idx of drugsUniqueIndexes) {
+        await db.execute(`DROP INDEX IF EXISTS "${idx}"`);
+      }
+      await rebuildCrrTable(db, "drugs", `
+        CREATE TABLE drugs_v19_fix (
+          id                TEXT NOT NULL PRIMARY KEY,
+          organization_id   TEXT NOT NULL DEFAULT '',
+          name              TEXT NOT NULL DEFAULT '',
+          generic_name      TEXT,
+          brand_name        TEXT,
+          sku               TEXT,
+          barcode           TEXT,
+          category_id       TEXT,
+          drug_type         TEXT NOT NULL DEFAULT 'otc',
+          dosage_form       TEXT,
+          strength          TEXT,
+          manufacturer      TEXT,
+          supplier          TEXT,
+          requires_prescription INTEGER NOT NULL DEFAULT 0,
+          controlled_substance_schedule TEXT,
+          ndc_code          TEXT,
+          unit_price        REAL NOT NULL DEFAULT 0,
+          cost_price        REAL,
+          markup_percentage REAL,
+          tax_rate          REAL NOT NULL DEFAULT 0,
+          reorder_level     INTEGER NOT NULL DEFAULT 10,
+          reorder_quantity  INTEGER NOT NULL DEFAULT 50,
+          max_stock_level   INTEGER,
+          unit_of_measure   TEXT NOT NULL DEFAULT 'unit',
+          description       TEXT,
+          usage_instructions TEXT,
+          side_effects      TEXT,
+          contraindications TEXT,
+          storage_conditions TEXT,
+          image_url         TEXT,
+          is_active         INTEGER NOT NULL DEFAULT 1,
+          is_deleted        INTEGER NOT NULL DEFAULT 0,
+          sync_status       TEXT NOT NULL DEFAULT 'synced',
+          sync_version      INTEGER NOT NULL DEFAULT 1,
+          synced_at         TEXT,
+          updated_at        TEXT NOT NULL DEFAULT '',
+          created_at        TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, organization_id, name, generic_name, brand_name, sku, barcode,
+         category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+         requires_prescription, controlled_substance_schedule, ndc_code,
+         unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+         reorder_quantity, max_stock_level, unit_of_measure, description,
+         usage_instructions, side_effects, contraindications, storage_conditions,
+         image_url, is_active, is_deleted, sync_status, sync_version, synced_at,
+         updated_at, created_at`
+      );
+    }
+
+    // ── Fix branch_inventory ────────────────────────────────────────────
+    if (await tableExists(db, "branch_inventory") && !(await pkColumnIsNotNull(db, "branch_inventory"))) {
+      const biUniqueIndexes = await hasNonPkUniqueIndex(db, "branch_inventory");
+      for (const idx of biUniqueIndexes) {
+        await db.execute(`DROP INDEX IF EXISTS "${idx}"`);
+      }
+      await rebuildCrrTable(db, "branch_inventory", `
+        CREATE TABLE branch_inventory_v19_fix (
+          id                TEXT NOT NULL PRIMARY KEY,
+          branch_id         TEXT NOT NULL DEFAULT '',
+          drug_id           TEXT NOT NULL DEFAULT '',
+          quantity          INTEGER NOT NULL DEFAULT 0,
+          reserved_quantity INTEGER NOT NULL DEFAULT 0,
+          location          TEXT,
+          selling_price     REAL,
+          sync_status       TEXT NOT NULL DEFAULT 'synced',
+          sync_version      INTEGER NOT NULL DEFAULT 1,
+          synced_at         TEXT,
+          updated_at        TEXT NOT NULL DEFAULT '',
+          created_at        TEXT NOT NULL DEFAULT ''
+        )`,
+        `id, branch_id, drug_id, quantity, reserved_quantity, location,
+         selling_price, sync_status, sync_version, synced_at, updated_at, created_at`
+      );
+    }
+
+    // ── Fix audit_logs ──────────────────────────────────────────────────
+    if (await tableExists(db, "audit_logs") && !(await pkColumnIsNotNull(db, "audit_logs"))) {
+      await rebuildCrrTable(db, "audit_logs", `
+        CREATE TABLE audit_logs_v19_fix (
+          id                TEXT NOT NULL PRIMARY KEY,
+          organization_id   TEXT NOT NULL DEFAULT '',
+          user_id           TEXT,
+          user_full_name    TEXT,
+          action            TEXT NOT NULL DEFAULT '',
+          entity_type       TEXT,
+          entity_id         TEXT,
+          changes           TEXT,
+          ip_address        TEXT,
+          user_agent        TEXT,
+          context_metadata  TEXT,
+          created_at        TEXT NOT NULL DEFAULT '',
+          updated_at        TEXT NOT NULL DEFAULT '',
+          sync_status       TEXT NOT NULL DEFAULT 'synced',
+          sync_version      INTEGER NOT NULL DEFAULT 1,
+          last_synced_at    TEXT,
+          sync_hash         TEXT
+        )`,
+        `id, organization_id, user_id, user_full_name, action, entity_type,
+         entity_id, changes, ip_address, user_agent, context_metadata, created_at,
+         updated_at, sync_status, sync_version, last_synced_at, sync_hash`
+      );
+    }
+
+    // Clear CRR tracking flags so ensureCrrTablesEnabled re-detects from scratch
+    for (const table of CRR_TABLES) {
+      await db.execute(
+        "DELETE FROM sync_meta WHERE key = $1",
+        [`crr_enabled_${table}`]
+      );
+    }
+    resetCrrCache();
+
+    await db.execute("PRAGMA user_version = 21");
+    await db.execute("COMMIT");
+    console.log("[localDb] Migration v21 complete — CRR tables verified and repaired");
+  } catch (error) {
+    try { await db.execute("ROLLBACK"); } catch { }
+    console.error("[localDb] Migration v21 failed:", error);
+    throw error;
+  }
+}
 
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
   await db.execute(`
@@ -1373,7 +1848,7 @@ export async function ensureCrrMeta(db: Database): Promise<void> {
 export async function ensureAuditLogSchema(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS audit_logs (
-      id                TEXT PRIMARY KEY,
+      id                TEXT NOT NULL PRIMARY KEY,
       organization_id   TEXT NOT NULL,
       user_id           TEXT,
       user_full_name    TEXT,
