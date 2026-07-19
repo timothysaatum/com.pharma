@@ -22,7 +22,7 @@ import {
 import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
-import { apiClient, isBackendReachable } from "@/api/client";
+import { apiClient } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
@@ -123,23 +123,20 @@ function CustomerSearchWidget({
         abortRef.current = controller;
         debounceRef.current = setTimeout(async () => {
             setSearching(true);
+            let localMatches: CustomerMatch[] = [];
             try {
-                const localMatches = await localRead
+                localMatches = await localRead
                     .searchCustomerMatches(q, 10, organizationId)
                     .catch(() => [] as CustomerMatch[]);
 
-                if (!controller.signal.aborted && localMatches.length > 0) {
+                if (!controller.signal.aborted) {
                     setResults(localMatches);
-                    setOpen(true);
+                    setOpen(localMatches.length > 0);
                 }
 
-                if (!navigator.onLine || !isBackendReachable()) {
-                    if (!controller.signal.aborted) {
-                        setResults(localMatches);
-                        setOpen(true);
-                    }
-                    return;
-                }
+                // When the browser reports offline, skip the API call entirely
+                // to avoid noisy connection-refused console errors.
+                if (!navigator.onLine) return;
 
                 const { data } = await apiClient.get<{ matches: CustomerMatch[] }>(
                     "/customers/search",
@@ -152,17 +149,11 @@ function CustomerSearchWidget({
                 }
             } catch (err: unknown) {
                 if (controller.signal.aborted) return;
-                try {
-                    const matches = await localRead.searchCustomerMatches(q, 10, organizationId);
-                    if (!controller.signal.aborted) {
-                        setResults(matches);
-                        setOpen(true);
-                    }
-                } catch {
-                    if (!controller.signal.aborted) {
-                        setResults([]);
-                        setOpen(true);
-                    }
+                // API call failed (offline / unreachable) — local results
+                // are already displayed from the search above.
+                if (!controller.signal.aborted) {
+                    setResults(localMatches);
+                    setOpen(localMatches.length > 0);
                 }
             } finally {
                 if (!controller.signal.aborted) setSearching(false);
