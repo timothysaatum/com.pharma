@@ -499,7 +499,7 @@ class SyncEngine {
 
                 const request: Partial<PullRequest> = {
                     branch_id: this.branchId!,
-                    tables: LEGACY_SYNC_TABLES,
+                    tables: [...LEGACY_SYNC_TABLES, "customers"],
                 };
                 if (since !== null) {
                     request.last_sync_at = since;
@@ -887,7 +887,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.customers.length && !(await isCrrTable("customers"))) {
+        if (response.customers.length) {
             await upsertMany("customers", response.customers, [
                 "id", "organization_id", "customer_type", "first_name",
                 "last_name", "phone", "email", "date_of_birth",
