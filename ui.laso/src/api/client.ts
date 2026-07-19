@@ -36,6 +36,11 @@ export function isBackendReachable(): boolean {
     return backendReachable;
 }
 
+/** True when the backend has been proven unreachable (no optimistic timeout). */
+export function isBackendKnownUnreachable(): boolean {
+    return !backendReachable;
+}
+
 export function markBackendOffline(): void {
     const wasReachable = backendReachable;
     backendReachable = false;

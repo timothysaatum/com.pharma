@@ -16,6 +16,7 @@ vi.mock("@/api/client", () => ({
     get: vi.fn(),
   },
   isBackendReachable: () => backendReachable,
+  isBackendKnownUnreachable: () => !backendReachable,
 }));
 
 vi.mock("@/lib/localRead", () => ({
