@@ -264,6 +264,70 @@ class SalesService:
     # =========================================================================
 
     @staticmethod
+    async def _idempotent_replay_response(
+        db: AsyncSession,
+        sale: Sale,
+    ) -> ProcessSaleResponse:
+        sale_with_details = await build_sale_with_details(db, sale)
+        logger.info(
+            "sale_idempotent_replay sale_id=%s branch_id=%s",
+            sale.id,
+            sale.branch_id,
+        )
+        discount = Decimal(str(sale.discount_amount or 0))
+        return ProcessSaleResponse(
+            sale=sale_with_details,
+            inventory_updated=0,
+            batches_updated=0,
+            loyalty_points_awarded=0,
+            loyalty_tier_upgraded=False,
+            new_loyalty_tier=None,
+            low_stock_alerts_created=0,
+            expiry_alerts_created=0,
+            contract_applied=sale.contract_name or "Standard",
+            contract_discount_given=discount,
+            estimated_savings=discount,
+            success=True,
+            message="Sale was already processed; the original result was returned.",
+            warnings=["Idempotent checkout replay; no sale side effects were repeated."],
+        )
+
+    @staticmethod
+    async def _validate_idempotent_replay(
+        db: AsyncSession,
+        sale: Sale,
+        sale_data: SaleCreate,
+    ) -> None:
+        existing_items = (await db.execute(
+            select(SaleItem).where(SaleItem.sale_id == sale.id)
+        )).scalars().all()
+        persisted_quantities = {
+            str(item.drug_id): item.quantity for item in existing_items
+        }
+        requested_quantities = {
+            str(item.drug_id): item.quantity for item in sale_data.items
+        }
+
+        identity_fields_match = all((
+            str(sale.branch_id) == str(sale_data.branch_id),
+            str(sale.price_contract_id or "") == str(sale_data.price_contract_id or ""),
+            str(sale.customer_id or "") == str(sale_data.customer_id or ""),
+            (sale.customer_name or "") == (sale_data.customer_name or ""),
+            sale.payment_method == sale_data.payment_method,
+            str(sale.prescription_id or "") == str(sale_data.prescription_id or ""),
+            persisted_quantities == requested_quantities,
+        ))
+        amount_matches = (
+            sale_data.amount_paid is None
+            or _r2(_d(sale.amount_paid)) == _r2(_d(sale_data.amount_paid))
+        )
+        if not identity_fields_match or not amount_matches:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Checkout identity was reused with a different sale payload.",
+            )
+
+    @staticmethod
     async def process_sale(
         db: AsyncSession,
         sale_data: SaleCreate,
@@ -334,6 +398,33 @@ class SalesService:
                 )
             )
             organization = org_res.scalar_one()
+
+            # A checkout ID survives retries, process restarts, and the
+            # online-to-offline fallback. The branch row lock above serializes
+            # concurrent attempts for the same branch, so only the first can
+            # reach the mutation steps below.
+            if sale_data.client_sale_id:
+                existing_sale = await db.scalar(
+                    select(Sale).where(Sale.id == sale_data.client_sale_id)
+                )
+                if existing_sale:
+                    if (
+                        existing_sale.organization_id != user.organization_id
+                        or existing_sale.branch_id != sale_data.branch_id
+                    ):
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="Checkout identity is already used outside this branch.",
+                        )
+                    await SalesService._validate_idempotent_replay(
+                        db,
+                        existing_sale,
+                        sale_data,
+                    )
+                    return await SalesService._idempotent_replay_response(
+                        db,
+                        existing_sale,
+                    )
 
             # ------------------------------------------------------------------
             # 2. Customer
@@ -716,7 +807,7 @@ class SalesService:
             sale_number = await generate_sale_number(db, branch.code)
 
             sale = Sale(
-                id=uuid.uuid4(),
+                id=sale_data.client_sale_id or uuid.uuid4(),
                 organization_id=user.organization_id,
                 branch_id=sale_data.branch_id,
                 sale_number=sale_number,

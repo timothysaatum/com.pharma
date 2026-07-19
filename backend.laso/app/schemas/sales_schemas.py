@@ -220,6 +220,14 @@ class SaleCreate(SaleBase):
     5. Payment is processed
     """
     
+    client_sale_id: Optional[uuid.UUID] = Field(
+        None,
+        description=(
+            "Stable client checkout identity. Reusing it returns the original "
+            "sale without repeating inventory or payment side effects."
+        ),
+    )
+
     branch_id: uuid.UUID = Field(
         ...,
         description="Branch where sale is occurring"

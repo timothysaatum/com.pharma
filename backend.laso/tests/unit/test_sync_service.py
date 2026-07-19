@@ -133,6 +133,10 @@ def test_crr_table_columns_do_not_match_partial_column_names():
     assert "branch_id" not in columns
 
 
+def test_sales_crr_is_server_authoritative_and_cannot_bypass_sale_commands():
+    assert _CRR_TABLE_CONFIG["sales"]["server_authoritative"] is True
+
+
 @pytest.mark.asyncio
 async def test_publish_server_authoritative_price_contracts_are_not_branch_scoped(monkeypatch):
     only_price_contracts = {"price_contracts": _CRR_TABLE_CONFIG["price_contracts"]}

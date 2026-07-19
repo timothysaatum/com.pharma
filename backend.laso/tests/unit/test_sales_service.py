@@ -8,7 +8,8 @@ import pytest_asyncio
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 import uuid
-from sqlalchemy import select
+from fastapi import HTTPException
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -94,6 +95,147 @@ class TestProcessSale:
         assert response.sale.status == "completed"
         assert response.inventory_updated == 1
         assert response.sale.total_amount == Decimal("250.00")
+
+    async def test_process_sale_replays_client_identity_exactly_once(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """A lost HTTP response must not create a second sale or stock deduction."""
+        org, branch, user, drugs, customer = setup_test_data
+        drug = drugs[0]
+        batch = DrugBatch(
+            id=uuid.uuid4(),
+            drug_id=drug.id,
+            branch_id=branch.id,
+            batch_number="IDEMPOTENT-1",
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=20,
+            remaining_quantity=20,
+        )
+        inventory = BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=20,
+            reserved_quantity=0,
+            selling_price=Decimal("50.00"),
+        )
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-IDEMPOTENT",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add_all([batch, inventory, contract])
+        await db.commit()
+
+        checkout_id = uuid.uuid4()
+        sale_data = SaleCreate(
+            client_sale_id=checkout_id,
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[SaleItemCreate(drug_id=drug.id, quantity=3)],
+            payment_method="cash",
+            amount_paid=Decimal("150.00"),
+        )
+
+        first = await SalesService.process_sale(db, sale_data, user)
+        replay = await SalesService.process_sale(db, sale_data, user)
+
+        await db.refresh(inventory)
+        await db.refresh(batch)
+        sale_count = await db.scalar(
+            select(func.count()).select_from(Sale).where(Sale.id == checkout_id)
+        )
+        item_count = await db.scalar(
+            select(func.count()).select_from(SaleItem).where(SaleItem.sale_id == checkout_id)
+        )
+        movement_count = await db.scalar(
+            select(func.count()).select_from(InventoryMovement).where(
+                InventoryMovement.source_id == checkout_id,
+                InventoryMovement.movement_type == "sale",
+            )
+        )
+
+        assert first.sale.id == checkout_id
+        assert replay.sale.id == checkout_id
+        assert replay.inventory_updated == 0
+        assert "Idempotent checkout replay" in replay.warnings[0]
+        assert sale_count == 1
+        assert item_count == 1
+        assert movement_count == 1
+        assert inventory.quantity == 17
+        assert batch.remaining_quantity == 17
+
+    async def test_process_sale_rejects_client_identity_payload_change(
+        self,
+        db: AsyncSession,
+        setup_test_data,
+    ):
+        """A checkout identity cannot be used to mask a different cart."""
+        org, branch, user, drugs, customer = setup_test_data
+        drug = drugs[0]
+        batch = DrugBatch(
+            id=uuid.uuid4(),
+            drug_id=drug.id,
+            branch_id=branch.id,
+            batch_number="IDEMPOTENT-CONFLICT",
+            expiry_date=date.today() + timedelta(days=365),
+            quantity=20,
+            remaining_quantity=20,
+        )
+        inventory = BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=20,
+            reserved_quantity=0,
+            selling_price=Decimal("50.00"),
+        )
+        contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STD-IDEMPOTENT-CONFLICT",
+            contract_name="Standard",
+            contract_type="standard",
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add_all([batch, inventory, contract])
+        await db.commit()
+
+        checkout_id = uuid.uuid4()
+        original = SaleCreate(
+            client_sale_id=checkout_id,
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[SaleItemCreate(drug_id=drug.id, quantity=2)],
+            payment_method="cash",
+            amount_paid=Decimal("100.00"),
+        )
+        await SalesService.process_sale(db, original, user)
+        changed = original.model_copy(update={
+            "items": [SaleItemCreate(drug_id=drug.id, quantity=3)],
+            "amount_paid": Decimal("150.00"),
+        })
+
+        with pytest.raises(HTTPException) as exc_info:
+            await SalesService.process_sale(db, changed, user)
+
+        assert exc_info.value.status_code == 409
+        assert "different sale payload" in exc_info.value.detail
+        await db.refresh(inventory)
+        assert inventory.quantity == 18
 
     async def test_process_sale_records_batch_allocations_for_multi_batch_fefo(
         self,

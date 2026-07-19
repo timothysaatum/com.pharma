@@ -41,7 +41,7 @@ const AUDIT_LOG_COLUMNS = new Set([
     "sync_hash",
 ]);
 
-const SALE_COLUMNS = new Set([
+export const SALE_COLUMNS = new Set([
     "id",
     "organization_id",
     "branch_id",
@@ -55,14 +55,18 @@ const SALE_COLUMNS = new Set([
     "price_contract_id",
     "contract_name",
     "contract_discount_percentage",
+    "contract_type",
     "payment_method",
     "payment_status",
     "amount_paid",
     "change_amount",
     "payment_reference",
+    "split_payment_details",
+    "insurance_preauth_number",
     "prescription_id",
     "prescription_number",
     "prescriber_name",
+    "prescriber_license",
     "cashier_id",
     "pharmacist_id",
     "insurance_claim_number",
@@ -78,6 +82,9 @@ const SALE_COLUMNS = new Set([
     "cancellation_reason",
     "refund_amount",
     "refunded_at",
+    "refunded_by",
+    "refund_reason",
+    "refund_reference",
     "receipt_printed",
     "receipt_emailed",
     "items_json",
@@ -174,6 +181,36 @@ function pickColumns(
     return Object.fromEntries(
         Object.entries(record).filter(([key]) => columns.has(key))
     );
+}
+
+export function buildLocalSalePayload(
+    sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
+    items: Sale["items"] = sale.items ?? [],
+    now = new Date().toISOString(),
+): Record<string, unknown> {
+    const { items: _items, ...saleData } = sale;
+    const sanitizeNumber = (val: unknown, fallback = 0): number => {
+        const num = typeof val === "number" ? val : Number(val);
+        return Number.isFinite(num) ? num : fallback;
+    };
+    const rawPayload = {
+        ...saleData,
+        discount_amount: sanitizeNumber(
+            (saleData as Record<string, unknown>).discount_amount
+            ?? (saleData as Record<string, unknown>).total_discount_amount
+            ?? 0,
+        ),
+        tax_amount: sanitizeNumber((saleData as Record<string, unknown>).tax_amount),
+        subtotal: sanitizeNumber((saleData as Record<string, unknown>).subtotal),
+        total_amount: sanitizeNumber((saleData as Record<string, unknown>).total_amount),
+        items_json: JSON.stringify(items),
+        items_count: items.reduce((sum, item) => sum + (item?.quantity ?? 0), 0),
+        sync_status: "pending",
+        sync_version: 1,
+        updated_at: now,
+        created_at: sale.created_at ?? now,
+    };
+    return pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
 }
 
 export function nextSyncVersion(
@@ -305,26 +342,8 @@ export const writeLocal = {
     sale: async (
         sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string }
     ): Promise<void> => {
-        const { items, ...saleData } = sale;
-        const sanitizeNumber = (val: unknown, fallback = 0): number => {
-            const num = typeof val === 'number' ? val : Number(val);
-            return !isNaN(num) ? num : fallback;
-        };
-        
-        const rawPayload = {
-            ...saleData,
-            discount_amount: sanitizeNumber((saleData as Record<string, unknown>).discount_amount ??
-                (saleData as Record<string, unknown>).total_discount_amount ?? 0),
-            tax_amount: sanitizeNumber((saleData as Record<string, unknown>).tax_amount),
-            subtotal: sanitizeNumber((saleData as Record<string, unknown>).subtotal),
-            total_amount: sanitizeNumber((saleData as Record<string, unknown>).total_amount),
-            items_json: JSON.stringify(items ?? []),
-            items_count: (items ?? []).reduce(
-                (sum, item) => sum + (item?.quantity ?? 0),
-                0
-            ),
-        };
-        const payload = pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
+        const items = sale.items ?? [];
+        const payload = buildLocalSalePayload(sale, items);
         await upsertAndEnqueue(
             "sales",
             payload as Record<string, unknown>,
@@ -344,8 +363,8 @@ export const writeLocal = {
             user_full_name: sale.customer_name || "Walk-in Customer",
             changes: JSON.stringify({
                 sale_number: sale.sale_number,
-                total_amount: rawPayload.total_amount,
-                items_count: rawPayload.items_count,
+                total_amount: payload.total_amount,
+                items_count: payload.items_count,
             }),
         });
     },

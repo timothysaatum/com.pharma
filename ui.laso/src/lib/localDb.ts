@@ -13,11 +13,19 @@ const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in windo
 
 interface ExecResult { rowsAffected: number; lastInsertId?: number }
 
+export interface DbTransactionStatement {
+  sql: string;
+  values?: unknown[];
+  expectedRows?: number;
+  errorMessage?: string;
+}
+
 // Define a minimal interface for the Database object we use
 export interface Database {
   execute(query: string, values?: unknown[]): Promise<ExecResult>;
   select<T>(query: string, values?: unknown[]): Promise<T>;
   execute_batch(query: string): Promise<void>;
+  executeTransaction?(statements: DbTransactionStatement[]): Promise<ExecResult[]>;
   load(path: string): Promise<Database>;
 }
 
@@ -26,6 +34,9 @@ const MockDb: Database = {
   execute: async () => ({ rowsAffected: 0 }),
   select: async <T>(_: string): Promise<T> => ([] as unknown as T),
   execute_batch: async (_: string) => {},
+  executeTransaction: async () => {
+    throw new Error("Durable offline checkout is available in the desktop app only.");
+  },
   load: async () => MockDb,
 };
 
@@ -54,6 +65,16 @@ export async function getDb(): Promise<Database> {
     execute_batch: async (sql: string): Promise<void> => {
       await invoke<void>("db_execute_batch", { sql });
     },
+    executeTransaction: async (
+      statements: DbTransactionStatement[],
+    ): Promise<ExecResult[]> => invoke<ExecResult[]>("db_execute_transaction", {
+      statements: statements.map((statement) => ({
+        sql: statement.sql,
+        values: statement.values ?? [],
+        expected_rows: statement.expectedRows ?? null,
+        error_message: statement.errorMessage ?? null,
+      })),
+    }),
     load: async (_path: string): Promise<Database> => {
       // Connection is already opened by Rust setup; the path arg is ignored.
       await runMigrations(_db!);
@@ -102,6 +123,8 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 16) await migrate_v16(db);
       if (user_version < 17) await migrate_v17(db);
       if (user_version < 18) await migrate_v18(db);
+      if (user_version < 19) await migrate_v19(db);
+      if (user_version < 20) await migrate_v20(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
@@ -1216,6 +1239,41 @@ async function migrate_v18(db: Database): Promise<void> {
   await db.execute("PRAGMA user_version = 18");
 }
 
+export async function migrate_v19(db: Database): Promise<void> {
+  // Sales are commands with inventory, batch, prescription, and ledger side
+  // effects. They must use the receipt-backed protocol-v2 queue, never the
+  // generic CRR row merge path.
+  await db.execute(
+    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+    ["crr_enabled_sales", "0"],
+  );
+  await db.execute("PRAGMA user_version = 19");
+}
+
+export async function migrate_v20(db: Database): Promise<void> {
+  try {
+    await db.execute(
+      "ALTER TABLE offline_sales ADD COLUMN crr_start_db_version INTEGER NOT NULL DEFAULT 0",
+    );
+  } catch {
+    // The column can already exist after an interrupted migration retry.
+  }
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS suppressed_crr_changes (
+      table_name  TEXT NOT NULL,
+      db_version  INTEGER NOT NULL,
+      sale_id     TEXT NOT NULL,
+      reason      TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      PRIMARY KEY (table_name, db_version, sale_id)
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_suppressed_crr_version ON suppressed_crr_changes(table_name, db_version)",
+  );
+  await db.execute("PRAGMA user_version = 20");
+}
+
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS crr_renumber_audit (
@@ -1346,7 +1404,6 @@ const CRR_TABLES: readonly string[] = [
   "customers",
   "prescriptions",
   "purchase_orders",
-  "sales",
   "drugs",
   "drug_categories",
   "price_contracts",
@@ -1535,6 +1592,9 @@ const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
 let _crrCache: Record<string, boolean> | null = null;
 
 export async function isCrrTable(table: string): Promise<boolean> {
+  // A sale is a domain command, not a mergeable row. Its server-side effects
+  // are applied by SyncService._push_sale under an operation receipt.
+  if (table === "sales") return false;
   if (_crrCache === null) {
     const db = await getDb();
     const rows = await db.select<{ key: string; value: string }[]>(
@@ -1554,7 +1614,7 @@ export function resetCrrCache(): void {
 
 export const SYNC_QUEUE_CHANGED_EVENT = "laso:sync-queue-changed";
 
-function notifySyncQueueChanged(): void {
+export function notifySyncQueueChanged(): void {
   if (typeof window === "undefined") return;
   window.dispatchEvent(new CustomEvent(SYNC_QUEUE_CHANGED_EVENT));
 }
@@ -1616,12 +1676,13 @@ export async function enqueue(
   recordId: string,
   operation: "create" | "update" | "delete",
   syncVersion: number,
-  payload: Record<string, unknown>
+  payload: Record<string, unknown>,
+  operationIdOverride?: string,
 ): Promise<void> {
   // CRR tables are tracked by cr-sqlite's crsql_changes — skip the old sync_queue
   if (await isCrrTable(tableName)) return;
   const db = await getDb();
-  const operationId = crypto.randomUUID();
+  const operationId = operationIdOverride ?? crypto.randomUUID();
   await db.execute(
     `INSERT INTO sync_queue
        (operation_id, table_name, record_id, operation, sync_version, payload_json,
@@ -2079,10 +2140,23 @@ export async function getCrrPushChanges(
   const db = await getDb();
   const siteId = await getCrrSiteId();
   if (!siteId) return [];
+  return getCrrPushChangesFromDb(db, siteId, sinceDbVersion);
+}
+
+export async function getCrrPushChangesFromDb(
+  db: Pick<Database, "select">,
+  siteId: string,
+  sinceDbVersion = 0,
+): Promise<CrrChangeRow[]> {
   return db.select<CrrChangeRow[]>(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
-     WHERE site_id = ? AND db_version > ?
+     WHERE site_id = ? AND db_version > ? AND "table" <> 'sales'
+       AND NOT EXISTS (
+         SELECT 1 FROM suppressed_crr_changes suppressed
+         WHERE suppressed.table_name = crsql_changes."table"
+           AND suppressed.db_version = crsql_changes.db_version
+       )
      ORDER BY seq`,
     [siteId, sinceDbVersion]
   );
@@ -2117,9 +2191,11 @@ export async function applyCrrPullChangesToDb(
   db: Database,
   changes: CrrChangeRow[],
 ): Promise<void> {
+  const mergeableChanges = changes.filter((change) => change.table !== "sales");
+  if (mergeableChanges.length === 0) return;
   await db.execute("BEGIN IMMEDIATE");
   try {
-    for (const ch of changes) {
+    for (const ch of mergeableChanges) {
       await db.execute(
         `INSERT INTO crsql_changes ("table", pk, cid, val, col_version, db_version, site_id, cl, seq)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,

@@ -2,7 +2,7 @@
  * offlineSalesManager.ts
  * ======================
  * Robust offline-first sales queue management with:
- *   - Fail-fast sale recording with compensating rollback
+ *   - Atomic sale, queue, inventory, prescription, and journal persistence
  *   - Retry state coordinated with the durable sync queue
  *   - Duplicate detection and prevention
  *   - Inventory sync consistency
@@ -10,8 +10,12 @@
  *   - Audit trail for offline transactions
  */
 
-import { getDb } from "@/lib/localDb";
-import { writeLocal } from "@/lib/localWrite";
+import {
+  getDb,
+  notifySyncQueueChanged,
+  type DbTransactionStatement,
+} from "@/lib/localDb";
+import { buildLocalSalePayload } from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
 
 export interface OfflineSaleRecord {
@@ -35,13 +39,10 @@ const INITIAL_RETRY_DELAY_MS = 1000; // 1 second
 
 class OfflineSalesManager {
   /**
-   * Record a sale and compensate all completed local writes if a later step
-   * fails. The Tauri SQL guest API does not expose a multi-call transaction,
-   * so every failure must be surfaced and explicitly reversed.
-   * 
-   * Prescription refills and inventory are updated locally for immediate UX,
-   * but the sale remains the single queued server operation. The server applies
-   * those side effects atomically when processing sync protocol v2.
+   * Atomically persist the sale, its protocol-v2 sync envelope, local inventory
+   * projection, optional prescription projection, and audit trail. The Rust DB
+   * bridge holds one SQLite transaction for the complete statement list, so an
+   * unavailable item or prescription rolls back every write.
    */
   async recordSaleTransaction(
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
@@ -51,273 +52,251 @@ class OfflineSalesManager {
   ): Promise<{ success: true; saleId: string } | { success: false; error: string }> {
     const db = await getDb();
     const now = new Date().toISOString();
-    const appliedInventoryDeltas: Array<{ drug_id: string; delta: number }> = [];
-    let saleWritten = false;
-    let prescriptionDecremented = false;
 
     try {
-      const existing = await db.select<Array<{ id: string; sync_status: string }>>(
-        "SELECT id, sync_status FROM offline_sales WHERE idempotency_key = $1",
-        [idempotencyKey]
+      const validationError = this.validateTransaction(
+        sale,
+        items,
+        inventoryDeltas,
+        idempotencyKey,
       );
+      if (validationError) return { success: false, error: validationError };
 
+      const existing = await db.select<Array<{ id: string; idempotency_key: string }>>(
+        `SELECT id, idempotency_key FROM offline_sales
+         WHERE id = $1 OR idempotency_key = $2
+         LIMIT 1`,
+        [sale.id, idempotencyKey],
+      );
       if (existing.length > 0) {
-        return { success: true, saleId: existing[0].id };
-      }
-
-      // ─── Step 1: Validate prescription refills before proceeding ──────────────
-      if (sale.prescription_id) {
-        const refillStatus = await this.validatePrescriptionRefills(sale.prescription_id);
-        if (!refillStatus.valid) {
-          return { success: false, error: refillStatus.error };
+        if (existing[0].id === sale.id && existing[0].idempotency_key === idempotencyKey) {
+          return { success: true, saleId: sale.id };
         }
+        return {
+          success: false,
+          error: "Offline checkout identity is already assigned to a different sale.",
+        };
       }
 
-      await writeLocal.sale({ ...sale, items } as Parameters<typeof writeLocal.sale>[0]);
-      saleWritten = true;
-
-      for (const { drug_id, delta } of inventoryDeltas) {
-        await writeLocal.inventory(sale.branch_id, drug_id, delta, false);
-        appliedInventoryDeltas.push({ drug_id, delta });
+      if (!db.executeTransaction) {
+        return {
+          success: false,
+          error: "Durable offline checkout is unavailable outside the desktop app.",
+        };
       }
 
-      // ─── Step 2: Decrement prescription refills IMMEDIATELY (optimistic update) ──
-      if (sale.prescription_id) {
-        const decrementStatus = await this.decrementPrescriptionRefillsOffline(sale.prescription_id);
-        if (!decrementStatus.success) {
-          throw new Error(
-            decrementStatus.error ?? "Failed to decrement prescription refills"
-          );
-        }
-        prescriptionDecremented = true;
-      }
-
-      await this.recordAuditRow(db, sale, items, inventoryDeltas, idempotencyKey, now);
+      const statements = this.buildTransactionStatements(
+        sale,
+        items,
+        inventoryDeltas,
+        idempotencyKey,
+        now,
+      );
+      await db.executeTransaction(statements);
+      notifySyncQueueChanged();
+      console.info(
+        `[OfflineSalesManager] offline_sale_recorded sale_id=${sale.id} `
+        + `items=${items.length} operation_id=${sale.id}`,
+      );
       return { success: true, saleId: sale.id };
     } catch (err) {
       console.error("[OfflineSalesManager] Transaction failed:", err);
-      await this.compensateFailedSale({
-        saleId: sale.id,
-        branchId: sale.branch_id,
-        prescriptionId: sale.prescription_id ?? null,
-        prescriptionDecremented,
-        saleWritten,
-        appliedInventoryDeltas,
-      });
+
+      // A concurrent retry can win the unique idempotency insert while this
+      // transaction waits for the SQLite lock. Treat that exact identity as a
+      // successful replay; all statements in the losing transaction rolled back.
+      const replay = await db.select<Array<{ id: string; idempotency_key: string }>>(
+        "SELECT id, idempotency_key FROM offline_sales WHERE id = $1 LIMIT 1",
+        [sale.id],
+      );
+      if (replay[0]?.idempotency_key === idempotencyKey) {
+        return { success: true, saleId: sale.id };
+      }
       return {
         success: false,
-        error: err instanceof Error ? err.message : "Failed to record sale transaction",
+        error: this.errorMessage(err),
       };
     }
   }
 
-  /**
-   * Validate that prescription has refills remaining before sale.
-   */
-  private async validatePrescriptionRefills(
-    prescriptionId: string
-  ): Promise<{ valid: boolean; error: string }> {
-    const db = await getDb();
-    const result = await db.select<Array<{ refills_remaining: number; status: string }>>(
-      `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
-      [prescriptionId]
-    );
-
-    if (!result.length) {
-      return { valid: false, error: "Prescription not found" };
-    }
-
-    const { refills_remaining, status } = result[0];
-
-    if (status !== "active") {
-      return { valid: false, error: `Prescription is ${status}, cannot be used for sale` };
-    }
-
-    if (refills_remaining <= 0) {
-      return { valid: false, error: "No refills remaining for this prescription" };
-    }
-
-    return { valid: true, error: "" };
-  }
-
-  /**
-   * Decrement prescription refills immediately (optimistic offline update).
-   * This is a local projection of the queued sale, not an independent
-   * prescription edit. Keep the server version unchanged so the pull that
-   * follows a successful sale push can apply the authoritative version.
-   */
-  private async decrementPrescriptionRefillsOffline(
-    prescriptionId: string
-  ): Promise<{ success: boolean; error?: string }> {
-    const db = await getDb();
-    const now = new Date().toISOString();
-
-    try {
-      // Get current prescription state
-      const result = await db.select<Array<{
-        refills_remaining: number;
-        sync_version: number;
-        status: string;
-      }>>(
-        `SELECT refills_remaining, sync_version, status FROM prescriptions WHERE id = $1`,
-        [prescriptionId]
-      );
-
-      if (!result.length) {
-        return { success: false, error: "Prescription not found" };
-      }
-
-      const { refills_remaining, sync_version } = result[0];
-
-      if (refills_remaining <= 0) {
-        return { success: false, error: "No refills remaining" };
-      }
-
-      // Decrement refills locally without creating a second sync operation.
-      const newRefillsRemaining = refills_remaining - 1;
-      const newStatus = newRefillsRemaining === 0 ? "filled" : "active";
-      const lastRefillDate = new Date().toISOString().split("T")[0]; // ISO date only
-
-      await db.execute(
-        `UPDATE prescriptions
-         SET refills_remaining = $1,
-             status = $2,
-             last_refill_date = $3,
-             sync_status = 'synced',
-             updated_at = $4
-         WHERE id = $5`,
-        [newRefillsRemaining, newStatus, lastRefillDate, now, prescriptionId]
-      );
-
-      console.info(
-        `[OfflineSalesManager] Decremented prescription ${prescriptionId} refills: ` +
-        `${refills_remaining} → ${newRefillsRemaining}, sync_version: ${sync_version}`
-      );
-
-      return { success: true };
-    } catch (err) {
-      return { success: false, error: err instanceof Error ? err.message : "Unknown error" };
-    }
-  }
-
-  private async recordAuditRow(
-    db: Awaited<ReturnType<typeof getDb>>,
+  private buildTransactionStatements(
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
     items: SaleItem[],
     inventoryDeltas: Array<{ drug_id: string; delta: number }>,
     idempotencyKey: string,
-    now: string
-  ): Promise<void> {
-      const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
+    now: string,
+  ): DbTransactionStatement[] {
+    const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
+    const salePayload = buildLocalSalePayload(
+      { ...sale, items } as Parameters<typeof buildLocalSalePayload>[0],
+      items,
+      now,
+    );
+    const queuePayload = {
+      ...salePayload,
+      items,
+      sync_protocol_version: 2,
+    };
+    const offlineRecord: Record<string, unknown> = {
+      id: sale.id,
+      idempotency_key: idempotencyKey,
+      sale_data: JSON.stringify(saleData),
+      sale_items: JSON.stringify(items),
+      inventory_updates: JSON.stringify(inventoryDeltas),
+      recorded_at: now,
+      sync_status: "pending",
+      retry_count: 0,
+      last_retry_at: null,
+      next_retry_at: null,
+      error_message: null,
+      crr_start_db_version: 0,
+      created_at: now,
+      updated_at: now,
+    };
 
-      const offlineRecord: OfflineSaleRecord = {
-        id: sale.id,
-        sale_data: saleData,
-        sale_items: items.map((item) => ({
-          drug_id: item.drug_id,
-          quantity: item.quantity,
-          unit_price: item.unit_price,
-          discount_percentage: (item as any).discount_percentage || 0,
-          discount_amount: (item as any).discount_amount || 0,
-        })),
-        inventory_updates: inventoryDeltas,
-        recorded_at: now,
-        sync_status: "pending",
-        retry_count: 0,
-        last_retry_at: null,
-        next_retry_at: null,
-        error_message: null,
-        idempotency_key: idempotencyKey,
-        created_at: now,
-        updated_at: now,
-      };
+    const statements: DbTransactionStatement[] = [
+      this.insertStatement(
+        "offline_sales",
+        offlineRecord,
+        "Offline checkout identity is already recorded.",
+      ),
+      {
+        sql: `UPDATE offline_sales
+              SET crr_start_db_version = COALESCE(
+                (SELECT MAX(db_version) FROM crsql_changes), 0
+              )
+              WHERE id = $1`,
+        values: [sale.id],
+        expectedRows: 1,
+        errorMessage: "Unable to checkpoint local sync state for the offline sale.",
+      },
+      this.insertStatement(
+        "sales",
+        salePayload,
+        "The local sale ID already exists without a matching offline audit.",
+      ),
+      this.insertStatement("sync_queue", {
+        operation_id: sale.id,
+        table_name: "sales",
+        record_id: sale.id,
+        operation: "create",
+        sync_version: 1,
+        payload_json: JSON.stringify(queuePayload),
+        created_offline_at: now,
+        attempts: 0,
+        last_attempt_at: null,
+        next_attempt_at: null,
+        error: null,
+        conflict_json: null,
+      }, "The sale already has a different sync operation."),
+    ];
 
-      const cols = Object.keys(offlineRecord);
-      const vals = cols.map((c) => {
-        const v = offlineRecord[c as keyof OfflineSaleRecord];
-        if (typeof v === "boolean") return v ? 1 : 0;
-        if (v === null) return null;
-        if (Array.isArray(v) || typeof v === "object") return JSON.stringify(v);
-        return v;
+    for (const { drug_id, delta } of inventoryDeltas) {
+      statements.push({
+        sql: `UPDATE branch_inventory
+              SET quantity = quantity + $1, updated_at = $2
+              WHERE branch_id = $3 AND drug_id = $4
+                AND quantity + $1 >= reserved_quantity`,
+        values: [delta, now, sale.branch_id, drug_id],
+        expectedRows: 1,
+        errorMessage:
+          `Insufficient available local stock for drug ${drug_id}; no part of the sale was recorded.`,
       });
-      const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+    }
 
-      await db.execute(
-        `INSERT OR REPLACE INTO offline_sales (${cols.join(", ")}) VALUES (${placeholders})`,
-        vals
-      );
+    if (sale.prescription_id) {
+      statements.push({
+        sql: `UPDATE prescriptions
+              SET refills_remaining = refills_remaining - 1,
+                  status = CASE WHEN refills_remaining - 1 = 0 THEN 'filled' ELSE 'active' END,
+                  last_refill_date = $1,
+                  sync_status = 'synced',
+                  updated_at = $2
+              WHERE id = $3 AND branch_id = $4
+                AND status = 'active' AND refills_remaining > 0`,
+        values: [now.slice(0, 10), now, sale.prescription_id, sale.branch_id],
+        expectedRows: 1,
+        errorMessage:
+          "Prescription is missing, inactive, out of refills, or belongs to another branch; no part of the sale was recorded.",
+      });
+    }
+
+    // Inventory and prescription writes above are local projections of the
+    // queued sale command. Suppress only the CRR changes created since this
+    // transaction's checkpoint so protocol v2 remains the sole server writer.
+    statements.push({
+      sql: `INSERT OR IGNORE INTO suppressed_crr_changes
+              (table_name, db_version, sale_id, reason, created_at)
+            SELECT DISTINCT "table", db_version, $1, 'offline_sale_projection', $2
+            FROM crsql_changes
+            WHERE db_version > (
+              SELECT crr_start_db_version FROM offline_sales WHERE id = $1
+            )
+              AND "table" IN ('branch_inventory', 'prescriptions')`,
+      values: [sale.id, now],
+    });
+
+    return statements;
   }
 
-  private async compensateFailedSale({
-    saleId,
-    branchId,
-    prescriptionId,
-    prescriptionDecremented,
-    saleWritten,
-    appliedInventoryDeltas,
-  }: {
-    saleId: string;
-    branchId: string;
-    prescriptionId: string | null;
-    prescriptionDecremented: boolean;
-    saleWritten: boolean;
-    appliedInventoryDeltas: Array<{ drug_id: string; delta: number }>;
-  }): Promise<void> {
-    const db = await getDb();
+  private insertStatement(
+    table: string,
+    record: Record<string, unknown>,
+    errorMessage: string,
+  ): DbTransactionStatement {
+    const columns = Object.keys(record);
+    return {
+      sql: `INSERT INTO ${table} (${columns.join(", ")}) VALUES (${columns
+        .map((_, index) => `$${index + 1}`)
+        .join(", ")})`,
+      values: columns.map((column) => record[column] ?? null),
+      expectedRows: 1,
+      errorMessage,
+    };
+  }
 
-    for (const { drug_id, delta } of [...appliedInventoryDeltas].reverse()) {
-      try {
-        await writeLocal.inventory(branchId, drug_id, -delta, false);
-      } catch (error) {
-        console.error(
-          `[OfflineSalesManager] Failed to restore inventory for ${drug_id}:`,
-          error
-        );
+  private validateTransaction(
+    sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
+    items: SaleItem[],
+    inventoryDeltas: Array<{ drug_id: string; delta: number }>,
+    idempotencyKey: string,
+  ): string | null {
+    if (!sale.id || !idempotencyKey || !sale.branch_id || !sale.organization_id || !sale.cashier_id) {
+      return "Offline sale identity, organization, branch, cashier, and idempotency key are required.";
+    }
+    if (items.length === 0) return "An offline sale must contain at least one item.";
+
+    const quantities = new Map<string, number>();
+    for (const item of items) {
+      if (!item.drug_id || !Number.isInteger(item.quantity) || item.quantity <= 0) {
+        return "Every offline sale item requires a drug and a positive whole-number quantity.";
+      }
+      quantities.set(item.drug_id, (quantities.get(item.drug_id) ?? 0) + item.quantity);
+    }
+    const deltas = new Map<string, number>();
+    for (const update of inventoryDeltas) {
+      if (!update.drug_id || !Number.isInteger(update.delta) || update.delta >= 0) {
+        return "Offline inventory updates must be negative whole-number sale deductions.";
+      }
+      deltas.set(update.drug_id, (deltas.get(update.drug_id) ?? 0) + update.delta);
+    }
+    if (quantities.size !== deltas.size) {
+      return "Offline sale items and inventory deductions do not match.";
+    }
+    for (const [drugId, quantity] of quantities) {
+      if (deltas.get(drugId) !== -quantity) {
+        return `Offline inventory deduction does not match the sold quantity for drug ${drugId}.`;
       }
     }
+    return null;
+  }
 
-    if (prescriptionDecremented && prescriptionId) {
-      try {
-        await db.execute(
-          `UPDATE prescriptions
-           SET refills_remaining = refills_remaining + 1,
-               status = 'active',
-               sync_status = 'synced',
-               updated_at = $1
-           WHERE id = $2`,
-          [new Date().toISOString(), prescriptionId]
-        );
-      } catch (error) {
-        console.error(
-          `[OfflineSalesManager] Failed to restore prescription ${prescriptionId}:`,
-          error
-        );
-      }
+  private errorMessage(error: unknown): string {
+    if (error instanceof Error) return error.message;
+    if (error && typeof error === "object" && "message" in error) {
+      return String((error as { message: unknown }).message);
     }
-
-    if (saleWritten) {
-      try {
-        await db.execute(
-          "DELETE FROM sync_queue WHERE table_name = 'sales' AND record_id = $1",
-          [saleId]
-        );
-        await db.execute("DELETE FROM sales WHERE id = $1", [saleId]);
-      } catch (error) {
-        console.error(
-          `[OfflineSalesManager] Failed to remove incomplete sale ${saleId}:`,
-          error
-        );
-      }
-    }
-
-    try {
-      await db.execute("DELETE FROM offline_sales WHERE id = $1", [saleId]);
-    } catch (error) {
-      console.error(
-        `[OfflineSalesManager] Failed to remove audit row for ${saleId}:`,
-        error
-      );
-    }
+    return typeof error === "string" ? error : "Failed to record sale transaction";
   }
 
   /**

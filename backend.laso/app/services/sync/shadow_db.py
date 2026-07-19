@@ -407,6 +407,10 @@ _CRR_TABLE_CONFIG: Dict[str, Dict[str, Any]] = {
         "strategy": "keep_both_renumber",
         "business_key": ["branch_id", "sale_number"],
         "bk_column": "sale_number",
+        # Sale creation is a command with inventory, batch, ledger, and
+        # prescription side effects. Clients must use SyncService._push_sale;
+        # a generic CRR row merge would bypass those invariants.
+        "server_authoritative": True,
     },
 }
 

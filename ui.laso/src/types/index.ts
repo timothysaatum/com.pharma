@@ -913,6 +913,8 @@ export interface SaleItemCreate {
 
 /** Matches SaleCreate Pydantic schema exactly */
 export interface SaleCreate {
+    /** Stable checkout identity reused by online retry and offline fallback. */
+    client_sale_id?: string;
     branch_id: string;
     price_contract_id: string;
     contract_verification_token?: string;

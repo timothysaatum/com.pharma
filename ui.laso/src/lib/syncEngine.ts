@@ -49,6 +49,7 @@ import type {
 import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
 export const LEGACY_SYNC_TABLES = [
+    "sales",
 ];
 
 export async function getCompatibleLocalColumns(
@@ -251,9 +252,11 @@ class SyncEngine {
         this.setStatus("syncing");
 
         try {
+            // Repair a missing queue envelope before the push. This covers an
+            // app restart without delaying recovery until a second sync cycle.
+            await this.reconcileOfflineSales();
             const pushResult = await this.push();
             const crrPushResult = await this.pushCrr();
-            await this.reconcileOfflineSales();
             await this.pullCrr();
             if (LEGACY_SYNC_TABLES.length > 0) {
                 await this.pull(pushResult.nextPullTimestamp ?? undefined);
@@ -563,6 +566,10 @@ class SyncEngine {
                         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
                         [CRR_PUSH_DB_VERSION_KEY, String(maxDbVersion)]
                     );
+                    await db.execute(
+                        "DELETE FROM suppressed_crr_changes WHERE db_version <= $1",
+                        [maxDbVersion],
+                    );
                 } else if (hadFailures) {
                     console.warn(
                         "[SyncEngine] CRR push had failed rows; retaining push cursor at %d",
@@ -593,13 +600,24 @@ class SyncEngine {
     private async reconcileOfflineSales(): Promise<void> {
         try {
             const pendingSales = await offlineSalesManager.getPendingSales();
+            const db = await getDb();
+            let repaired = 0;
             for (const sale of pendingSales) {
-                if (sale.sync_status !== "synced") {
-                    await enqueue("sales", sale.id, "create", 1, sale.sale_data as Record<string, unknown>);
-                }
+                if (sale.sync_status === "synced") continue;
+                const queued = await db.select<{ record_id: string }[]>(
+                    "SELECT record_id FROM sync_queue WHERE table_name = 'sales' AND record_id = $1 LIMIT 1",
+                    [sale.id],
+                );
+                if (queued.length > 0) continue;
+                await enqueue("sales", sale.id, "create", 1, {
+                    ...sale.sale_data,
+                    items: sale.sale_items,
+                    sync_protocol_version: 2,
+                }, sale.id);
+                repaired += 1;
             }
-            if (pendingSales.length > 0) {
-                console.log(`[SyncEngine] Re-queued ${pendingSales.length} offline sales for sync`);
+            if (repaired > 0) {
+                console.log(`[SyncEngine] Repaired ${repaired} missing offline sale queue envelope(s)`);
             }
         } catch (err) {
             this.logError(err, "Reconcile offline sales");
@@ -643,7 +661,7 @@ class SyncEngine {
 
                 // Filter out this site's own changes (already merged locally)
                 const remoteChanges = (response.crr_changes ?? []).filter(
-                    (c) => c.site_id !== siteId
+                    (c) => c.site_id !== siteId && c.table !== "sales"
                 );
                 if (remoteChanges.length > 0) {
                     await applyCrrPullChanges(remoteChanges);

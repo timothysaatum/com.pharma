@@ -27,7 +27,7 @@
  *   - All financial calculations are server-confirmed in ProcessSaleResponse
  */
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
@@ -49,6 +49,11 @@ import { DrugSearchPanel } from "@/components/pos/DrugSearchPanel";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { SaleSuccessModal } from "@/components/pos/SaleSuccessModal";
 
+interface CheckoutIntent {
+    saleId: string;
+    saleNumber: string;
+    idempotencyKey: string;
+}
 
 export default function POSPage() {
     const { user, activeBranchId } = useAuthStore();
@@ -140,8 +145,15 @@ export default function POSPage() {
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [checkoutError, setCheckoutError] = useState<string | null>(null);
     const [successResult, setSuccessResult] = useState<ProcessSaleResponse | null>(null);
+    const checkoutInFlightRef = useRef(false);
+    const checkoutIntentRef = useRef<CheckoutIntent | null>(null);
+
+    useEffect(() => {
+        checkoutIntentRef.current = null;
+    }, [activeBranchId]);
 
     const handleCheckout = useCallback(async () => {
+        if (checkoutInFlightRef.current) return;
         if (!activeBranchId) {
             setCheckoutError("Select an active branch before completing a sale.");
             return;
@@ -152,55 +164,66 @@ export default function POSPage() {
             return;
         }
 
+        checkoutInFlightRef.current = true;
         setIsSubmitting(true);
         setCheckoutError(null);
 
-        let payload = cart.buildSaleCreate(activeBranchId);
-        const selectedContract = cart.state.contract;
-        const requiresOnlineContractVerification = Boolean(
-            selectedContract &&
-            (
-                selectedContract.requires_verification ||
-                selectedContract.requires_approval ||
-                selectedContract.type === "insurance"
-            )
-        );
-        
-        // ─── Pre-flight check: Validate prescription refills if used ───────────────
-        if (payload.prescription_id) {
-            const db = await (await import("@/lib/localDb")).getDb();
-            const presResult = await db.select<Array<{ refills_remaining: number; status: string }>>(
-                `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
-                [payload.prescription_id]
+        try {
+            const intent = checkoutIntentRef.current ?? (() => {
+                const saleId = crypto.randomUUID();
+                const branchFragment = activeBranchId.replace(/-/g, "").slice(0, 8);
+                const randomFragment = saleId.replace(/-/g, "").slice(0, 8);
+                return {
+                    saleId,
+                    saleNumber: `OFFLINE-${branchFragment}-${Date.now().toString(36)}-${randomFragment}`,
+                    idempotencyKey: `sale:${saleId}`,
+                };
+            })();
+            checkoutIntentRef.current = intent;
+
+            let payload = {
+                ...cart.buildSaleCreate(activeBranchId),
+                client_sale_id: intent.saleId,
+            };
+            const selectedContract = cart.state.contract;
+            const requiresOnlineContractVerification = Boolean(
+                selectedContract &&
+                (
+                    selectedContract.requires_verification ||
+                    selectedContract.requires_approval ||
+                    selectedContract.type === "insurance"
+                )
             );
-            
-            if (!presResult.length) {
-                setCheckoutError("Prescription not found. Please select a valid prescription.");
-                setIsSubmitting(false);
-                return;
-            }
-            
-            const { refills_remaining, status } = presResult[0];
-            if (status !== "active") {
-                setCheckoutError(`Prescription is ${status} — cannot be used for this sale.`);
-                setIsSubmitting(false);
-                return;
-            }
-            
-            if (refills_remaining <= 0) {
-                setCheckoutError("No refills remaining on this prescription. Please use a different prescription.");
-                setIsSubmitting(false);
-                return;
-            }
-        }
         
-        const backendWasReachable = isBackendReachable();
-        const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
-            const saleId = crypto.randomUUID();
-            const branchFragment = activeBranchId.replace(/-/g, "").slice(0, 8);
-            const randomFragment = crypto.randomUUID().replace(/-/g, "").slice(0, 8);
-            const saleNumber =
-                `OFFLINE-${branchFragment}-${Date.now().toString(36)}-${randomFragment}`;
+            // ─── Pre-flight check: Validate prescription refills if used ───────────────
+            if (payload.prescription_id) {
+                const db = await (await import("@/lib/localDb")).getDb();
+                const presResult = await db.select<Array<{ refills_remaining: number; status: string }>>(
+                    `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
+                    [payload.prescription_id]
+                );
+            
+                if (!presResult.length) {
+                    setCheckoutError("Prescription not found. Please select a valid prescription.");
+                    return;
+                }
+            
+                const { refills_remaining, status } = presResult[0];
+                if (status !== "active") {
+                    setCheckoutError(`Prescription is ${status} — cannot be used for this sale.`);
+                    return;
+                }
+            
+                if (refills_remaining <= 0) {
+                    setCheckoutError("No refills remaining on this prescription. Please use a different prescription.");
+                    return;
+                }
+            }
+        
+            const backendWasReachable = isBackendReachable();
+            const recordOfflineSale = async (): Promise<ProcessSaleResponse> => {
+            const saleId = intent.saleId;
+            const saleNumber = intent.saleNumber;
             const now = new Date().toISOString();
             const totals = cart.totals;
             
@@ -317,13 +340,11 @@ export default function POSPage() {
                 drug_id: item.drug.id,
                 delta: -item.quantity,
             }));
-            const idempotencyKey = `${user?.id}-${payload.price_contract_id}-${crypto.randomUUID()}`;
-
             const recordResult = await offlineSalesManager.recordSaleTransaction(
                 offlineSale as unknown as Parameters<typeof offlineSalesManager.recordSaleTransaction>[0],
                 offlineSale.items,
                 inventoryDeltas,
-                idempotencyKey
+                intent.idempotencyKey
             );
 
             if (!recordResult.success) {
@@ -361,9 +382,9 @@ export default function POSPage() {
                 message: "Sale recorded offline - will sync when connection is restored",
                 warnings: ["Sale recorded offline and will be synced when back online"],
             };
-        };
+            };
 
-        try {
+            try {
             let result: ProcessSaleResponse;
 
             if (shouldUseOfflineSalePath({
@@ -401,7 +422,7 @@ export default function POSPage() {
             // Notify inventory page to refresh its counts
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
-        } catch (err) {
+            } catch (err) {
             const shouldRecordOffline = shouldFallbackToOfflineSaleAfterError({
                 offlineError: isOfflineError(err),
                 browserOnline: navigator.onLine,
@@ -415,20 +436,35 @@ export default function POSPage() {
                     setCheckoutError("This contract requires online verification before checkout.");
                     return;
                 }
-                const result = await recordOfflineSale();
-                setSuccessResult(result);
-                appEvents.emit("inventory:changed");
-                appEvents.emit("sales:changed");
+                try {
+                    const result = await recordOfflineSale();
+                    setSuccessResult(result);
+                    appEvents.emit("inventory:changed");
+                    appEvents.emit("sales:changed");
+                } catch (offlineError) {
+                    setCheckoutError(parseApiError(offlineError));
+                }
             } else {
                 setCheckoutError(parseApiError(err));
             }
+            }
+        } catch (error) {
+            setCheckoutError(parseApiError(error));
         } finally {
+            checkoutInFlightRef.current = false;
             setIsSubmitting(false);
         }
     }, [cart, activeBranchId, isOffline, user]);
 
     const handleNewSale = useCallback(() => {
         setSuccessResult(null);
+        setCheckoutError(null);
+        checkoutIntentRef.current = null;
+        cart.clearCart();
+    }, [cart]);
+
+    const handleClearCart = useCallback(() => {
+        checkoutIntentRef.current = null;
         setCheckoutError(null);
         cart.clearCart();
     }, [cart]);
@@ -503,7 +539,7 @@ export default function POSPage() {
                         onSetInsuranceVerified={cart.setInsuranceVerified}
                         onSetNotes={cart.setNotes}
                         onCheckout={handleCheckout}
-                        onClearCart={cart.clearCart}
+                        onClearCart={handleClearCart}
                     />
                 </div>
             </div>

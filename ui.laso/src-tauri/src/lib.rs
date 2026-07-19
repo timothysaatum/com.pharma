@@ -104,6 +104,7 @@ pub fn run() {
             secure_get,
             secure_delete,
             db::db_execute,
+            db::db_execute_transaction,
             db::db_select,
             db::db_execute_batch,
             db::db_test_savepoint,

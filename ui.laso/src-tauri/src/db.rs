@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rusqlite::{params_from_iter, Connection};
-use serde::Serialize;
+use rusqlite::{params_from_iter, Connection, TransactionBehavior};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -13,10 +13,19 @@ pub struct DbState {
     pub startup_warning: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct ExecResult {
     pub rows_affected: usize,
     pub last_insert_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionStatement {
+    pub sql: String,
+    #[serde(default)]
+    pub values: Vec<JsonValue>,
+    pub expected_rows: Option<usize>,
+    pub error_message: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -169,8 +178,11 @@ pub fn init_db(db_dir: Option<PathBuf>, ext_path: Option<PathBuf>) -> Result<DbS
 
 #[cfg(test)]
 mod startup_tests {
-    use super::{crsqlite_platform_dir, init_db, json_to_rusqlite, resolve_extension_path};
-    use rusqlite::types::Value;
+    use super::{
+        crsqlite_platform_dir, execute_transaction, init_db, json_to_rusqlite,
+        resolve_extension_path, TransactionStatement,
+    };
+    use rusqlite::{types::Value, Connection};
     use std::path::Path;
 
     #[test]
@@ -273,6 +285,91 @@ mod startup_tests {
         assert!(err.message.contains("Invalid SQLite blob transport value"));
     }
 
+    #[test]
+    fn guarded_transaction_commits_all_statements() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE inventory (id TEXT PRIMARY KEY, quantity INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO inventory VALUES ('drug-1', 5)", [])
+            .unwrap();
+
+        execute_transaction(
+            &mut conn,
+            vec![
+                TransactionStatement {
+                    sql: "UPDATE inventory SET quantity = quantity - ?1 WHERE id = ?2 AND quantity >= ?3".into(),
+                    values: vec![serde_json::json!(2), serde_json::json!("drug-1"), serde_json::json!(2)],
+                    expected_rows: Some(1),
+                    error_message: Some("insufficient stock".into()),
+                },
+                TransactionStatement {
+                    sql: "INSERT INTO inventory VALUES (?1, ?2)".into(),
+                    values: vec![serde_json::json!("drug-2"), serde_json::json!(9)],
+                    expected_rows: Some(1),
+                    error_message: None,
+                },
+            ],
+        )
+        .unwrap();
+
+        let rows: Vec<(String, i64)> = conn
+            .prepare("SELECT id, quantity FROM inventory ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(rows, vec![("drug-1".into(), 3), ("drug-2".into(), 9)]);
+    }
+
+    #[test]
+    fn guarded_transaction_rolls_back_every_statement_on_mismatch() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute(
+            "CREATE TABLE inventory (id TEXT PRIMARY KEY, quantity INTEGER)",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO inventory VALUES ('drug-1', 1)", [])
+            .unwrap();
+
+        let error = execute_transaction(
+            &mut conn,
+            vec![
+                TransactionStatement {
+                    sql: "INSERT INTO inventory VALUES (?1, ?2)".into(),
+                    values: vec![serde_json::json!("transient"), serde_json::json!(4)],
+                    expected_rows: Some(1),
+                    error_message: None,
+                },
+                TransactionStatement {
+                    sql: "UPDATE inventory SET quantity = quantity - ?1 WHERE id = ?2 AND quantity >= ?1".into(),
+                    values: vec![serde_json::json!(2), serde_json::json!("drug-1")],
+                    expected_rows: Some(1),
+                    error_message: Some("Insufficient local stock for drug drug-1".into()),
+                },
+            ],
+        )
+        .unwrap_err();
+
+        assert_eq!(error.message, "Insufficient local stock for drug drug-1");
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM inventory", [], |row| row.get(0))
+            .unwrap();
+        let quantity: i64 = conn
+            .query_row(
+                "SELECT quantity FROM inventory WHERE id = 'drug-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(quantity, 1);
+    }
+
     fn extension_matches_current_arch(path: &Path) -> bool {
         let Ok(bytes) = std::fs::read(path) else {
             return false;
@@ -319,6 +416,60 @@ pub fn db_execute(
         rows_affected,
         last_insert_id,
     })
+}
+
+/// Execute parameterized statements as one immediate SQLite transaction.
+///
+/// `expected_rows` turns optimistic checks such as stock availability into a
+/// transaction guard. A mismatch aborts and rolls back every preceding write.
+#[tauri::command]
+pub fn db_execute_transaction(
+    db: State<DbState>,
+    statements: Vec<TransactionStatement>,
+) -> Result<Vec<ExecResult>, DbError> {
+    let mut conn = db.conn.lock().map_err(|e| DbError {
+        message: format!("Lock error: {e}"),
+    })?;
+
+    execute_transaction(&mut conn, statements)
+}
+
+fn execute_transaction(
+    conn: &mut Connection,
+    statements: Vec<TransactionStatement>,
+) -> Result<Vec<ExecResult>, DbError> {
+    let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let mut results = Vec::with_capacity(statements.len());
+
+    for statement in statements {
+        let params: Vec<rusqlite::types::Value> = statement
+            .values
+            .into_iter()
+            .map(json_to_rusqlite)
+            .collect::<Result<_, _>>()?;
+        let rows_affected = transaction.execute(&statement.sql, params_from_iter(params.iter()))?;
+
+        if let Some(expected_rows) = statement.expected_rows {
+            if rows_affected != expected_rows {
+                return Err(DbError {
+                    message: statement.error_message.unwrap_or_else(|| {
+                        format!(
+                            "Transaction guard expected {expected_rows} affected row(s), got {rows_affected}"
+                        )
+                    }),
+                });
+            }
+        }
+
+        let last_insert_id = transaction.last_insert_rowid();
+        results.push(ExecResult {
+            rows_affected,
+            last_insert_id: (last_insert_id != 0).then_some(last_insert_id),
+        });
+    }
+
+    transaction.commit()?;
+    Ok(results)
 }
 
 /// Execute a read query (SELECT) and return rows as JSON objects

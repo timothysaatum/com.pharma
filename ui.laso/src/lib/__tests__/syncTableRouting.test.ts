@@ -6,16 +6,16 @@ import {
 } from "@/lib/syncEngine";
 
 describe("sync table routing", () => {
-  it("does not request CRR-migrated tables through legacy pull", () => {
+  it("routes side-effecting sales through legacy protocol-v2 sync only", () => {
     const migrated = [
       "drugs", "drug_categories", "price_contracts", "audit_logs",
       "branch_inventory", "drug_batches", "customers",
-      "prescriptions", "purchase_orders", "sales",
+      "prescriptions", "purchase_orders",
     ];
     for (const table of migrated) {
       expect(LEGACY_SYNC_TABLES).not.toContain(table);
     }
-    expect(LEGACY_SYNC_TABLES).toEqual([]);
+    expect(LEGACY_SYNC_TABLES).toEqual(["sales"]);
   });
 
   it("drops additive server fields missing from an older local schema", async () => {
@@ -32,14 +32,17 @@ describe("sync table routing", () => {
     expect(columns).toEqual(["id", "user_id", "action"]);
   });
 
-  it("runs CRR pull without invoking legacy pull when no legacy tables remain", async () => {
+  it("repairs the offline queue before push and pulls authoritative sales", async () => {
     const engine = syncEngine as any;
     const order: string[] = [];
     engine.branchId = "branch-edge";
     engine._isSyncing = false;
-    engine.push = vi.fn().mockResolvedValue({ nextPullTimestamp: null, hadFailures: false });
-    engine.pushCrr = vi.fn().mockResolvedValue(undefined);
-    engine.reconcileOfflineSales = vi.fn().mockResolvedValue(undefined);
+    engine.reconcileOfflineSales = vi.fn().mockImplementation(async () => { order.push("reconcile"); });
+    engine.push = vi.fn().mockImplementation(async () => {
+      order.push("push");
+      return { nextPullTimestamp: null, hadFailures: false };
+    });
+    engine.pushCrr = vi.fn().mockImplementation(async () => { order.push("crr-push"); });
     engine.pullCrr = vi.fn().mockImplementation(async () => { order.push("crr"); });
     engine.pull = vi.fn().mockImplementation(async () => { order.push("legacy"); });
     engine.scheduleNetworkRetry = vi.fn();
@@ -47,9 +50,9 @@ describe("sync table routing", () => {
 
     await engine.sync();
 
-    expect(order).toEqual(["crr"]);
+    expect(order).toEqual(["reconcile", "push", "crr-push", "crr", "legacy"]);
     expect(engine.pullCrr).toHaveBeenCalledOnce();
-    expect(engine.pull).not.toHaveBeenCalled();
+    expect(engine.pull).toHaveBeenCalledOnce();
     engine.branchId = null;
     engine._isSyncing = false;
   });
