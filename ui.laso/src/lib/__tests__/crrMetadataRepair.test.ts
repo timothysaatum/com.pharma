@@ -9,6 +9,7 @@ class CrrRepairDb implements Database {
   meta = new Map<string, string>();
   tables = new Set<string>(["purchase_orders"]);
   tracked = false;
+  crrRuntimeAvailable = true;
   crsqlCalls = 0;
 
   async execute(sql: string, values: unknown[] = []) {
@@ -26,10 +27,6 @@ class CrrRepairDb implements Database {
 
   async select<T>(sql: string, values: unknown[] = []): Promise<T> {
     const normalized = sql.replace(/\s+/g, " ").trim();
-    if (normalized.includes("sqlite_master")) {
-      const table = String(values[0]);
-      return (this.tables.has(table) ? [{ name: table }] : []) as T;
-    }
     if (normalized.includes("FROM sync_meta WHERE key =")) {
       const value = this.meta.get(String(values[0]));
       return (value === undefined ? [] : [{ value }]) as T;
@@ -39,6 +36,14 @@ class CrrRepairDb implements Database {
     }
     if (normalized.includes("FROM sqlite_master") && normalized.includes("type = 'trigger'")) {
       return [{ count: this.tracked ? 1 : 0 }] as T;
+    }
+    if (normalized === "SELECT 1 FROM crsql_changes LIMIT 1") {
+      if (!this.crrRuntimeAvailable) throw new Error("no such table: crsql_changes");
+      return [] as T;
+    }
+    if (normalized.includes("sqlite_master")) {
+      const table = String(values[0]);
+      return (this.tables.has(table) ? [{ name: table }] : []) as T;
     }
     return [] as T;
   }
@@ -77,6 +82,32 @@ describe("CRR metadata repair", () => {
     expect(db.meta.get("crr_enabled_purchase_orders")).toBe("1");
   });
 
+  it("accepts crsql_as_crr success when an empty table emits no row changes", async () => {
+    const db = new CrrRepairDb();
+    db.execute_batch = async (sql: string): Promise<void> => {
+      if (sql === "SELECT crsql_as_crr('purchase_orders')") {
+        db.crsqlCalls += 1;
+      }
+    };
+
+    await ensureCrrTablesEnabled(db, { strict: true });
+
+    expect(db.crsqlCalls).toBe(1);
+    expect(db.meta.get("crr_enabled_purchase_orders")).toBe("1");
+  });
+
+  it("keeps strict mode failure readable when the DB bridge returns an object", async () => {
+    const db = new CrrRepairDb();
+    db.crrRuntimeAvailable = false;
+    db.execute_batch = async (): Promise<void> => {
+      throw { message: "duplicate column name: __crsql_clock" };
+    };
+
+    await expect(ensureCrrTablesEnabled(db, { strict: true })).rejects.toThrow(
+      "purchase_orders: duplicate column name: __crsql_clock",
+    );
+  });
+
   it("recreates a legacy drugs table with CRR-safe defaults before enabling tracking", async () => {
     const db = new CrrRepairDb();
     db.tables = new Set<string>(["drugs"]);
@@ -98,10 +129,6 @@ describe("CRR metadata repair", () => {
     };
     db.select = async <T>(sql: string, values: unknown[] = []): Promise<T> => {
       const normalized = sql.replace(/\s+/g, " ").trim();
-      if (normalized.includes("sqlite_master")) {
-        const table = String(values[0]);
-        return (db.tables.has(table) ? [{ name: table }] : []) as T;
-      }
       if (normalized.includes("FROM sync_meta WHERE key =")) {
         const value = db.meta.get(String(values[0]));
         return (value === undefined ? [] : [{ value }]) as T;
@@ -111,6 +138,14 @@ describe("CRR metadata repair", () => {
       }
       if (normalized.includes("FROM sqlite_master") && normalized.includes("type = 'trigger'")) {
         return [{ count: db.tracked ? 1 : 0 }] as T;
+      }
+      if (normalized === "SELECT 1 FROM crsql_changes LIMIT 1") {
+        if (!db.crrRuntimeAvailable) throw new Error("no such table: crsql_changes");
+        return [] as T;
+      }
+      if (normalized.includes("sqlite_master")) {
+        const table = String(values[0]);
+        return (db.tables.has(table) ? [{ name: table }] : []) as T;
       }
       if (normalized === "PRAGMA table_info(drugs)") {
         return [

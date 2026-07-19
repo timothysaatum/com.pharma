@@ -1541,13 +1541,40 @@ async function hasCrrChangeTracking(db: Database, table: string): Promise<boolea
        FROM sqlite_master
        WHERE type = 'trigger'
          AND tbl_name = $1
-         AND name LIKE 'crsql_%'`,
+         AND name LIKE '%crsql%'`,
       [table],
     );
     return (triggers[0]?.count ?? 0) > 0;
   } catch {
     return false;
   }
+}
+
+async function hasCrrRuntime(db: Database): Promise<boolean> {
+  try {
+    await db.select<unknown[]>("SELECT 1 FROM crsql_changes LIMIT 1");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const record = error as Record<string, unknown>;
+    for (const key of ["message", "error", "details"]) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim() !== "") return value;
+    }
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return Object.prototype.toString.call(error);
+    }
+  }
+  return String(error);
 }
 
 /** Repair missing CRR triggers and reset the pull cursor if any table was missing. */
@@ -1587,8 +1614,8 @@ export async function ensureCrrTablesEnabled(
         if (schemaRepaired) repaired = true;
       }
       await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
-      if (!(await hasCrrChangeTracking(db, table))) {
-        throw new Error("crsql_as_crr completed but no crsql_changes were produced");
+      if (!(await hasCrrChangeTracking(db, table)) && !(await hasCrrRuntime(db))) {
+        throw new Error("crsql_as_crr completed but crsql_changes is unavailable");
       }
       await db.execute(
         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
@@ -1597,7 +1624,7 @@ export async function ensureCrrTablesEnabled(
       console.log(`[localDb] CRR enabled for ${table}`);
       repaired = true;
     } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
+      const message = errorMessage(e);
       failures.push(`${table}: ${message}`);
       console.error(`[localDb] CRR required for ${table} but unavailable:`, e);
       await db.execute(
