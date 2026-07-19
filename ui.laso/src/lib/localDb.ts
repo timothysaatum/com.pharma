@@ -125,6 +125,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 18) await migrate_v18(db);
       if (user_version < 19) await migrate_v19(db);
       if (user_version < 20) await migrate_v20(db);
+      await ensureSuppressedCrrChangesSchema(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
       await ensureBranchInventorySchema(db);
@@ -133,6 +134,7 @@ async function runMigrations(db: Database): Promise<void> {
       await ensureCrrTablesEnabled(db);
   } catch (e) {
       console.warn("[localDb] Migrations skipped or failed (likely MockDb).", e);
+      if (IS_TAURI) throw e;
   }
 }
 
@@ -1258,6 +1260,11 @@ export async function migrate_v20(db: Database): Promise<void> {
   } catch {
     // The column can already exist after an interrupted migration retry.
   }
+  await ensureSuppressedCrrChangesSchema(db);
+  await db.execute("PRAGMA user_version = 20");
+}
+
+export async function ensureSuppressedCrrChangesSchema(db: Database): Promise<void> {
   await db.execute(`
     CREATE TABLE IF NOT EXISTS suppressed_crr_changes (
       table_name  TEXT NOT NULL,
@@ -1271,7 +1278,6 @@ export async function migrate_v20(db: Database): Promise<void> {
   await db.execute(
     "CREATE INDEX IF NOT EXISTS idx_suppressed_crr_version ON suppressed_crr_changes(table_name, db_version)",
   );
-  await db.execute("PRAGMA user_version = 20");
 }
 
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
@@ -1396,6 +1402,114 @@ export async function ensureAuditLogSchema(db: Database): Promise<void> {
   }
 }
 
+interface LocalTableColumn {
+  name: string;
+  notnull?: number;
+  dflt_value?: unknown;
+  pk?: number;
+}
+
+async function getLocalTableColumns(
+  db: Database,
+  table: string,
+): Promise<LocalTableColumn[]> {
+  return db.select<LocalTableColumn[]>(`PRAGMA table_info(${table})`);
+}
+
+function needsCrrDefaultRepair(columns: LocalTableColumn[]): boolean {
+  return columns.some((column) => {
+    if (column.pk && column.pk > 0) return false;
+    return column.notnull === 1 && column.dflt_value == null;
+  });
+}
+
+async function recreateTableForCrr(
+  db: Database,
+  oldName: string,
+  newName: string,
+  ddl: string,
+  selectCols: string,
+): Promise<void> {
+  await db.execute(ddl);
+  await db.execute(`
+    INSERT INTO ${newName} (${selectCols})
+    SELECT ${selectCols} FROM ${oldName}
+  `);
+  await db.execute(`DROP TABLE ${oldName}`);
+  await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
+}
+
+async function ensureDrugsCrrCompatibleSchema(db: Database): Promise<boolean> {
+  const exists = await db.select<{ name: string }[]>(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
+    ["drugs"]
+  );
+  if (exists.length === 0) return false;
+
+  try {
+    await db.execute("ALTER TABLE drugs ADD COLUMN image_url TEXT");
+  } catch {
+    // Already present on databases that reached migration v17 cleanly.
+  }
+
+  const columns = await getLocalTableColumns(db, "drugs");
+  if (!needsCrrDefaultRepair(columns)) return false;
+
+  await recreateTableForCrr(
+    db,
+    "drugs",
+    "drugs_crr_repair",
+    `CREATE TABLE drugs_crr_repair (
+      id                TEXT NOT NULL PRIMARY KEY,
+      organization_id   TEXT NOT NULL DEFAULT '',
+      name              TEXT NOT NULL DEFAULT '',
+      generic_name      TEXT,
+      brand_name        TEXT,
+      sku               TEXT,
+      barcode           TEXT,
+      category_id       TEXT,
+      drug_type         TEXT NOT NULL DEFAULT 'otc',
+      dosage_form       TEXT,
+      strength          TEXT,
+      manufacturer      TEXT,
+      supplier          TEXT,
+      requires_prescription INTEGER NOT NULL DEFAULT 0,
+      controlled_substance_schedule TEXT,
+      ndc_code          TEXT,
+      unit_price        REAL NOT NULL DEFAULT 0,
+      cost_price        REAL,
+      markup_percentage REAL,
+      tax_rate          REAL NOT NULL DEFAULT 0,
+      reorder_level     INTEGER NOT NULL DEFAULT 10,
+      reorder_quantity  INTEGER NOT NULL DEFAULT 50,
+      max_stock_level   INTEGER,
+      unit_of_measure   TEXT NOT NULL DEFAULT 'unit',
+      description       TEXT,
+      usage_instructions TEXT,
+      side_effects      TEXT,
+      contraindications TEXT,
+      storage_conditions TEXT,
+      image_url         TEXT,
+      is_active         INTEGER NOT NULL DEFAULT 1,
+      is_deleted        INTEGER NOT NULL DEFAULT 0,
+      sync_status       TEXT NOT NULL DEFAULT 'synced',
+      sync_version      INTEGER NOT NULL DEFAULT 1,
+      synced_at         TEXT,
+      updated_at        TEXT NOT NULL DEFAULT '',
+      created_at        TEXT NOT NULL DEFAULT ''
+    )`,
+    `id, organization_id, name, generic_name, brand_name, sku, barcode,
+     category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+     requires_prescription, controlled_substance_schedule, ndc_code,
+     unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+     reorder_quantity, max_stock_level, unit_of_measure, description,
+     usage_instructions, side_effects, contraindications, storage_conditions,
+     image_url, is_active, is_deleted, sync_status, sync_version, synced_at,
+     updated_at, created_at`,
+  );
+  return true;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 const CRR_TABLES: readonly string[] = [
@@ -1411,32 +1525,27 @@ const CRR_TABLES: readonly string[] = [
 ];
 
 async function hasCrrChangeTracking(db: Database, table: string): Promise<boolean> {
-  let savepointStarted = false;
   try {
-    await db.execute("SAVEPOINT crr_tracking_probe");
-    savepointStarted = true;
-
-    const before = await db.select<{ count: number }[]>(
-      `SELECT COUNT(*) as count FROM crsql_changes WHERE "table" = $1`,
-      [table]
+    const rows = await db.select<{ count: number }[]>(
+      "SELECT COUNT(*) as count FROM crsql_master WHERE tbl_name = $1",
+      [table],
     );
-    await db.execute(
-      `INSERT INTO ${table} (id) VALUES ($1)`,
-      [`__crr_probe_${crypto.randomUUID()}`]
-    );
-    const after = await db.select<{ count: number }[]>(
-      `SELECT COUNT(*) as count FROM crsql_changes WHERE "table" = $1`,
-      [table]
-    );
-
-    await db.execute("ROLLBACK TO crr_tracking_probe");
-    await db.execute("RELEASE crr_tracking_probe");
-    return (after[0]?.count ?? 0) > (before[0]?.count ?? 0);
+    if ((rows[0]?.count ?? 0) > 0) return true;
   } catch {
-    if (savepointStarted) {
-      try { await db.execute("ROLLBACK TO crr_tracking_probe"); } catch { }
-      try { await db.execute("RELEASE crr_tracking_probe"); } catch { }
-    }
+    // Older broken installs can have cr-sqlite unavailable or partially loaded.
+  }
+
+  try {
+    const triggers = await db.select<{ count: number }[]>(
+      `SELECT COUNT(*) as count
+       FROM sqlite_master
+       WHERE type = 'trigger'
+         AND tbl_name = $1
+         AND name LIKE 'crsql_%'`,
+      [table],
+    );
+    return (triggers[0]?.count ?? 0) > 0;
+  } catch {
     return false;
   }
 }
@@ -1473,6 +1582,10 @@ export async function ensureCrrTablesEnabled(
     }
 
     try {
+      if (table === "drugs") {
+        const schemaRepaired = await ensureDrugsCrrCompatibleSchema(db);
+        if (schemaRepaired) repaired = true;
+      }
       await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
       if (!(await hasCrrChangeTracking(db, table))) {
         throw new Error("crsql_as_crr completed but no crsql_changes were produced");
@@ -2144,10 +2257,11 @@ export async function getCrrPushChanges(
 }
 
 export async function getCrrPushChangesFromDb(
-  db: Pick<Database, "select">,
+  db: Pick<Database, "execute" | "select">,
   siteId: string,
   sinceDbVersion = 0,
 ): Promise<CrrChangeRow[]> {
+  await ensureSuppressedCrrChangesSchema(db as Database);
   return db.select<CrrChangeRow[]>(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
@@ -2192,7 +2306,14 @@ export async function applyCrrPullChangesToDb(
   changes: CrrChangeRow[],
 ): Promise<void> {
   const mergeableChanges = changes.filter((change) => change.table !== "sales");
-  if (mergeableChanges.length === 0) return;
+  if (mergeableChanges.length === 0) {
+    await normalizeMergedCustomerReferences(db);
+    return;
+  }
+  const tables = new Set(mergeableChanges.map((change) => change.table));
+  if ([...tables].some((table) => CRR_TABLES.includes(table))) {
+    await ensureCrrTablesEnabled(db);
+  }
   await db.execute("BEGIN IMMEDIATE");
   try {
     for (const ch of mergeableChanges) {

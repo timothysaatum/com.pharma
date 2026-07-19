@@ -39,6 +39,7 @@ describe("CRR migration audit sync", () => {
       getCrrPushChanges: empty, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
       getPendingCrrRenumberAudits: vi.fn().mockResolvedValue([event]),
       markCrrRenumberAuditsUploaded: markUploaded,
+      ensureSuppressedCrrChangesSchema: noop,
       CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));
     vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
@@ -87,6 +88,7 @@ describe("CRR migration audit sync", () => {
       applyCustomerMergeDirectives: applyDirectives,
       getCrrSiteId: vi.fn().mockResolvedValue("local-site"),
       getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
       CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));
     vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
@@ -141,6 +143,7 @@ describe("CRR migration audit sync", () => {
       applyCustomerMergeDirectives: noop,
       getCrrSiteId: vi.fn().mockResolvedValue("local-site"),
       getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
       CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));
     vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
@@ -199,6 +202,7 @@ describe("CRR migration audit sync", () => {
       applyCustomerMergeDirectives: noop,
       getCrrSiteId: vi.fn().mockResolvedValue("local-site"),
       getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
       CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));
     vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
@@ -252,6 +256,7 @@ describe("CRR migration audit sync", () => {
       getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
       getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
       getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
       CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));
     vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
@@ -302,6 +307,7 @@ describe("CRR migration audit sync", () => {
       getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
       getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
       getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
       isCrrTable: vi.fn().mockResolvedValue(true), enqueue: noop,
       SYNC_QUEUE_CHANGED_EVENT: "test:queue",
     }));

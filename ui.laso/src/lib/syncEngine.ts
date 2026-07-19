@@ -30,6 +30,7 @@ import {
     applyCustomerMergeDirectives,
     getPendingCrrRenumberAudits, markCrrRenumberAuditsUploaded,
     isCrrTable, enqueue,
+    ensureSuppressedCrrChangesSchema,
     SYNC_QUEUE_CHANGED_EVENT,
 } from "@/lib/localDb";
 import {
@@ -566,6 +567,7 @@ class SyncEngine {
                         "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
                         [CRR_PUSH_DB_VERSION_KEY, String(maxDbVersion)]
                     );
+                    await ensureSuppressedCrrChangesSchema(db);
                     await db.execute(
                         "DELETE FROM suppressed_crr_changes WHERE db_version <= $1",
                         [maxDbVersion],

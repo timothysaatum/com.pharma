@@ -29,9 +29,9 @@ export default {
                 },
             },
             fontFamily: {
-                sans: ["'DM Sans'", "system-ui", "sans-serif"],
-                display: ["'Syne'", "system-ui", "sans-serif"],
-                mono: ["'JetBrains Mono'", "monospace"],
+                sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "'Segoe UI'", "sans-serif"],
+                display: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "BlinkMacSystemFont", "'Segoe UI'", "sans-serif"],
+                mono: ["'SFMono-Regular'", "Consolas", "'Liberation Mono'", "monospace"],
             },
             borderRadius: {
                 "2xl": "1rem",
