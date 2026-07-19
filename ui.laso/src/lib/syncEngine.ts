@@ -488,6 +488,14 @@ class SyncEngine {
     async pull(forceSince?: string): Promise<void> {
         const lastSyncAt = forceSince ?? await getLastSyncAt(undefined, this.branchId ?? undefined);
 
+        // Ensure customers are pulled at least once.  The shared last_sync_at
+        // timestamp is the sales watermark — customers synced before the legacy
+        // pull included them would never be returned by a delta pull.
+        const customerLastSync = await getLastSyncAt("customers", this.branchId ?? undefined);
+        if (customerLastSync === null) {
+            await this.pullTableFull("customers");
+        }
+
         let hasMore = true;
         let since: string | null = lastSyncAt;
         let totalRecords = 0;
@@ -742,6 +750,21 @@ class SyncEngine {
             console.warn("[SyncEngine] CRR pull error:", err);
             this.logError(err, "CRR pull failed");
             throw err;
+        }
+    }
+
+    // ── Full pull for a table that has never been synced ─────────────
+    private async pullTableFull(table: string): Promise<void> {
+        let hasMore = true;
+        while (hasMore) {
+            const request: Partial<PullRequest> = {
+                branch_id: this.branchId!,
+                tables: [table],
+            };
+            const response = await syncApi.pull(request as PullRequest);
+            await this.applyPullResponse(response);
+            await setLastSyncAt(response.sync_timestamp, table, this.branchId ?? undefined);
+            hasMore = response.has_more;
         }
     }
 
