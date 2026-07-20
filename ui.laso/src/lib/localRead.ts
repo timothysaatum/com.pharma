@@ -517,25 +517,45 @@ export const localRead = {
     let rows: Record<string, unknown>[] = [];
     try {
       rows = await db.select<Record<string, unknown>[]>(
-        `SELECT id, first_name, last_name, phone, email, loyalty_tier,
-                insurance_provider_id, insurance_member_id, preferred_contract_id
+        `SELECT CAST(id AS TEXT) AS id,
+                CAST(first_name AS TEXT) AS first_name,
+                CAST(last_name AS TEXT) AS last_name,
+                CAST(phone AS TEXT) AS phone,
+                CAST(email AS TEXT) AS email,
+                CAST(loyalty_tier AS TEXT) AS loyalty_tier,
+                CAST(insurance_provider_id AS TEXT) AS insurance_provider_id,
+                CAST(insurance_member_id AS TEXT) AS insurance_member_id,
+                CAST(preferred_contract_id AS TEXT) AS preferred_contract_id
            FROM customers
           WHERE ${qualifiers.join(" AND ")}
-          ORDER BY updated_at DESC
+          ORDER BY CAST(updated_at AS TEXT) DESC
           LIMIT $2`,
         values
       );
     } catch (selectErr: unknown) {
       const msg = selectErr instanceof Error ? selectErr.message : String(selectErr);
-      console.warn("[localRead] Customer search failed, retrying without ORDER BY:", msg);
+      console.warn("[localRead] Customer search failed, retrying via simple query:", msg);
       try {
         rows = await db.select<Record<string, unknown>[]>(
-          `SELECT id, first_name, last_name, phone, email, loyalty_tier,
-                  insurance_provider_id, insurance_member_id, preferred_contract_id
+          `SELECT CAST(id AS TEXT) AS id,
+                  CAST(first_name AS TEXT) AS first_name,
+                  CAST(last_name AS TEXT) AS last_name,
+                  CAST(phone AS TEXT) AS phone,
+                  CAST(email AS TEXT) AS email,
+                  CAST(loyalty_tier AS TEXT) AS loyalty_tier,
+                  CAST(insurance_provider_id AS TEXT) AS insurance_provider_id,
+                  CAST(insurance_member_id AS TEXT) AS insurance_member_id,
+                  CAST(preferred_contract_id AS TEXT) AS preferred_contract_id
              FROM customers
-            WHERE ${qualifiers.join(" AND ")}
+            WHERE is_deleted = 0
+              AND (
+                CAST(first_name AS TEXT) LIKE $1 OR
+                CAST(last_name AS TEXT) LIKE $1 OR
+                CAST(phone AS TEXT) LIKE $1 OR
+                CAST(email AS TEXT) LIKE $1
+              )
             LIMIT $2`,
-          values
+          [sqlLike(term), limit]
         );
       } catch { /* give up — return empty below */ }
     }
