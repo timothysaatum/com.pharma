@@ -103,6 +103,54 @@ export default function POSPage() {
     // ── Cart state ─────────────────────────────────────────────────────────────
     const cart = useCart(taxInclusive);
 
+    // ── Stock validation ─────────────────────────────────────────────────────
+    const [stockQuantities, setStockQuantities] = useState<Record<string, number>>({});
+    const stockRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const refreshStock = useCallback(async (branchId: string, items: Array<{ drug: Drug; quantity: number }>) => {
+        try {
+            const sq: Record<string, number> = {};
+            const errors: Record<string, string> = {};
+            for (const item of items) {
+                const info = await localRead.getSellableQuantity(branchId, item.drug.id);
+                if (info.notStocked) {
+                    errors[item.drug.id] = `${item.drug.name} is not stocked at the active branch.`;
+                    sq[item.drug.id] = 0;
+                } else {
+                    sq[item.drug.id] = info.sellable;
+                    if (info.sellable <= 0) {
+                        errors[item.drug.id] = `${item.drug.name} — No valid non-expired batches. Cannot sell.`;
+                    } else if (item.quantity > info.sellable) {
+                        errors[item.drug.id] = `Insufficient stock for ${item.drug.name}. Requested ${item.quantity}, available ${info.sellable}.`;
+                    }
+                }
+            }
+            setStockQuantities(sq);
+            cart.setStockQuantities(sq, errors);
+        } catch {
+            // Stock validation unavailable — fail open is safer than blocking sales
+            // due to a local DB error, but setStockQuantities will mark items as
+            // "unloaded" in validateCart so the user sees a clear message.
+            cart.setStockQuantities({}, {});
+        }
+    }, [cart]);
+
+    // Refresh stock whenever cart items change or branch changes
+    useEffect(() => {
+        if (stockRefreshRef.current) clearTimeout(stockRefreshRef.current);
+        if (!activeBranchId || cart.state.items.length === 0) {
+            setStockQuantities({});
+            cart.setStockQuantities({}, {});
+            return;
+        }
+        stockRefreshRef.current = setTimeout(() => {
+            refreshStock(activeBranchId, cart.state.items);
+        }, 100);
+        return () => {
+            if (stockRefreshRef.current) clearTimeout(stockRefreshRef.current);
+        };
+    }, [activeBranchId, cart.state.items, refreshStock]);
+
     // ── Contracts ──────────────────────────────────────────────────────────────
     const [contracts, setContracts] = useState<AvailableContract[]>([]);
     const [contractsLoading, setContractsLoading] = useState(true);
@@ -161,6 +209,28 @@ export default function POSPage() {
 
         if (!cart.isValid) {
             setCheckoutError(cart.validationErrors[0]?.message ?? "Complete the required checkout fields.");
+            return;
+        }
+
+        // Pre-checkout stock validation — re-query for latest accuracy
+        try {
+            for (const item of cart.state.items) {
+                const info = await localRead.getSellableQuantity(activeBranchId, item.drug.id);
+                if (info.notStocked) {
+                    setCheckoutError(`${item.drug.name} is not stocked at the active branch and cannot be sold.`);
+                    return;
+                }
+                if (info.sellable <= 0) {
+                    setCheckoutError(`${item.drug.name} has no sellable stock at this branch. Cannot complete sale.`);
+                    return;
+                }
+                if (item.quantity > info.sellable) {
+                    setCheckoutError(`Insufficient stock for ${item.drug.name}. Requested ${item.quantity}, but only ${info.sellable} available.`);
+                    return;
+                }
+            }
+        } catch (err) {
+            setCheckoutError("Unable to verify stock availability. Ensure you are online or synchronize inventory first.");
             return;
         }
 
@@ -463,6 +533,17 @@ export default function POSPage() {
         cart.clearCart();
     }, [cart]);
 
+    // Clear cart when branch changes
+    const prevBranchRef = useRef(activeBranchId);
+    useEffect(() => {
+        if (prevBranchRef.current && prevBranchRef.current !== activeBranchId) {
+            cart.clearCart();
+            setCheckoutError("Branch changed — cart cleared. Please review stock at the new branch.");
+            checkoutIntentRef.current = null;
+        }
+        prevBranchRef.current = activeBranchId;
+    }, [activeBranchId, cart]);
+
     const handleClearCart = useCallback(() => {
         checkoutIntentRef.current = null;
         setCheckoutError(null);
@@ -524,6 +605,7 @@ export default function POSPage() {
                         checkoutError={checkoutError}
                         isSubmitting={isSubmitting}
                         taxInclusive={taxInclusive}
+                        stockQuantities={stockQuantities}
                         onSetQuantity={cart.setQuantity}
                         onRemoveItem={cart.removeItem}
                         onSetPrescriptionVerified={cart.setPrescriptionVerified}

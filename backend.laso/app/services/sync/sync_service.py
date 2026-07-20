@@ -813,13 +813,37 @@ class SyncService:
                                 ),
                             ))
                             continue
-                        SyncService._append_receipt_result(
-                            receipt,
-                            accepted,
-                            conflicts,
-                            failed,
-                        )
-                        continue
+
+                        if receipt.result_kind == "accepted":
+                            # Replay the durable accepted result so retries are
+                            # idempotent — the mutation was already applied.
+                            SyncService._append_receipt_result(
+                                receipt,
+                                accepted,
+                                conflicts,
+                                failed,
+                            )
+                            continue
+
+                        if receipt.result_kind == "failed":
+                            # The previous attempt failed.  Delete the stale receipt
+                            # so the mutation can be retried — a non-accepted receipt
+                            # must not permanently block recovery.
+                            await db.delete(receipt)
+                            await db.flush()
+                            # Fall through to the savepoint below.
+
+                        # For conflicts: replay the conflict result so the client
+                        # can resolve it.  If the client already resolved it, the
+                        # queue entry was removed and this code won't be reached.
+                        if receipt.result_kind == "conflict":
+                            SyncService._append_receipt_result(
+                                receipt,
+                                accepted,
+                                conflicts,
+                                failed,
+                            )
+                            continue
 
                 async with db.begin_nested():  # savepoint per record
                     receipt = None
@@ -1362,6 +1386,7 @@ class SyncService:
                         db=db,
                         branch_id=branch_id,
                         items=normalized_items,
+                        organization_id=organization_id,
                     )
                 )
                 if inventory_error:
@@ -1371,6 +1396,34 @@ class SyncService:
                         success=False,
                         error=inventory_error,
                     ), None
+
+            # ------------------------------------------------------------------
+            # Batch dependency validation
+            # If any item references a batch_id that does not exist on the server,
+            # log a warning — the batch may not have been synced yet.  The
+            # _prepare_offline_sale_inventory call above already handles this for
+            # protocol-v2 sales, but for v1 we check here for diagnostics.
+            # ------------------------------------------------------------------
+            for item_dict in normalized_items:
+                raw_batch_id = item_dict.get("batch_id")
+                if raw_batch_id:
+                    try:
+                        bid = uuid.UUID(str(raw_batch_id))
+                        existing_batch = await db.scalar(
+                            select(DrugBatch.id).where(
+                                DrugBatch.id == bid,
+                                DrugBatch.branch_id == branch_id,
+                            )
+                        )
+                        if not existing_batch:
+                            logger.warning(
+                                "Sync: Sale %s references batch %s for drug %s "
+                                "that does not exist on the server. The batch "
+                                "may need to sync first.",
+                                record.local_id, bid, item_dict.get("drug_id"),
+                            )
+                    except (TypeError, ValueError):
+                        pass
 
             sale = Sale(**safe_data)
             sale.sync_status = "synced"
@@ -1954,15 +2007,36 @@ class SyncService:
         db: AsyncSession,
         branch_id: uuid.UUID,
         items: list[dict[str, Any]],
+        organization_id: uuid.UUID,
     ) -> tuple[
         Optional[tuple[dict[uuid.UUID, BranchInventory], dict[uuid.UUID, list[DrugBatch]]]],
         Optional[str],
     ]:
-        """Lock and validate all stock needed by a protocol-v2 offline sale."""
+        """Lock and validate all stock needed by a protocol-v2 offline sale.
+
+        Business rules:
+        1. Batches expiring today are still valid (``>= date.today()``).
+        2. NULL expiry_date is treated as non-expired (some products lack dates).
+        3. If items carry an explicit ``batch_id`` (the offline allocation), try
+           those specific batches first.  If they no longer have enough stock,
+           fall back to first-expiring-first-out from all valid batches for that
+           drug.
+        4. The error message includes the drug name so the UI can display an
+           actionable message instead of a generic failure.
+        """
         required: dict[uuid.UUID, int] = {}
+        # Collect per-item preferred batch IDs
+        preferred_batch_ids: dict[uuid.UUID, set[uuid.UUID]] = {}  # drug_id -> {batch_id, ...}
         for item in items:
             drug_id = item["drug_id"]
             required[drug_id] = required.get(drug_id, 0) + int(item["quantity"])
+            raw_batch_id = item.get("batch_id")
+            if raw_batch_id:
+                try:
+                    bid = uuid.UUID(str(raw_batch_id))
+                    preferred_batch_ids.setdefault(drug_id, set()).add(bid)
+                except (TypeError, ValueError):
+                    pass  # ignore invalid batch_id
 
         inventory_rows = (await db.execute(
             select(BranchInventory)
@@ -1987,32 +2061,99 @@ class SyncService:
                     f"Available: {available}, requested: {quantity}."
                 )
 
-        batch_rows = (await db.execute(
+        # Fetch ALL batches with remaining stock so we can try preferred
+        # batches first, then fall back to FEFO.
+        all_batch_rows = (await db.execute(
             select(DrugBatch)
             .where(
                 DrugBatch.branch_id == branch_id,
                 DrugBatch.drug_id.in_(required),
                 DrugBatch.remaining_quantity > 0,
-                DrugBatch.expiry_date > date.today(),
             )
             .order_by(DrugBatch.drug_id, DrugBatch.expiry_date)
             .with_for_update()
         )).scalars().all()
-        batches: dict[uuid.UUID, list[DrugBatch]] = {}
-        for batch in batch_rows:
-            batches.setdefault(batch.drug_id, []).append(batch)
+
+        today = date.today()
+
+        # Split into valid (non-expired, including today and NULL) and expired
+        valid_batches: dict[uuid.UUID, list[DrugBatch]] = {}
+        expired_batches: dict[uuid.UUID, list[DrugBatch]] = {}
+        for batch in all_batch_rows:
+            target = valid_batches if (
+                batch.expiry_date is None or batch.expiry_date >= today
+            ) else expired_batches
+            target.setdefault(batch.drug_id, []).append(batch)
+
+        # Build lookup by batch ID for quick preferred-batch resolution
+        all_batches_by_id: dict[uuid.UUID, DrugBatch] = {b.id: b for b in all_batch_rows}
 
         for drug_id, quantity in required.items():
-            available = sum(
-                batch.remaining_quantity for batch in batches.get(drug_id, [])
+            valid_available = sum(
+                batch.remaining_quantity for batch in valid_batches.get(drug_id, [])
             )
-            if available < quantity:
-                return None, (
-                    f"Insufficient non-expired batch stock for drug {drug_id}. "
-                    f"Available: {available}, requested: {quantity}."
+            if valid_available >= quantity:
+                continue
+
+            # Try preferred batches first (original offline allocation)
+            preferred = preferred_batch_ids.get(drug_id, set())
+            preferred_valid_available = 0
+            for bid in preferred:
+                b = all_batches_by_id.get(bid)
+                if b and (
+                    b.expiry_date is None or b.expiry_date >= today
+                ):
+                    preferred_valid_available += b.remaining_quantity
+
+            if preferred_valid_available >= quantity:
+                # The preferred batches (from the offline allocation) still have
+                # enough stock.  Rebuild valid_batches for this drug with only
+                # the preferred batches so _apply_offline_sale_inventory uses them.
+                preferred_list = [
+                    b for b in valid_batches.get(drug_id, [])
+                    if b.id in preferred
+                ]
+                if preferred_list:
+                    valid_batches[drug_id] = preferred_list
+                    continue
+
+            # If we get here, valid batches (including preferred) are
+            # insufficient. Compute totals for a detailed error message.
+            expired_available = sum(
+                batch.remaining_quantity for batch in expired_batches.get(drug_id, [])
+            )
+            total_available = valid_available + expired_available
+
+            drug_name = None
+            drug_obj = await db.scalar(
+                select(Drug.name).where(Drug.id == drug_id)
+            )
+            if drug_obj:
+                drug_name = drug_obj
+
+            # Check whether expired batches are the exact ones the offline sale
+            # allocated — this means the batch expired *after* the sale was made.
+            if preferred & set(b.id for b in expired_batches.get(drug_id, [])):
+                logger.warning(
+                    "Offline sale inventory: drug %s (%s) — the originally allocated "
+                    "batch(es) have expired since the sale.  Need %d units but only "
+                    "%d valid remain (total including expired: %d).  "
+                    "Batch(es): %s",
+                    drug_id, drug_name or "unknown",
+                    quantity, valid_available, total_available,
+                    {str(b.id) for b in expired_batches.get(drug_id, [])
+                     if b.id in preferred},
                 )
 
-        return (inventories, batches), None
+            return None, (
+                f"Insufficient non-expired batch stock for "
+                f"drug {drug_name or drug_id}. "
+                f"Requested: {quantity}, non-expired available: {valid_available}. "
+                f"Total stock including expired: {total_available}. "
+                f"Please restock or adjust inventory."
+            )
+
+        return (inventories, valid_batches), None
 
     @staticmethod
     async def _apply_offline_sale_inventory(

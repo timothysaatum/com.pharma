@@ -64,6 +64,10 @@ export interface CartState {
     insurancePreAuthNumber: string;
     insuranceVerified: boolean;
     notes: string;
+    /** drugId -> sellable quantity (from local DB) for stock validation */
+    stockQuantities: Record<string, number>;
+    /** drugId -> reason when an item's stock cannot be fully validated */
+    stockErrors: Record<string, string>;
 }
 
 // ── Actions ───────────────────────────────────────────────────────────────────
@@ -85,7 +89,8 @@ type CartAction =
     | { type: "SET_INSURANCE_PREAUTH"; number: string }
     | { type: "SET_INSURANCE_VERIFIED"; verified: boolean }
     | { type: "SET_NOTES"; notes: string }
-    | { type: "CLEAR_CART" };
+    | { type: "CLEAR_CART" }
+    | { type: "SET_STOCK_QUANTITIES"; quantities: Record<string, number>; errors: Record<string, string> };
 
 // ── Initial state ─────────────────────────────────────────────────────────────
 
@@ -102,6 +107,8 @@ const INITIAL_STATE: CartState = {
     insurancePreAuthNumber: "",
     insuranceVerified: false,
     notes: "",
+    stockQuantities: {},
+    stockErrors: {},
 };
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
@@ -243,6 +250,13 @@ function cartReducer(state: CartState, action: CartAction): CartState {
         case "SET_NOTES":
             return { ...state, notes: action.notes };
 
+        case "SET_STOCK_QUANTITIES":
+            return {
+                ...state,
+                stockQuantities: action.quantities,
+                stockErrors: action.errors,
+            };
+
         case "CLEAR_CART":
             return INITIAL_STATE;
 
@@ -328,6 +342,27 @@ function validateCart(
 
     if (state.items.length === 0) {
         errors.push({ field: "items", message: "Cart is empty" });
+    }
+
+    // Stock validation for each item
+    for (const item of state.items) {
+        const stockErr = state.stockErrors[item.drug.id];
+        if (stockErr) {
+            errors.push({ field: `stock_${item.drug.id}`, message: stockErr });
+            continue;
+        }
+        const available = state.stockQuantities[item.drug.id];
+        if (available === undefined) {
+            errors.push({
+                field: `stock_${item.drug.id}`,
+                message: `Stock information for ${item.drug.name} is not loaded. Try again.`,
+            });
+        } else if (item.quantity > available) {
+            errors.push({
+                field: `stock_${item.drug.id}`,
+                message: `Insufficient stock for ${item.drug.name}. Requested ${item.quantity}, available ${available}.`,
+            });
+        }
     }
 
     if (!state.contract) {
@@ -539,6 +574,11 @@ export function useCart(taxInclusive = false) {
         setPrescriptionVerified: useCallback(
             (drugId: string, verified: boolean) =>
                 dispatch({ type: "SET_PRESCRIPTION_VERIFIED", drugId, verified }),
+            []
+        ),
+        setStockQuantities: useCallback(
+            (quantities: Record<string, number>, errors: Record<string, string>) =>
+                dispatch({ type: "SET_STOCK_QUANTITIES", quantities, errors }),
             []
         ),
         setBatch: useCallback(

@@ -114,6 +114,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
     const [query, setQuery] = useState("");
     const [typeFilter, setTypeFilter] = useState<DrugType | "">("");
     const [drugs, setDrugs] = useState<Drug[]>([]);
+    const [stockQuantities, setStockQuantities] = useState<Record<string, number>>({});
     const [isLoading, setIsLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [focusedIndex, setFocusedIndex] = useState(-1);
@@ -150,6 +151,12 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                 );
                 if (!controller.signal.aborted) {
                     setDrugs(result.items.map(inventoryItemToDrug));
+                    const sq: Record<string, number> = {};
+                    for (const item of result.items) {
+                        const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
+                        sq[item.drug_id] = vbq;
+                    }
+                    setStockQuantities(sq);
                 }
                 return;
             }
@@ -166,6 +173,12 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
             );
             if (!controller.signal.aborted) {
                 setDrugs(result.items.map(inventoryItemToDrug));
+                const sq: Record<string, number> = {};
+                for (const item of result.items) {
+                    const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
+                    sq[item.drug_id] = vbq;
+                }
+                setStockQuantities(sq);
                 void cacheBranchInventoryRows(result.items);
             }
         } catch (err: unknown) {
@@ -188,6 +201,12 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                     );
                     if (!controller.signal.aborted) {
                         setDrugs(result.items.map(inventoryItemToDrug));
+                        const sq: Record<string, number> = {};
+                        for (const item of result.items) {
+                            const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
+                            sq[item.drug_id] = vbq;
+                        }
+                        setStockQuantities(sq);
                     }
                 } catch (localErr) {
                     if (!controller.signal.aborted) setError(parseApiError(localErr));
@@ -217,11 +236,16 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
         } else if (e.key === "Enter" && focusedIndex >= 0) {
             e.preventDefault();
             const drug = drugs[focusedIndex];
-            if (drug && !isOutOfStock(drug)) onAdd(drug);
+            if (drug && !isOutOfStock(drug) && !disabledDrugIds?.has(drug.id)) onAdd(drug);
         }
     };
 
-    const isOutOfStock = (_drug: Drug) => false; // Stock shown but not blocking — server validates
+    const getStockQuantity = useCallback((drug: Drug): number => {
+        return stockQuantities[drug.id] ?? 0;
+    }, [stockQuantities]);
+    const isOutOfStock = useCallback((drug: Drug): boolean => {
+        return (stockQuantities[drug.id] ?? 0) <= 0;
+    }, [stockQuantities]);
 
     return (
         <div className="flex flex-col h-full">
@@ -286,14 +310,17 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                             const isDisabled = disabledDrugIds?.has(drug.id);
                             const isFocused = idx === focusedIndex;
                             const unitPrice = Number(drug.unit_price);
+                            const stockQty = getStockQuantity(drug);
+                            const hasValidStock = stockQty > 0;
+                            const canAdd = !isDisabled && hasValidStock;
                             return (
                                 <button
                                     key={drug.id}
-                                    onClick={() => !isDisabled && onAdd(drug)}
-                                    disabled={isDisabled}
+                                    onClick={() => canAdd && onAdd(drug)}
+                                    disabled={!canAdd}
                                     className={`w-full flex items-center justify-between p-3 rounded-xl text-left transition-all ${isFocused
                                             ? "bg-brand-50 ring-1 ring-brand-300"
-                                            : isDisabled
+                                            : !canAdd
                                                 ? "bg-slate-50 opacity-60 cursor-default"
                                                 : "hover:bg-slate-50 active:bg-slate-100"
                                         }`}
@@ -321,6 +348,13 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                                                 </span>
                                             )}
                                         </div>
+                                        <div className="text-xs mt-0.5">
+                                            {!hasValidStock ? (
+                                                <span className="text-red-500 font-medium">Not stocked at this branch</span>
+                                            ) : (
+                                                <span className="text-green-600 font-medium">{stockQty} available</span>
+                                            )}
+                                        </div>
                                     </div>
                                     <div className="flex items-center gap-2 flex-shrink-0 ml-2">
                                         <span className="text-sm font-bold text-ink">
@@ -328,6 +362,8 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                                         </span>
                                         {isDisabled ? (
                                             <span className="text-xs text-brand-600 font-semibold">In cart</span>
+                                        ) : !hasValidStock ? (
+                                            <span className="text-xs text-red-500 font-semibold">Unavailable</span>
                                         ) : (
                                             <div className="w-7 h-7 rounded-lg bg-brand-600 flex items-center justify-center flex-shrink-0">
                                                 <Plus className="w-4 h-4 text-white" />

@@ -8,6 +8,7 @@
  *   - Inventory sync consistency
  *   - Comprehensive error recovery
  *   - Audit trail for offline transactions
+ *   - FEFO batch allocation at recording time
  */
 
 import {
@@ -17,6 +18,48 @@ import {
 } from "@/lib/localDb";
 import { buildLocalSalePayload } from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
+
+/**
+ * Allocate batches using FEFO (First Expiry, First Out) for a given drug
+ * and quantity at a branch. Returns the list of batch allocations needed.
+ * Throws if insufficient batch stock exists.
+ */
+async function allocateBatchesFefo(
+  branchId: string,
+  drugId: string,
+  quantity: number,
+): Promise<Array<{ batchId: string; allocatedQty: number }>> {
+  const db = await getDb();
+  const validBatches = await db.select<Array<{ id: string; remaining_quantity: number; expiry_date: string }>>(
+    `SELECT id, remaining_quantity, expiry_date
+     FROM drug_batches
+     WHERE branch_id = $1
+       AND drug_id = $2
+       AND remaining_quantity > 0
+       AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE('now'))
+     ORDER BY expiry_date ASC, created_at ASC`,
+    [branchId, drugId]
+  );
+
+  let remaining = quantity;
+  const allocations: Array<{ batchId: string; allocatedQty: number }> = [];
+
+  for (const batch of validBatches) {
+    if (remaining <= 0) break;
+    const take = Math.min(batch.remaining_quantity, remaining);
+    allocations.push({ batchId: batch.id, allocatedQty: take });
+    remaining -= take;
+  }
+
+  if (remaining > 0) {
+    throw new Error(
+      `Insufficient non-expired batch stock for drug ${drugId}. ` +
+      `Available from valid batches: ${quantity - remaining}, requested: ${quantity}.`
+    );
+  }
+
+  return allocations;
+}
 
 export interface OfflineSaleRecord {
   id: string;
@@ -85,14 +128,26 @@ class OfflineSalesManager {
         };
       }
 
-      const statements = this.buildTransactionStatements(
+    // Pre-compute FEFO batch allocations before building transaction statements
+    const batchAllocs = new Map<string, Array<{ batchId: string; allocatedQty: number }>>();
+    for (const { drug_id, delta } of inventoryDeltas) {
+      const qtyToSell = Math.abs(delta);
+      if (qtyToSell <= 0) continue;
+      const allocs = await this.allocateBatchesForDrug(db, sale.branch_id, drug_id, qtyToSell);
+      if (allocs.length > 0) {
+        batchAllocs.set(drug_id, allocs);
+      }
+    }
+
+    const statements = this.buildTransactionStatements(
         sale,
         items,
         inventoryDeltas,
+        batchAllocs,
         idempotencyKey,
         now,
-      );
-      await db.executeTransaction(statements);
+    );
+    await db.executeTransaction(statements);
       notifySyncQueueChanged();
       console.info(
         `[OfflineSalesManager] offline_sale_recorded sale_id=${sale.id} `
@@ -123,6 +178,7 @@ class OfflineSalesManager {
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
     items: SaleItem[],
     inventoryDeltas: Array<{ drug_id: string; delta: number }>,
+    batchAllocs: Map<string, Array<{ batchId: string; allocatedQty: number }>>,
     idempotencyKey: string,
     now: string,
   ): DbTransactionStatement[] {
@@ -132,9 +188,18 @@ class OfflineSalesManager {
       items,
       now,
     );
+    // Attach batch allocations to sync queue payload items
+    const itemsWithBatches = items.map((item) => {
+      const allocs = batchAllocs.get(item.drug_id) ?? [];
+      return {
+        ...item,
+        batch_allocations: allocs,
+        batch_id: allocs.length === 1 ? allocs[0].batchId : null,
+      };
+    });
     const queuePayload = {
       ...salePayload,
-      items,
+      items: itemsWithBatches,
       sync_protocol_version: 2,
     };
     const offlineRecord: Record<string, unknown> = {
@@ -191,6 +256,23 @@ class OfflineSalesManager {
       }, "The sale already has a different sync operation."),
     ];
 
+    // FEFO batch deduction (allocations pre-computed in recordSaleTransaction)
+    for (const [, allocs] of batchAllocs) {
+      for (const { batchId, allocatedQty } of allocs) {
+        statements.push({
+          sql: `UPDATE drug_batches
+                SET remaining_quantity = remaining_quantity - $1, updated_at = $2
+                WHERE id = $3
+                  AND remaining_quantity >= $1`,
+          values: [allocatedQty, now, batchId],
+          expectedRows: 1,
+          errorMessage:
+            `Batch ${batchId} has insufficient remaining quantity; ` +
+            `no part of the sale was recorded.`,
+        });
+      }
+    }
+
     for (const { drug_id, delta } of inventoryDeltas) {
       statements.push({
         sql: `UPDATE branch_inventory
@@ -237,6 +319,39 @@ class OfflineSalesManager {
     });
 
     return statements;
+  }
+
+  private async allocateBatchesForDrug(
+    db: any,
+    branchId: string,
+    drugId: string,
+    quantity: number,
+  ): Promise<Array<{ batchId: string; allocatedQty: number }>> {
+    const rows = await db.select<Array<{ id: string; remaining_quantity: number }>>(
+      `SELECT id, remaining_quantity FROM drug_batches
+       WHERE branch_id = $1
+         AND drug_id = $2
+         AND remaining_quantity > 0
+         AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE('now'))
+       ORDER BY expiry_date ASC, created_at ASC`,
+      [branchId, drugId]
+    );
+    let remaining = quantity;
+    const allocations: Array<{ batchId: string; allocatedQty: number }> = [];
+    for (const batch of rows) {
+      if (remaining <= 0) break;
+      const take = Math.min(Number(batch.remaining_quantity) || 0, remaining);
+      if (take <= 0) continue;
+      allocations.push({ batchId: batch.id, allocatedQty: take });
+      remaining -= take;
+    }
+    if (remaining > 0) {
+      throw new Error(
+        `Insufficient non-expired batch stock for drug ${drugId}. ` +
+        `Available: ${quantity - remaining}, requested: ${quantity}.`
+      );
+    }
+    return allocations;
   }
 
   private insertStatement(

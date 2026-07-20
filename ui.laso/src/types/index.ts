@@ -579,6 +579,11 @@ export interface BranchInventoryWithDetails extends BranchInventory {
      *   const available = inv.available_quantity ?? (inv.quantity - inv.reserved_quantity);
      */
     available_quantity?: number;
+    /**
+     * Sum of remaining_quantity from non-expired batches for this drug/branch.
+     * 0 if all batches are expired or none exist.
+     */
+    valid_batch_quantity?: number;
 }
 
 export interface DrugBatch extends TimestampFields, SyncFields {

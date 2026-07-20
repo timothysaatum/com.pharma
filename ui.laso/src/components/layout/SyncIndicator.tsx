@@ -139,12 +139,22 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                             ? `${blockedFailures} record${blockedFailures > 1 ? "s have" : " has"} stopped retrying`
                             : `${failures.length} record${failures.length > 1 ? "s" : ""} failed to sync`}
                     </p>
-                    <p
-                        className="mt-1 truncate text-[11px] leading-tight text-white/35"
-                        title={`${latestFailure?.table_name ?? "sync"}: ${latestFailureText}`}
-                    >
-                        {latestFailure?.table_name ?? "sync"}: {latestFailureText}
-                    </p>
+                    <div className="mt-1 space-y-0.5">
+                        {failures.slice(0, 3).map((failure, i) => (
+                            <p
+                                key={i}
+                                className="truncate text-[11px] leading-tight text-white/35"
+                                title={`${failure.table_name ?? "sync"}: ${failure.error ?? "Unknown error"}${failure.is_blocked ? " (blocked)" : ""}`}
+                            >
+                                {failure.table_name ?? "sync"}: {failure.error ?? "Unknown error"}
+                            </p>
+                        ))}
+                        {failures.length > 3 && (
+                            <p className="text-[11px] leading-tight text-white/25">
+                                …and {failures.length - 3} more
+                            </p>
+                        )}
+                    </div>
                 </>
             )}
             <SyncConflictModal

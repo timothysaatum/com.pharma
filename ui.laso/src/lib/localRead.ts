@@ -929,7 +929,14 @@ export const localRead = {
          d.drug_type as drug_type, d.requires_prescription as requires_prescription,
          d.organization_id as organization_id, d.generic_name as drug_generic_name,
          d.strength as drug_strength, d.tax_rate as drug_tax_rate,
-         d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level
+         d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level,
+         COALESCE((
+           SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
+           WHERE db2.drug_id = bi.drug_id
+             AND db2.branch_id = bi.branch_id
+             AND db2.remaining_quantity > 0
+             AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
+         ), 0) AS valid_batch_quantity
        FROM branch_inventory bi
        LEFT JOIN drugs d ON d.id = bi.drug_id
        ${where}
@@ -939,35 +946,39 @@ export const localRead = {
     );
 
     console.log(`[LocalRead] getBranchInventory: returning ${rows.length} items for page ${page}`);
-    const items = rows.map((row) => ({
-      id: String(row.id),
-      branch_id: String(row.branch_id),
-      drug_id: String(row.drug_id),
-      quantity: toNumber(row.quantity),
-      reserved_quantity: toNumber(row.reserved_quantity),
-      location: row.location === null ? null : String(row.location),
-      selling_price: row.selling_price === null ? null : toNumber(row.selling_price),
-      sync_status: String(row.sync_status) as any,
-      sync_version: toNumber(row.sync_version, 1),
-      synced_at: row.synced_at === null ? null : String(row.synced_at),
-      updated_at: String(row.updated_at),
-      created_at: String(row.created_at),
-      drug_name: String(row.drug_name ?? ""),
-      drug_sku: row.drug_sku === null ? null : String(row.drug_sku),
-      drug_type: String(row.drug_type ?? "otc") as any,
-      requires_prescription: toBoolean(row.requires_prescription),
-      organization_id: row.organization_id === null ? "" : String(row.organization_id ?? ""),
-      drug_generic_name: row.drug_generic_name === null ? null : String(row.drug_generic_name ?? ""),
-      drug_strength: row.drug_strength === null ? null : String(row.drug_strength ?? ""),
-      drug_tax_rate: toNumber(row.drug_tax_rate),
-      catalog_unit_price: toNumber(row.drug_unit_price),
-      drug_unit_price: toNumber(row.drug_unit_price),
-      effective_unit_price: row.selling_price !== null ? toNumber(row.selling_price) : toNumber(row.drug_unit_price),
-      drug_reorder_level: toNumber(row.drug_reorder_level),
-      branch_name: "",
-      branch_code: "",
-      available_quantity: toNumber(row.quantity) - toNumber(row.reserved_quantity),
-    }));
+    const items = rows.map((row) => {
+      const validBatchQty = toNumber(row.valid_batch_quantity);
+      return {
+        id: String(row.id),
+        branch_id: String(row.branch_id),
+        drug_id: String(row.drug_id),
+        quantity: toNumber(row.quantity),
+        reserved_quantity: toNumber(row.reserved_quantity),
+        location: row.location === null ? null : String(row.location),
+        selling_price: row.selling_price === null ? null : toNumber(row.selling_price),
+        sync_status: String(row.sync_status) as any,
+        sync_version: toNumber(row.sync_version, 1),
+        synced_at: row.synced_at === null ? null : String(row.synced_at),
+        updated_at: String(row.updated_at),
+        created_at: String(row.created_at),
+        drug_name: String(row.drug_name ?? ""),
+        drug_sku: row.drug_sku === null ? null : String(row.drug_sku),
+        drug_type: String(row.drug_type ?? "otc") as any,
+        requires_prescription: toBoolean(row.requires_prescription),
+        organization_id: row.organization_id === null ? "" : String(row.organization_id ?? ""),
+        drug_generic_name: row.drug_generic_name === null ? null : String(row.drug_generic_name ?? ""),
+        drug_strength: row.drug_strength === null ? null : String(row.drug_strength ?? ""),
+        drug_tax_rate: toNumber(row.drug_tax_rate),
+        catalog_unit_price: toNumber(row.drug_unit_price),
+        drug_unit_price: toNumber(row.drug_unit_price),
+        effective_unit_price: row.selling_price !== null ? toNumber(row.selling_price) : toNumber(row.drug_unit_price),
+        drug_reorder_level: toNumber(row.drug_reorder_level),
+        branch_name: "",
+        branch_code: "",
+        available_quantity: toNumber(row.quantity) - toNumber(row.reserved_quantity),
+        valid_batch_quantity: validBatchQty,
+      };
+    });
 
     return buildPagination(items, page, page_size, total);
   },
@@ -1121,6 +1132,44 @@ export const localRead = {
       total_cost_value: items.reduce((sum, item) => sum + item.cost_value, 0),
       total_selling_value: items.reduce((sum, item) => sum + (item.selling_value ?? 0), 0),
     };
+  },
+
+  /**
+   * Compute the sellable (non-expired) quantity for a single drug at a single
+   * branch by summing valid non-expired batch remaining_quantity.
+   *
+   * Offline sales deduct from drug_batches.remaining_quantity atomically at
+   * recording time, so pending sales are already reflected in the sum.
+   *
+   * Returns { notStocked: true } when the drug has NO branch_inventory record.
+   */
+  async getSellableQuantity(
+    branchId: string,
+    drugId: string,
+  ): Promise<{ sellable: number; totalValidBatch: number; notStocked: boolean }> {
+    const db = await getDb();
+
+    const invRows = await db.select<Array<{ quantity: number }>>(
+      `SELECT quantity FROM branch_inventory
+       WHERE branch_id = $1 AND drug_id = $2
+       LIMIT 1`,
+      [branchId, drugId]
+    );
+    const notStocked = invRows.length === 0;
+
+    const batchRows = await db.select<Array<{ remaining: number }>>(
+      `SELECT COALESCE(SUM(remaining_quantity), 0) AS remaining
+       FROM drug_batches
+       WHERE branch_id = $1
+         AND drug_id = $2
+         AND remaining_quantity > 0
+         AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE('now'))`,
+      [branchId, drugId]
+    );
+    const totalValidBatch = batchRows[0]?.remaining ?? 0;
+
+    const sellable = Math.max(0, totalValidBatch);
+    return { sellable, totalValidBatch, notStocked };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {
