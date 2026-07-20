@@ -13,7 +13,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { organizationApi, type OrganizationSettingsUpdate } from "@/api/organization";
-import { parseApiError, isOfflineError, isBackendReachable } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendReachable, isBackendKnownUnreachable } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import type { Organization, OrganizationStats, OrganizationUpdate } from "@/types";
@@ -46,7 +46,7 @@ export function useOrganization() {
         setError(null);
         setIsOffline(false);
 
-        if (!isBackendReachable()) {
+        if (isBackendKnownUnreachable()) {
             const [cachedOrg, cachedStats] = await Promise.all([
                 offlineCache.getOrganization({ allowExpired: true }),
                 offlineCache.getOrganizationStats({ allowExpired: true }),

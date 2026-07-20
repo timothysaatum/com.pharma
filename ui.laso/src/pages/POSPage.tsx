@@ -33,7 +33,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { statsApi } from "@/api/stats";
-import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
 import { toast } from "sonner";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import {
@@ -67,7 +67,7 @@ export default function POSPage() {
         if (!activeBranchId) return;
 
         try {
-            if (navigator.onLine && !isOffline) {
+            if (navigator.onLine && !isOffline && !isBackendKnownUnreachable()) {
                 const stats = await statsApi.getBranchStats(activeBranchId);
                 setTodaySales(stats.total_sales_today);
             } else {
@@ -116,7 +116,7 @@ export default function POSPage() {
                 user?.organization_id,
             );
         try {
-            if (isOffline || !navigator.onLine || !isBackendReachable()) {
+            if (isOffline || !navigator.onLine || isBackendKnownUnreachable()) {
                 setContracts(await loadLocalContracts());
                 return;
             }

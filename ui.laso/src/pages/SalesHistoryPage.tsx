@@ -29,7 +29,7 @@ import {
 import { useAuthStore } from "@/stores/authStore";
 import { salesApi } from "@/api/sales";
 import { statsApi } from "@/api/stats";
-import { isBackendReachable, parseApiError, isOfflineError } from "@/api/client";
+import { isBackendKnownUnreachable, parseApiError, isOfflineError } from "@/api/client";
 import { toast } from "sonner";
 import { localRead } from "@/lib/localRead";
 import { cacheSales } from "@/lib/localDb";
@@ -906,7 +906,7 @@ export default function SalesHistoryPage() {
             const shouldFetchSummary = targetPage === 1;
 
             const listPromise = (async () => {
-                if (!navigator.onLine || !isBackendReachable()) {
+                if (!navigator.onLine || isBackendKnownUnreachable()) {
                     return localRead.searchSales(
                         {
                             page: targetPage,
@@ -957,7 +957,7 @@ export default function SalesHistoryPage() {
             const summaryPromise = shouldFetchSummary ? (async () => {
                 if (!activeBranchId) return null;
                 try {
-                    if (navigator.onLine && isBackendReachable()) {
+                    if (navigator.onLine && !isBackendKnownUnreachable()) {
                         const summary = await statsApi.getSalesSummary(
                             dateToIsoDateTime(startDate, false)!,
                             dateToIsoDateTime(endDate, true)!,
