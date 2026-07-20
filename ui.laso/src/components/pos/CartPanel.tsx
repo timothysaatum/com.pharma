@@ -22,7 +22,7 @@ import {
 import type { AvailableContract } from "@/api/contracts";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
-import { apiClient } from "@/api/client";
+import { apiClient, isBackendKnownUnreachable } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
@@ -134,11 +134,11 @@ function CustomerSearchWidget({
                     setOpen(localMatches.length > 0);
                 }
 
-                // When the browser reports offline, skip the API call
-                // entirely to avoid noisy connection-refused console errors.
-                // Opening the dropdown with local results (even empty)
-                // preserves the "no customers found" UX the user expects.
-                if (!navigator.onLine) {
+                // When offline or the backend is known unreachable, skip the API
+                // call entirely to avoid noisy connection-refused console errors.
+                // The sync engine periodically retries connectivity and calls
+                // markBackendOnline() on success, so this flag self-heals.
+                if (!navigator.onLine || isBackendKnownUnreachable()) {
                     if (!controller.signal.aborted) {
                         setOpen(true);
                     }

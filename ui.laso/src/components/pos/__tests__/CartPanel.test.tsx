@@ -233,4 +233,34 @@ describe("CartPanel customer search", () => {
     // Restore navigator.onLine for other tests
     Object.defineProperty(navigator, "onLine", { value: originalOnLine, configurable: true });
   });
+
+  it("shows local customers when backend is known unreachable (browser online)", async () => {
+    vi.mocked(localRead.searchCustomerMatches).mockResolvedValue([
+      {
+        id: "cust-789",
+        full_name: "Fallback Customer",
+        phone: "+2338888888",
+        email: "fallback@example.com",
+        loyalty_tier: "bronze",
+        has_insurance: false,
+        contract_name: null,
+      },
+    ]);
+
+    // Navigtor reports online but the backend flag says unreachable
+    Object.defineProperty(navigator, "onLine", { value: true, configurable: true });
+    backendReachable = false;
+
+    renderCartPanel();
+
+    fireEvent.change(screen.getByPlaceholderText(/search by name, phone, email/i), {
+      target: { value: "fallback" },
+    });
+
+    expect(await screen.findByText("Fallback Customer")).toBeTruthy();
+    expect(screen.getByText(/\+2338888888/)).toBeTruthy();
+    expect(localRead.searchCustomerMatches).toHaveBeenCalledWith("fallback", 10, "org-abc");
+    // API must NOT be called when backend is known unreachable
+    expect(apiClient.get).not.toHaveBeenCalled();
+  });
 });
