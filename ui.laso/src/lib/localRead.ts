@@ -514,15 +514,31 @@ export const localRead = {
       qualifiers.push(`organization_id = $${values.length}`);
     }
 
-    const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT id, first_name, last_name, phone, email, loyalty_tier,
-              insurance_provider_id, insurance_member_id, preferred_contract_id
-         FROM customers
-        WHERE ${qualifiers.join(" AND ")}
-        ORDER BY updated_at DESC
-        LIMIT $2`,
-      values
-    );
+    let rows: Record<string, unknown>[] = [];
+    try {
+      rows = await db.select<Record<string, unknown>[]>(
+        `SELECT id, first_name, last_name, phone, email, loyalty_tier,
+                insurance_provider_id, insurance_member_id, preferred_contract_id
+           FROM customers
+          WHERE ${qualifiers.join(" AND ")}
+          ORDER BY updated_at DESC
+          LIMIT $2`,
+        values
+      );
+    } catch (selectErr: unknown) {
+      const msg = selectErr instanceof Error ? selectErr.message : String(selectErr);
+      console.warn("[localRead] Customer search failed, retrying without ORDER BY:", msg);
+      try {
+        rows = await db.select<Record<string, unknown>[]>(
+          `SELECT id, first_name, last_name, phone, email, loyalty_tier,
+                  insurance_provider_id, insurance_member_id, preferred_contract_id
+             FROM customers
+            WHERE ${qualifiers.join(" AND ")}
+            LIMIT $2`,
+          values
+        );
+      } catch { /* give up — return empty below */ }
+    }
 
     return rows.map((row) => {
       const firstName = row.first_name === null ? "" : String(row.first_name);
