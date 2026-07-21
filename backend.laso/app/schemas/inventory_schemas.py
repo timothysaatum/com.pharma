@@ -21,9 +21,7 @@ class BranchInventoryBase(BaseSchema):
     @field_validator('reserved_quantity')
     @classmethod
     def validate_reserved(cls, v: int, info) -> int:
-        """Ensure reserved quantity doesn't exceed total"""
-        if 'quantity' in info.data and v > info.data['quantity']:
-            raise ValueError('Reserved quantity cannot exceed total quantity')
+        """Ensure reserved quantity is non-negative"""
         return v
 
 

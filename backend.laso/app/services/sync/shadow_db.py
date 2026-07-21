@@ -702,6 +702,17 @@ class ShadowDB:
                 return row is not None
         return await asyncio.to_thread(_sync)
 
+    async def get_all_shadow_ids(self, table: str) -> set[str]:
+        """Fetch all row IDs from a shadow DB table in a single query."""
+        def _sync() -> set[str]:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    return set()
+                rows = conn.execute(f"SELECT id FROM [{table}]").fetchall()
+                return {str(r[0]) for r in rows}
+        return await asyncio.to_thread(_sync)
+
     async def publish_server_authoritative_tables(
         self,
         db: AsyncSession,
@@ -730,10 +741,15 @@ class ShadowDB:
                 continue
 
             result = await db.execute(text(stmt), params)
+            
+            existing_ids = set()
+            if not cfg.get("server_authoritative"):
+                existing_ids = await self.get_all_shadow_ids(table)
+
             for row in result.mappings().all():
                 row_dict = dict(row)
                 if not cfg.get("server_authoritative"):
-                    if await self.row_exists_in_shadow(table, str(row_dict["id"])):
+                    if str(row_dict["id"]) in existing_ids:
                         continue
                 if await self.upsert_shadow_server_row(table, row_dict):
                     published += 1
