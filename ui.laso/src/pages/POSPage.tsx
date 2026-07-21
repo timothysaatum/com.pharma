@@ -133,7 +133,7 @@ export default function POSPage() {
             // "unloaded" in validateCart so the user sees a clear message.
             cart.setStockQuantities({}, {});
         }
-    }, [cart]);
+    }, [cart.setStockQuantities]);
 
     // Refresh stock whenever cart items change or branch changes
     useEffect(() => {
