@@ -212,31 +212,41 @@ export default function POSPage() {
             return;
         }
 
+        // Lock immediately — before any await — so rapid double-clicks are
+        // blocked even while the async stock validation is in progress.
+        checkoutInFlightRef.current = true;
+        setIsSubmitting(true);
+        setCheckoutError(null);
+
         // Pre-checkout stock validation — re-query for latest accuracy
         try {
             for (const item of cart.state.items) {
                 const info = await localRead.getSellableQuantity(activeBranchId, item.drug.id);
                 if (info.notStocked) {
                     setCheckoutError(`${item.drug.name} is not stocked at the active branch and cannot be sold.`);
+                    checkoutInFlightRef.current = false;
+                    setIsSubmitting(false);
                     return;
                 }
                 if (info.sellable <= 0) {
                     setCheckoutError(`${item.drug.name} has no sellable stock at this branch. Cannot complete sale.`);
+                    checkoutInFlightRef.current = false;
+                    setIsSubmitting(false);
                     return;
                 }
                 if (item.quantity > info.sellable) {
                     setCheckoutError(`Insufficient stock for ${item.drug.name}. Requested ${item.quantity}, but only ${info.sellable} available.`);
+                    checkoutInFlightRef.current = false;
+                    setIsSubmitting(false);
                     return;
                 }
             }
         } catch (err) {
             setCheckoutError("Unable to verify stock availability. Ensure you are online or synchronize inventory first.");
+            checkoutInFlightRef.current = false;
+            setIsSubmitting(false);
             return;
         }
-
-        checkoutInFlightRef.current = true;
-        setIsSubmitting(true);
-        setCheckoutError(null);
 
         try {
             const intent = checkoutIntentRef.current ?? (() => {
@@ -266,10 +276,14 @@ export default function POSPage() {
             );
         
             // ─── Pre-flight check: Validate prescription refills if used ───────────────
+            let selectedRxNumber: string | null = null;
+            let selectedRxPrescriberName: string | null = null;
+            let selectedRxPrescriberLicense: string | null = null;
+
             if (payload.prescription_id) {
                 const db = await (await import("@/lib/localDb")).getDb();
-                const presResult = await db.select<Array<{ refills_remaining: number; status: string }>>(
-                    `SELECT refills_remaining, status FROM prescriptions WHERE id = $1`,
+                const presResult = await db.select<Array<{ medications: string; refills_remaining: number; status: string; prescription_number: string; prescriber_name: string; prescriber_license: string }>>(
+                    `SELECT medications, refills_remaining, status, prescription_number, prescriber_name, prescriber_license FROM prescriptions WHERE id = $1`,
                     [payload.prescription_id]
                 );
             
@@ -278,7 +292,7 @@ export default function POSPage() {
                     return;
                 }
             
-                const { refills_remaining, status } = presResult[0];
+                const { medications, refills_remaining, status, prescription_number, prescriber_name, prescriber_license } = presResult[0];
                 if (status !== "active") {
                     setCheckoutError(`Prescription is ${status} — cannot be used for this sale.`);
                     return;
@@ -288,6 +302,30 @@ export default function POSPage() {
                     setCheckoutError("No refills remaining on this prescription. Please use a different prescription.");
                     return;
                 }
+
+                // Verify that the prescription contains the drug(s) being purchased
+                let parsedMedications: Array<{ drug_id: string }> = [];
+                try {
+                    parsedMedications = typeof medications === "string" ? JSON.parse(medications) : medications;
+                } catch {
+                    parsedMedications = [];
+                }
+
+                const rxDrugIds = new Set(parsedMedications.map(m => m.drug_id));
+                const cartRxItems = cart.state.items.filter(item => item.requiresPrescription);
+                const uncoveredItems = cartRxItems.filter(item => !rxDrugIds.has(item.drug.id));
+
+                if (uncoveredItems.length > 0) {
+                    setCheckoutError(
+                        "Selected prescription is not valid for all prescription-required drugs in the cart. Missing: " +
+                        uncoveredItems.map(i => i.drug.name).join(", ")
+                    );
+                    return;
+                }
+
+                selectedRxNumber = prescription_number;
+                selectedRxPrescriberName = prescriber_name;
+                selectedRxPrescriberLicense = prescriber_license;
             }
         
             const backendWasReachable = isBackendReachable();
@@ -309,7 +347,7 @@ export default function POSPage() {
                 organization_id: user?.organization_id ?? "",
                 branch_id: activeBranchId,
                 customer_id: payload.customer_id ?? null,
-                customer_name: payload.customer_name ?? null,
+                customer_name: (payload.customer_id ? cart.state.customerName : payload.customer_name) || null,
                 subtotal: sanitizeNum(totals.subtotal),
                 discount_amount: sanitizeNum(totals.discountAmount),
                 contract_discount_amount: sanitizeNum(totals.discountAmount),
@@ -328,8 +366,9 @@ export default function POSPage() {
                 payment_reference: payload.payment_reference ?? null,
                 split_payment_details: null,
                 prescription_id: payload.prescription_id ?? null,
-                prescription_number: null,
-                prescriber_name: null,
+                prescription_number: selectedRxNumber,
+                prescriber_name: selectedRxPrescriberName,
+                prescriber_license: selectedRxPrescriberLicense,
                 cashier_id: user?.id ?? "",
                 pharmacist_id: null,
                 insurance_claim_number: payload.insurance_claim_number ?? null,
@@ -397,7 +436,7 @@ export default function POSPage() {
                         patient_copay: null,
                         requires_prescription: item.requiresPrescription,
                         prescription_verified: item.prescriptionVerified,
-                        prescription_id: null,
+                        prescription_id: item.prescriptionVerified ? payload.prescription_id : null,
                         allergy_check_performed: false,
                         created_at: now,
                         updated_at: now,
@@ -424,7 +463,7 @@ export default function POSPage() {
             return {
                 sale: {
                     ...offlineSale,
-                    customer_full_name: payload.customer_name ?? null,
+                    customer_full_name: offlineSale.customer_name,
                     customer_phone: null,
                     customer_email: null,
                     customer_loyalty_tier: null,

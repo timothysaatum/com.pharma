@@ -121,21 +121,30 @@ export function PrescriptionSelector({
         setLoading(true);
         setLoadError(null);
         try {
-            const result = await prescriptionsApi.listForCustomer(
-                customerId,
-                { page: 1, size: 10, status_filter: "active", include_expired: false },
+            const result = await prescriptionsApi.list(
+                { customer_id: customerId, status_filter: "active", include_expired: false },
                 signal
             );
-            setPrescriptions(result.items ?? []);
+            const fetched = result.items ?? [];
+            const rxDrugIds = rxItems.map((item) => item.drug.id);
+            const filtered = fetched.filter((rx) =>
+                rx.medications?.some((med) => rxDrugIds.includes(med.drug_id))
+            );
+            setPrescriptions(filtered.map(toSearchItem));
         } catch (err) {
             if (err instanceof Error && err.name === "AbortError") return;
             try {
                 const fallback = await localRead.searchPrescriptions(
                     { customer_id: customerId, status_filter: "active", include_expired: false, branch_id: activeBranchId ?? undefined },
                     1,
-                    10
+                    100
                 );
-                setPrescriptions(fallback.items.map(toSearchItem));
+                const fetched = fallback.items ?? [];
+                const rxDrugIds = rxItems.map((item) => item.drug.id);
+                const filtered = fetched.filter((rx: any) =>
+                    rx.medications?.some((med: any) => rxDrugIds.includes(med.drug_id))
+                );
+                setPrescriptions(filtered.map(toSearchItem));
                 setLoadError(null);
             } catch {
                 setLoadError(parseApiError(err));

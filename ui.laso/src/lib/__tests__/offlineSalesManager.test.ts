@@ -73,7 +73,12 @@ function item(overrides: Record<string, unknown> = {}) {
 describe("offlineSalesManager atomic checkout", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    mocks.select.mockResolvedValue([]);
+    mocks.select.mockImplementation(async (sql: string) => {
+      if (sql.includes("drug_batches")) {
+        return [{ id: "batch-1", remaining_quantity: 10 }];
+      }
+      return [];
+    });
     mocks.executeTransaction.mockResolvedValue([]);
   });
 

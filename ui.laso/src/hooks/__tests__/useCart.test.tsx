@@ -43,6 +43,7 @@ describe("useCart corporate checkout", () => {
 
         act(() => {
             result.current.addItem(prescriptionDrug);
+            result.current.setStockQuantities({ [prescriptionDrug.id]: 10 }, {});
             result.current.setContract(corporateContract);
             result.current.setCustomerId("customer-corporate");
             result.current.setPrescriptionId("prescription-1");

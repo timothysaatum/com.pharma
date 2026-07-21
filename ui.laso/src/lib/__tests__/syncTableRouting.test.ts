@@ -50,7 +50,10 @@ describe("sync table routing", () => {
 
     await engine.sync();
 
-    expect(order).toEqual(["reconcile", "push", "crr-push", "crr", "legacy"]);
+    // crr-push must run BEFORE push so that offline-created prescriptions
+    // (table_priority=2 in the batch) land on the server before any sale
+    // that references them via prescription_id is pushed.
+    expect(order).toEqual(["crr-push", "reconcile", "push", "crr", "legacy"]);
     expect(engine.pullCrr).toHaveBeenCalledOnce();
     expect(engine.pull).toHaveBeenCalledOnce();
     engine.branchId = null;

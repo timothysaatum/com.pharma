@@ -53,8 +53,8 @@ vi.mock("@/hooks/useOrganization", () => ({
   useOrganization: () => ({ org: { settings: {} } }),
 }));
 
-vi.mock("@/hooks/useCart", () => ({
-  useCart: () => ({
+const { mockCart } = vi.hoisted(() => ({
+  mockCart: {
     state: {
       items: [],
       contract: null,
@@ -97,7 +97,12 @@ vi.mock("@/hooks/useCart", () => ({
     setNotes: vi.fn(),
     buildSaleCreate: vi.fn(),
     clearCart: vi.fn(),
-  }),
+    setStockQuantities: vi.fn(),
+  },
+}));
+
+vi.mock("@/hooks/useCart", () => ({
+  useCart: () => mockCart,
 }));
 
 vi.mock("@/api/contracts", () => ({

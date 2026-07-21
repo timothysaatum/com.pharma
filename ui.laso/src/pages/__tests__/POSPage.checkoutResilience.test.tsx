@@ -94,6 +94,7 @@ const cart = {
   setInsuranceVerified: vi.fn(),
   setNotes: vi.fn(),
   clearCart: vi.fn(),
+  setStockQuantities: vi.fn(),
   buildSaleCreate: vi.fn(() => ({
     branch_id: "branch-1",
     price_contract_id: "contract-1",
@@ -142,6 +143,7 @@ vi.mock("@/lib/localRead", () => ({
   localRead: {
     searchSales: vi.fn(async () => ({ items: [] })),
     getAvailableContractsForPos: vi.fn(async () => [contract]),
+    getSellableQuantity: vi.fn(async () => ({ sellable: 100, notStocked: false })),
   },
 }));
 vi.mock("@/lib/offlineSalesManager", () => ({

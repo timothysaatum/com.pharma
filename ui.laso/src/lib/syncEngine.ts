@@ -270,11 +270,14 @@ class SyncEngine {
         this.setStatus("syncing");
 
         try {
+            // CRR push first: prescriptions, branch_inventory, etc. must
+            // land on the server before the legacy sync_queue push sends any
+            // sale that references them (e.g. prescription_id FK).
+            const crrPushResult = await this.pushCrr();
             // Repair a missing queue envelope before the push. This covers an
             // app restart without delaying recovery until a second sync cycle.
             await this.reconcileOfflineSales();
             const pushResult = await this.push();
-            const crrPushResult = await this.pushCrr();
             await this.pullCrr();
             if (LEGACY_SYNC_TABLES.length > 0) {
                 await this.pull(pushResult.nextPullTimestamp ?? undefined);

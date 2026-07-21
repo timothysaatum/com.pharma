@@ -1471,6 +1471,13 @@ class SyncService:
         # ======================================================================
         # COMPREHENSIVE FOREIGN KEY VALIDATION
         # ======================================================================
+        # Capture the original prescription_id from the raw payload BEFORE FK
+        # validation may clear it.  An offline-created prescription that has not
+        # yet reached the server will be absent from the DB and get nulled by
+        # _validate_and_fix_sale_fks; we must distinguish that case from a sale
+        # that genuinely has no prescription_id.
+        original_prescription_id = _uuid_or_none(record.data.get("prescription_id"))
+
         fk_fixes: List[str] = []
         try:
             fixes = await _validate_and_fix_sale_fks(
@@ -1496,6 +1503,27 @@ class SyncService:
             ), None
 
         if prescription_required_drug_ids and not safe_data.get("prescription_id"):
+            if original_prescription_id is not None:
+                # The sale had a prescription_id when created offline, but the
+                # prescription hasn't arrived on the server yet.  Return a
+                # retryable error so the sync engine backs off and tries again
+                # after the prescription (which has a lower queue id and was
+                # pushed first in the same batch) has been committed.
+                logger.warning(
+                    "Sync: Sale %s references offline-created prescription %s which "
+                    "has not yet synced; deferring sale sync.",
+                    record.local_id, original_prescription_id,
+                )
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error=(
+                        "Prescription not yet synced. Sale will be retried automatically "
+                        "once the prescription is available on the server."
+                    ),
+                    fk_fixes=fk_fixes if fk_fixes else None,
+                ), None
             return PushResult(
                 local_id=record.local_id,
                 table_name="sales",
