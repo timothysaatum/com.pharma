@@ -648,6 +648,7 @@ async def search_customer_prescriptions(
     items = [
         PrescriptionSearchResponse(
             id=p.id,
+            branch_id=p.branch_id,
             prescription_number=p.prescription_number,
             prescriber_name=p.prescriber_name,
             medications_count=len(p.medications),
