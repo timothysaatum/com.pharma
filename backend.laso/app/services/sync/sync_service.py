@@ -823,6 +823,7 @@ class SyncService:
         )
 
         for record in sorted_records:
+            receipt = None
             try:
                 if record.operation_id:
                     receipt = await db.get(
@@ -859,12 +860,11 @@ class SyncService:
                             continue
 
                         if receipt.result_kind == "failed":
-                            # The previous attempt failed.  Delete the stale receipt
-                            # so the mutation can be retried — a non-accepted receipt
-                            # must not permanently block recovery.
-                            await db.delete(receipt)
-                            await db.flush()
+                            # The previous attempt failed. We will reuse this existing
+                            # receipt and update it in the savepoint below rather than
+                            # deleting/recreating it, preventing UniqueViolation errors.
                             # Fall through to the savepoint below.
+                            pass
 
                         # For conflicts: replay the conflict result so the client
                         # can resolve it.  If the client already resolved it, the
@@ -879,22 +879,27 @@ class SyncService:
                             continue
 
                 async with db.begin_nested():  # savepoint per record
-                    receipt = None
                     if record.operation_id:
                         # Flush the receipt before applying the mutation. A
                         # concurrent request with the same operation ID then
                         # fails at this savepoint before it can mutate data.
-                        receipt = SyncOperationReceipt(
-                            operation_id=record.operation_id,
-                            organization_id=organization_id,
-                            branch_id=request.branch_id,
-                            table_name=record.table_name,
-                            record_id=record.local_id,
-                            result_kind="failed",
-                            response_data={},
-                        )
-                        db.add(receipt)
-                        await db.flush()
+                        if receipt is None:
+                            receipt = SyncOperationReceipt(
+                                operation_id=record.operation_id,
+                                organization_id=organization_id,
+                                branch_id=request.branch_id,
+                                table_name=record.table_name,
+                                record_id=record.local_id,
+                                result_kind="failed",
+                                response_data={},
+                            )
+                            db.add(receipt)
+                            await db.flush()
+                        else:
+                            # Reset existing failed receipt to failed/empty
+                            receipt.result_kind = "failed"
+                            receipt.response_data = {}
+                            await db.flush()
 
                     push_result, conflict = await SyncService._handle_record(
                         db, record, organization_id, request.branch_id, pushed_by
@@ -1519,7 +1524,8 @@ class SyncService:
                     table_name="sales",
                     success=False,
                     error=(
-                        "Prescription not yet synced. Sale will be retried automatically "
+                        "Sale contains prescription-required drugs but the prescription "
+                        "is not yet synced. Sale will be retried automatically "
                         "once the prescription is available on the server."
                     ),
                     fk_fixes=fk_fixes if fk_fixes else None,
