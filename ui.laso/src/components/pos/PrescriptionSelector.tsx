@@ -121,8 +121,9 @@ export function PrescriptionSelector({
         setLoading(true);
         setLoadError(null);
         try {
-            const result = await prescriptionsApi.list(
-                { customer_id: customerId, status_filter: "active", include_expired: false },
+            const result = await prescriptionsApi.listForCustomer(
+                customerId,
+                { page: 1, size: 10, status_filter: "active", include_expired: false },
                 signal
             );
             const fetched = result.items ?? [];
