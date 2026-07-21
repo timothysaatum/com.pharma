@@ -1,4 +1,4 @@
-import { getDb } from "@/lib/localDb";
+import { getDb, errorMessage } from "@/lib/localDb";
 import type {
   Drug,
   DrugCategory,
@@ -499,19 +499,19 @@ export const localRead = {
     const qualifiers = [
       "is_deleted = 0",
       `(
-        LOWER(first_name) LIKE $1 OR
-        LOWER(last_name) LIKE $1 OR
-        LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE $1 OR
-        LOWER(phone) LIKE $1 OR
-        LOWER(email) LIKE $1 OR
-        LOWER(insurance_member_id) LIKE $1 OR
-        LOWER(id) LIKE $1
+        LOWER(first_name) LIKE ?1 OR
+        LOWER(last_name) LIKE ?1 OR
+        LOWER(COALESCE(first_name, '') || ' ' || COALESCE(last_name, '')) LIKE ?1 OR
+        LOWER(phone) LIKE ?1 OR
+        LOWER(email) LIKE ?1 OR
+        LOWER(insurance_member_id) LIKE ?1 OR
+        LOWER(id) LIKE ?1
       )`,
     ];
 
     if (organization_id) {
       values.push(organization_id);
-      qualifiers.push(`organization_id = $${values.length}`);
+      qualifiers.push(`organization_id = ?${values.length}`);
     }
 
     let rows: Record<string, unknown>[] = [];
@@ -529,11 +529,11 @@ export const localRead = {
            FROM customers
           WHERE ${qualifiers.join(" AND ")}
           ORDER BY CAST(updated_at AS TEXT) DESC
-          LIMIT $2`,
+          LIMIT ?2`,
         values
       );
     } catch (selectErr: unknown) {
-      const msg = selectErr instanceof Error ? selectErr.message : String(selectErr);
+      const msg = errorMessage(selectErr);
       console.warn("[localRead] Customer search failed, retrying via simple query:", msg);
       try {
         rows = await db.select<Record<string, unknown>[]>(
@@ -549,12 +549,12 @@ export const localRead = {
              FROM customers
             WHERE is_deleted = 0
               AND (
-                CAST(first_name AS TEXT) LIKE $1 OR
-                CAST(last_name AS TEXT) LIKE $1 OR
-                CAST(phone AS TEXT) LIKE $1 OR
-                CAST(email AS TEXT) LIKE $1
+                CAST(first_name AS TEXT) LIKE ?1 OR
+                CAST(last_name AS TEXT) LIKE ?1 OR
+                CAST(phone AS TEXT) LIKE ?1 OR
+                CAST(email AS TEXT) LIKE ?1
               )
-            LIMIT $2`,
+            LIMIT ?2`,
           [sqlLike(term), limit]
         );
       } catch { /* give up — return empty below */ }
