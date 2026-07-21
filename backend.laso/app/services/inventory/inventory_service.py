@@ -284,14 +284,28 @@ class InventoryService:
         """
         Paginated inventory for a branch with joined drug and branch details.
 
-        Supports free-text search across drug name, generic name, SKU and
-        barcode, plus a ``low_stock_only`` flag that filters to rows where
-        ``quantity <= Drug.reorder_level``.
+        Calculates drug quantity as the sum of unexpired batches.
         """
         from app.models.pharmacy.pharmacy_model import Branch
+        from datetime import date
+
+        # Subquery to calculate the sum of remaining quantities for unexpired, non-zero batches
+        valid_batch_sum = (
+            select(func.coalesce(func.sum(DrugBatch.remaining_quantity), 0))
+            .where(
+                DrugBatch.drug_id == BranchInventory.drug_id,
+                DrugBatch.branch_id == BranchInventory.branch_id,
+                DrugBatch.remaining_quantity > 0,
+                or_(
+                    DrugBatch.expiry_date.is_(None),
+                    DrugBatch.expiry_date >= date.today()
+                )
+            )
+            .scalar_subquery()
+        )
 
         query = (
-            select(BranchInventory)
+            select(BranchInventory, valid_batch_sum.label("valid_batch_qty"))
             .join(Drug,   BranchInventory.drug_id   == Drug.id)
             .join(Branch, BranchInventory.branch_id == Branch.id)
             .options(
@@ -313,8 +327,8 @@ class InventoryService:
             count_base = count_base.where(BranchInventory.drug_id == drug_id)
 
         if not include_zero_stock:
-            query      = query.where(BranchInventory.quantity > 0)
-            count_base = count_base.where(BranchInventory.quantity > 0)
+            query      = query.where(valid_batch_sum > 0)
+            count_base = count_base.where(valid_batch_sum > 0)
 
         if search:
             pattern = f"%{search}%"
@@ -328,8 +342,8 @@ class InventoryService:
             count_base = count_base.where(cond)
 
         if low_stock_only:
-            query      = query.where(BranchInventory.quantity <= Drug.reorder_level)
-            count_base = count_base.where(BranchInventory.quantity <= Drug.reorder_level)
+            query      = query.where(valid_batch_sum <= Drug.reorder_level)
+            count_base = count_base.where(valid_batch_sum <= Drug.reorder_level)
 
         if drug_type:
             if drug_type == "prescription":
@@ -346,20 +360,18 @@ class InventoryService:
 
         total: int = (await db.execute(count_base)).scalar_one()
         offset      = (pagination.page - 1) * pagination.page_size
-        rows        = list(
-            (await db.execute(query.offset(offset).limit(pagination.page_size)))
-            .scalars()
-            .unique()
-            .all()
-        )
+        
+        res = await db.execute(query.offset(offset).limit(pagination.page_size))
+        rows = list(res.unique().all())
+        
         batch_selling_prices = await InventoryService._get_fefo_batch_selling_prices(
             db=db,
             branch_id=branch_id,
-            drug_ids=[inv.drug_id for inv in rows],
+            drug_ids=[inv.drug_id for inv, _ in rows],
         )
 
         items: List[BranchInventoryWithDetails] = []
-        for inv in rows:
+        for inv, valid_batch_qty in rows:
             drug: Drug             = inv.drug
             branch                 = inv.branch
             catalog_unit_price = Decimal(str(drug.unit_price))
@@ -380,7 +392,7 @@ class InventoryService:
                     id=inv.id,
                     branch_id=inv.branch_id,
                     drug_id=inv.drug_id,
-                    quantity=inv.quantity,
+                    quantity=valid_batch_qty,  # Map the unexpired batch sum!
                     reserved_quantity=inv.reserved_quantity,
                     location=inv.location,
                     selling_price=branch_unit_price,
@@ -393,13 +405,8 @@ class InventoryService:
                     drug_type=drug.drug_type or "otc",
                     requires_prescription=drug.requires_prescription,
                     catalog_unit_price=catalog_unit_price,
-                    # Backwards-compatible POS price field. Older clients use
-                    # drug_unit_price directly, so expose the branch-effective
-                    # sell price here and keep the catalogue price above.
                     drug_unit_price=effective_unit_price,
                     effective_unit_price=effective_unit_price,
-                    # Included so the frontend can render accurate per-drug stock
-                    # status badges without a separate drugApi.getById() call.
                     drug_reorder_level=drug.reorder_level,
                     branch_name=branch.name,
                     branch_code=branch.code,

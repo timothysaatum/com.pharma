@@ -888,6 +888,14 @@ export const localRead = {
   ): Promise<PaginatedResponse<BranchInventoryWithDetails>> {
     console.log(`[LocalRead] getBranchInventory: branch=${branchId}, search=${params.search}, low_stock=${params.low_stock_only}, page=${page}`);
     const db = await getDb();
+    const validBatchSumSql = `COALESCE((
+      SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
+      WHERE db2.drug_id = bi.drug_id
+        AND db2.branch_id = bi.branch_id
+        AND db2.remaining_quantity > 0
+        AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
+    ), 0)`;
+
     const qualifiers = ["bi.branch_id = $1"];
     const values: unknown[] = [branchId];
 
@@ -900,7 +908,7 @@ export const localRead = {
       )`);
     }
     if (params.low_stock_only) {
-      qualifiers.push("(bi.quantity - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)");
+      qualifiers.push(`(${validBatchSumSql} - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)`);
     }
     if (params.drug_type) {
       values.push(params.drug_type);
@@ -911,7 +919,7 @@ export const localRead = {
       }
     }
     if (!params.include_zero_stock) {
-      qualifiers.push("bi.quantity > 0");
+      qualifiers.push(`${validBatchSumSql} > 0`);
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
@@ -930,13 +938,7 @@ export const localRead = {
          d.organization_id as organization_id, d.generic_name as drug_generic_name,
          d.strength as drug_strength, d.tax_rate as drug_tax_rate,
          d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level,
-         COALESCE((
-           SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
-           WHERE db2.drug_id = bi.drug_id
-             AND db2.branch_id = bi.branch_id
-             AND db2.remaining_quantity > 0
-             AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
-         ), 0) AS valid_batch_quantity
+         ${validBatchSumSql} AS valid_batch_quantity
        FROM branch_inventory bi
        LEFT JOIN drugs d ON d.id = bi.drug_id
        ${where}
@@ -952,7 +954,7 @@ export const localRead = {
         id: String(row.id),
         branch_id: String(row.branch_id),
         drug_id: String(row.drug_id),
-        quantity: toNumber(row.quantity),
+        quantity: validBatchQty,
         reserved_quantity: toNumber(row.reserved_quantity),
         location: row.location === null ? null : String(row.location),
         selling_price: row.selling_price === null ? null : toNumber(row.selling_price),
@@ -975,7 +977,7 @@ export const localRead = {
         drug_reorder_level: toNumber(row.drug_reorder_level),
         branch_name: "",
         branch_code: "",
-        available_quantity: toNumber(row.quantity) - toNumber(row.reserved_quantity),
+        available_quantity: Math.max(0, validBatchQty - toNumber(row.reserved_quantity)),
         valid_batch_quantity: validBatchQty,
       };
     });
@@ -1175,7 +1177,15 @@ export const localRead = {
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {
     const db = await getDb();
     const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT bi.branch_id, bi.drug_id, bi.quantity, coalesce(d.name, '') as drug_name, d.sku,
+      `SELECT bi.branch_id, bi.drug_id, 
+         COALESCE((
+           SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
+           WHERE db2.drug_id = bi.drug_id
+             AND db2.branch_id = bi.branch_id
+             AND db2.remaining_quantity > 0
+             AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
+         ), 0) AS quantity,
+         coalesce(d.name, '') as drug_name, d.sku,
          coalesce(d.cost_price, 0) as cost_price, coalesce(bi.selling_price, d.unit_price, 0) as branch_selling_price,
          coalesce(d.unit_price, 0) as selling_price
        FROM branch_inventory bi
