@@ -139,6 +139,9 @@ function toSale(row: Record<string, unknown>): Sale {
     sale_number: String(row.sale_number),
     customer_id: row.customer_id === null ? null : String(row.customer_id),
     customer_name: row.customer_name === null ? null : String(row.customer_name),
+    customer_full_name: row.customer_full_name === null || row.customer_full_name === undefined
+        ? undefined
+        : String(row.customer_full_name),
     subtotal: toNumber(row.subtotal),
     discount_amount: toNumber(row.discount_amount),
     tax_amount: toNumber(row.tax_amount),
@@ -198,7 +201,10 @@ function toSaleWithDetails(row: Record<string, unknown>): SaleWithDetails {
     cashier_name: null,
     pharmacist_name: null,
     manager_approval_user_id: null,
-    customer_full_name: row.customer_name === null ? null : String(row.customer_name),
+    customer_full_name: 
+      row.customer_full_name !== null && row.customer_full_name !== undefined
+        ? String(row.customer_full_name)
+        : row.customer_name === null ? null : String(row.customer_name),
     customer_phone: null,
     customer_email: null,
     customer_loyalty_tier: null,
@@ -649,29 +655,29 @@ export const localRead = {
 
     if (params.branch_id) {
       values.push(params.branch_id);
-      qualifiers.push(`branch_id = $${values.length}`);
+      qualifiers.push(`sales.branch_id = $${values.length}`);
     }
     if (params.status) {
       values.push(params.status);
-      qualifiers.push(`status = $${values.length}`);
+      qualifiers.push(`sales.status = $${values.length}`);
     }
     if (params.payment_method) {
       values.push(params.payment_method);
-      qualifiers.push(`payment_method = $${values.length}`);
+      qualifiers.push(`sales.payment_method = $${values.length}`);
     }
     if (params.start_date) {
       values.push(params.start_date);
-      qualifiers.push(`DATE(created_at) >= DATE($${values.length})`);
+      qualifiers.push(`DATE(sales.created_at) >= DATE($${values.length})`);
     }
     if (params.end_date) {
       values.push(params.end_date);
-      qualifiers.push(`DATE(created_at) <= DATE($${values.length})`);
+      qualifiers.push(`DATE(sales.created_at) <= DATE($${values.length})`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));
       qualifiers.push(`(
-        LOWER(sale_number) LIKE $${values.length} OR
-        LOWER(customer_name) LIKE $${values.length}
+        LOWER(sales.sale_number) LIKE $${values.length} OR
+        LOWER(sales.customer_name) LIKE $${values.length}
       )`);
     }
 
@@ -679,8 +685,16 @@ export const localRead = {
     const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM sales ${where}`, values);
     const total = totalRows[0]?.total ?? 0;
     const offset = (effectivePage - 1) * effectivePageSize;
+    const selectExpr = `SELECT sales.*, 
+      CASE WHEN sales.customer_id IS NOT NULL AND sales.customer_name IS NULL 
+        THEN TRIM(COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, ''))
+        ELSE sales.customer_name
+      END AS customer_full_name
+      FROM sales
+      LEFT JOIN customers ON sales.customer_id = customers.id`;
+
     const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT * FROM sales ${where} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      `${selectExpr} ${where} ORDER BY sales.created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, effectivePageSize, offset]
     );
 
@@ -689,7 +703,17 @@ export const localRead = {
 
   async getSaleById(id: string): Promise<SaleWithDetails | null> {
     const db = await getDb();
-    const rows = await db.select<Record<string, unknown>[]>(`SELECT * FROM sales WHERE id = $1`, [id]);
+    const rows = await db.select<Record<string, unknown>[]>(
+      `SELECT sales.*, 
+        CASE WHEN sales.customer_id IS NOT NULL AND sales.customer_name IS NULL 
+          THEN TRIM(COALESCE(customers.first_name, '') || ' ' || COALESCE(customers.last_name, ''))
+          ELSE sales.customer_name
+        END AS customer_full_name
+        FROM sales
+        LEFT JOIN customers ON sales.customer_id = customers.id
+        WHERE sales.id = $1`,
+      [id]
+    );
     if (!rows.length) return null;
     return toSaleWithDetails(rows[0]);
   },

@@ -524,9 +524,7 @@ export function useCart(taxInclusive = false) {
                 branch_id: branchId,
                 price_contract_id: state.contract.id,
                 customer_id: state.customerId ?? undefined,
-                customer_name: state.customerId
-                    ? undefined
-                    : state.customerName.trim() || undefined,
+                customer_name: state.customerName.trim() || undefined,
                 items: state.items.map((item) => ({
                     drug_id: item.drug.id,
                     quantity: item.quantity,
