@@ -25,14 +25,12 @@ interface SyncIndicatorProps {
 }
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
-    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow } = useSyncStatus();
+    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, discardFailure } = useSyncStatus();
     const [showConflictModal, setShowConflictModal] = useState(false);
 
     const hasConflicts = conflicts.length > 0;
     const hasFailures = failures.length > 0;
     const blockedFailures = failures.filter((failure) => failure.is_blocked).length;
-    const latestFailure = failures[0];
-    const latestFailureText = latestFailure?.error ?? "Unknown sync error";
 
     // ── Icon and colour per status ──────────────────────────
 
@@ -139,15 +137,23 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                             ? `${blockedFailures} record${blockedFailures > 1 ? "s have" : " has"} stopped retrying`
                             : `${failures.length} record${failures.length > 1 ? "s" : ""} failed to sync`}
                     </p>
-                    <div className="mt-1 space-y-0.5">
+                    <div className="mt-1 space-y-1">
                         {failures.slice(0, 3).map((failure, i) => (
-                            <p
-                                key={i}
-                                className="truncate text-[11px] leading-tight text-white/35"
-                                title={`${failure.table_name ?? "sync"}: ${failure.error ?? "Unknown error"}${failure.is_blocked ? " (blocked)" : ""}`}
-                            >
-                                {failure.table_name ?? "sync"}: {failure.error ?? "Unknown error"}
-                            </p>
+                            <div key={i} className="flex items-center justify-between gap-1 text-[11px] leading-tight text-white/35 group/item">
+                                <span
+                                    className="truncate flex-1"
+                                    title={`${failure.table_name ?? "sync"}: ${failure.error ?? "Unknown error"}${failure.is_blocked ? " (blocked)" : ""}`}
+                                >
+                                    {failure.table_name ?? "sync"}: {failure.error ?? "Unknown error"}
+                                </span>
+                                <button
+                                    onClick={() => discardFailure(failure.table_name, failure.record_id)}
+                                    title="Discard this failed record from the sync queue"
+                                    className="text-red-400 hover:text-red-300 font-semibold px-1 rounded hover:bg-red-500/10 transition-colors ml-1 flex-shrink-0"
+                                >
+                                    Discard
+                                </button>
+                            </div>
                         ))}
                         {failures.length > 3 && (
                             <p className="text-[11px] leading-tight text-white/25">

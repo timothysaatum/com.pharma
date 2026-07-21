@@ -24,6 +24,8 @@ export interface SyncState {
         conflict: QueuedConflict,
         resolution: "server_wins" | "local_wins"
     ) => Promise<void>;
+    /** Discard a permanently failed sync record */
+    discardFailure: (tableName: string, recordId: string) => Promise<void>;
 }
 
 export function useSyncStatus(): SyncState {
@@ -52,5 +54,11 @@ export function useSyncStatus(): SyncState {
         []
     );
 
-    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict };
+    const discardFailure = useCallback(
+        (tableName: string, recordId: string) =>
+            syncEngine.discardFailure(tableName, recordId),
+        []
+    );
+
+    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict, discardFailure };
 }

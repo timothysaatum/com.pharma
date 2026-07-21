@@ -1125,6 +1125,11 @@ class SyncEngine {
         }
     }
 
+    async discardFailure(tableName: string, recordId: string): Promise<void> {
+        await dequeue(tableName, recordId);
+        await this.loadPersistedQueueState();
+    }
+
     private async applyServerRecord(
         table: string,
         serverRecord: Record<string, unknown>
