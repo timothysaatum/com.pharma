@@ -577,6 +577,28 @@ async def _log_renumbering(
     )
 
 
+def _shadow_json_default(value: Any) -> str:
+    if isinstance(value, (date, datetime, Decimal)):
+        return value.isoformat() if hasattr(value, "isoformat") else str(value)
+    if hasattr(value, "hex"):
+        return str(value)
+    return str(value)
+
+
+def _shadow_sqlite_value(value: Any) -> Any:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, sort_keys=True, default=_shadow_json_default)
+    if hasattr(value, "hex") and not isinstance(value, str):
+        return str(value)
+    return value
+
+
 # ─── Shadow DB singleton ──────────────────────────────────────────────
 
 class ShadowDB:
@@ -689,28 +711,21 @@ class ShadowDB:
         conn.commit()
         self._conn = conn
 
-    async def row_exists_in_shadow(self, table: str, row_id: str) -> bool:
-        """Check if a row ID exists in a shadow DB table."""
-        def _sync() -> bool:
+    async def get_all_shadow_row_hashes(self, table: str) -> dict[str, str]:
+        """Fetch all row IDs and their server row hashes from a shadow DB table."""
+        def _sync() -> dict[str, str]:
             with self._lock:
                 conn = self._conn
                 if conn is None:
-                    return False
-                row = conn.execute(
-                    f"SELECT 1 FROM [{table}] WHERE id = ? LIMIT 1", (row_id,)
-                ).fetchone()
-                return row is not None
-        return await asyncio.to_thread(_sync)
-
-    async def get_all_shadow_ids(self, table: str) -> set[str]:
-        """Fetch all row IDs from a shadow DB table in a single query."""
-        def _sync() -> set[str]:
-            with self._lock:
-                conn = self._conn
-                if conn is None:
-                    return set()
-                rows = conn.execute(f"SELECT id FROM [{table}]").fetchall()
-                return {str(r[0]) for r in rows}
+                    return {}
+                try:
+                    rows = conn.execute(
+                        "SELECT row_id, row_hash FROM crr_server_row_hashes WHERE table_name = ?",
+                        (table,)
+                    ).fetchall()
+                    return {str(r[0]): str(r[1]) for r in rows}
+                except Exception:
+                    return {}
         return await asyncio.to_thread(_sync)
 
     async def publish_server_authoritative_tables(
@@ -742,15 +757,30 @@ class ShadowDB:
 
             result = await db.execute(text(stmt), params)
             
-            existing_ids = set()
-            if not cfg.get("server_authoritative"):
-                existing_ids = await self.get_all_shadow_ids(table)
+            existing_hashes = await self.get_all_shadow_row_hashes(table)
 
             for row in result.mappings().all():
                 row_dict = dict(row)
-                if not cfg.get("server_authoritative"):
-                    if str(row_dict["id"]) in existing_ids:
-                        continue
+                
+                # Compute hash in python memory to check if anything changed before calling SQLite
+                shadow_row = {
+                    column: _shadow_sqlite_value(row_dict.get(column))
+                    for column in columns
+                    if column in row_dict
+                }
+                if "id" not in shadow_row or not shadow_row["id"]:
+                    continue
+                normalized = json.dumps(
+                    shadow_row,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=_shadow_json_default,
+                )
+                row_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+                
+                if existing_hashes.get(str(shadow_row["id"])) == row_hash:
+                    continue
+                    
                 if await self.upsert_shadow_server_row(table, row_dict):
                     published += 1
         return published
@@ -759,26 +789,6 @@ class ShadowDB:
         """Upsert one Postgres row into shadow SQLite if its content changed."""
         if table not in _CRR_TABLE_CONFIG:
             raise ValueError(f"Unknown CRR table: {table}")
-
-        def _json_default(value: Any) -> str:
-            if isinstance(value, (date, datetime, Decimal)):
-                return value.isoformat() if hasattr(value, "isoformat") else str(value)
-            if hasattr(value, "hex"):
-                return str(value)
-            return str(value)
-
-        def _sqlite_value(value: Any) -> Any:
-            if isinstance(value, bool):
-                return int(value)
-            if isinstance(value, (date, datetime)):
-                return value.isoformat()
-            if isinstance(value, Decimal):
-                return float(value)
-            if isinstance(value, (dict, list)):
-                return json.dumps(value, sort_keys=True, default=_json_default)
-            if hasattr(value, "hex") and not isinstance(value, str):
-                return str(value)
-            return value
 
         def _sync() -> bool:
             with self._lock:
@@ -790,7 +800,7 @@ class ShadowDB:
                     if r[1] != "rowid"
                 ]
                 shadow_row = {
-                    column: _sqlite_value(row.get(column))
+                    column: _shadow_sqlite_value(row.get(column))
                     for column in table_columns
                     if column in row
                 }
@@ -800,7 +810,7 @@ class ShadowDB:
                     shadow_row,
                     sort_keys=True,
                     separators=(",", ":"),
-                    default=_json_default,
+                    default=_shadow_json_default,
                 )
                 row_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
                 current = conn.execute(
