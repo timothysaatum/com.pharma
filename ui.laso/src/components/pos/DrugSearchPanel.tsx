@@ -119,25 +119,38 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
     const [error, setError] = useState<string | null>(null);
     const [focusedIndex, setFocusedIndex] = useState(-1);
 
+    const [page, setPage] = useState(1);
+    const [hasMore, setHasMore] = useState(false);
+    const [isLoadingMore, setIsLoadingMore] = useState(false);
+
     const debouncedQuery = useDebounce(query, 300);
     const inputRef = useRef<HTMLInputElement>(null);
     const abortRef = useRef<AbortController | null>(null);
     const activeBranchId = useAuthStore((state) => state.activeBranchId);
 
-    const fetchDrugs = useCallback(async () => {
-        abortRef.current?.abort();
-        const controller = new AbortController();
-        abortRef.current = controller;
+    const fetchDrugs = useCallback(async (pageNum: number, append: boolean) => {
+        if (!activeBranchId) {
+            setDrugs([]);
+            setHasMore(false);
+            return;
+        }
 
-        setIsLoading(true);
-        setError(null);
-        setFocusedIndex(-1);
+        if (append) {
+            setIsLoadingMore(true);
+        } else {
+            setIsLoading(true);
+            setError(null);
+            setFocusedIndex(-1);
+            setPage(1);
+            abortRef.current?.abort();
+            const controller = new AbortController();
+            abortRef.current = controller;
+        }
 
         try {
-            if (!activeBranchId) {
-                setDrugs([]);
-                return;
-            }
+            const pageSize = 30;
+            const signal = append ? undefined : abortRef.current?.signal;
+
             if (!navigator.onLine || !isBackendReachable()) {
                 const result = await localRead.getBranchInventory(
                     activeBranchId,
@@ -146,49 +159,62 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                         include_zero_stock: false,
                         drug_type: typeFilter || undefined,
                     },
-                    1,
-                    30
+                    pageNum,
+                    pageSize
                 );
-                if (!controller.signal.aborted) {
-                    setDrugs(result.items.map(inventoryItemToDrug));
-                    const sq: Record<string, number> = {};
-                    for (const item of result.items) {
-                        const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
-                        sq[item.drug_id] = vbq;
-                    }
-                    setStockQuantities(sq);
-                }
-                return;
-            }
-            const result = await inventoryApi.getBranchInventory(
-                activeBranchId,
-                {
-                    page: 1,
-                    page_size: 30,
-                    search: debouncedQuery || undefined,
-                    include_zero_stock: false,
-                    drug_type: typeFilter || undefined,
-                },
-                controller.signal
-            );
-            if (!controller.signal.aborted) {
-                setDrugs(result.items.map(inventoryItemToDrug));
+                
+                const newDrugs = result.items.map(inventoryItemToDrug);
+                setDrugs((prev) => {
+                    const next = append ? [...prev, ...newDrugs] : newDrugs;
+                    setHasMore(next.length < result.total && newDrugs.length === pageSize);
+                    return next;
+                });
+
                 const sq: Record<string, number> = {};
                 for (const item of result.items) {
                     const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
                     sq[item.drug_id] = vbq;
                 }
-                setStockQuantities(sq);
-                void cacheBranchInventoryRows(result.items);
+                setStockQuantities((prev) => ({ ...prev, ...sq }));
+                return;
+            }
+
+            const result = await inventoryApi.getBranchInventory(
+                activeBranchId,
+                {
+                    page: pageNum,
+                    page_size: pageSize,
+                    search: debouncedQuery || undefined,
+                    include_zero_stock: false,
+                    drug_type: typeFilter || undefined,
+                },
+                signal
+            );
+
+            const isAborted = signal?.aborted ?? false;
+            if (!isAborted) {
+                const newDrugs = result.items.map(inventoryItemToDrug);
+                setDrugs((prev) => {
+                    const next = append ? [...prev, ...newDrugs] : newDrugs;
+                    setHasMore(next.length < result.total && newDrugs.length === pageSize);
+                    return next;
+                });
+
+                const sq: Record<string, number> = {};
+                for (const item of result.items) {
+                    const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
+                    sq[item.drug_id] = vbq;
+                }
+                setStockQuantities((prev) => ({ ...prev, ...sq }));
+                
+                if (!append) {
+                    void cacheBranchInventoryRows(result.items);
+                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
-            if (!controller.signal.aborted && isOfflineError(err)) {
+            if (!append && !abortRef.current?.signal.aborted && isOfflineError(err)) {
                 try {
-                    if (!activeBranchId) {
-                        setDrugs([]);
-                        return;
-                    }
                     const result = await localRead.getBranchInventory(
                         activeBranchId,
                         {
@@ -196,31 +222,44 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                             include_zero_stock: false,
                             drug_type: typeFilter || undefined,
                         },
-                        1,
+                        pageNum,
                         30
                     );
-                    if (!controller.signal.aborted) {
-                        setDrugs(result.items.map(inventoryItemToDrug));
+                    if (!abortRef.current?.signal.aborted) {
+                        const newDrugs = result.items.map(inventoryItemToDrug);
+                        setDrugs(newDrugs);
                         const sq: Record<string, number> = {};
                         for (const item of result.items) {
                             const vbq = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity;
                             sq[item.drug_id] = vbq;
                         }
                         setStockQuantities(sq);
+                        setHasMore(newDrugs.length < result.total && newDrugs.length === 30);
                     }
                 } catch (localErr) {
-                    if (!controller.signal.aborted) setError(parseApiError(localErr));
+                    if (!abortRef.current?.signal.aborted) setError(parseApiError(localErr));
                 }
                 return;
             }
-            if (!controller.signal.aborted) setError(parseApiError(err));
+            setError(parseApiError(err));
         } finally {
-            if (!controller.signal.aborted) setIsLoading(false);
+            if (!append) {
+                setIsLoading(false);
+            } else {
+                setIsLoadingMore(false);
+            }
         }
     }, [debouncedQuery, typeFilter, activeBranchId]);
 
+    const handleLoadMore = useCallback(() => {
+        if (isLoadingMore || !hasMore) return;
+        const nextPage = page + 1;
+        setPage(nextPage);
+        fetchDrugs(nextPage, true);
+    }, [page, isLoadingMore, hasMore, fetchDrugs]);
+
     useEffect(() => {
-        fetchDrugs();
+        fetchDrugs(1, false);
         return () => abortRef.current?.abort();
     }, [fetchDrugs]);
 
@@ -373,6 +412,18 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                                 </button>
                             );
                         })}
+
+                        {hasMore && (
+                            <div className="p-4 flex justify-center">
+                                <button
+                                    disabled={isLoadingMore}
+                                    onClick={handleLoadMore}
+                                    className="px-4 py-2 text-xs font-semibold text-brand-600 hover:text-brand-700 bg-brand-50 hover:bg-brand-100 rounded-full transition-colors disabled:opacity-60 disabled:cursor-wait"
+                                >
+                                    {isLoadingMore ? "Loading more..." : "Load more items"}
+                                </button>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
