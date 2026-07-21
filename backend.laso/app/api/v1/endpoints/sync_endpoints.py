@@ -20,7 +20,7 @@ from app.core.deps import get_current_active_user, get_db
 from app.models.user.user_model import User
 from app.schemas.sync_schemas import (
     PullRequest, PullResponse,
-    PushRequest, PushResponse,
+    PushRequest, PushResponse, AsyncPushResponse,
 )
 from app.services.sync.sync_service import SyncService
 
@@ -132,3 +132,82 @@ async def sync_status(
         "organization_id": str(current_user.organization_id),
         "user_id": str(current_user.id),
     }
+
+
+@router.post(
+    "/push-async",
+    response_model=AsyncPushResponse,
+    summary="Push offline records (async, queue-backed)",
+    description=(
+        "Accepts a batch of offline records and enqueues them for sequential processing "
+        "by the branch Celery worker. Returns HTTP 202 immediately with a job_id. "
+        "Poll GET /sync/push-async/{job_id} for the result."
+    ),
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def push_async(
+    request: PushRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> AsyncPushResponse:
+    if not _user_can_sync_branch(current_user, request.branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this branch.",
+        )
+
+    from celery_app import celery_app
+    from app.tasks.sync_tasks import process_sync_batch
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if not settings.REDIS_URL:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Async sync queue is not configured on this server. Use POST /sync/push instead.",
+        )
+
+    branch_id_str = str(request.branch_id)
+    queue_name = f"sync.branch.{branch_id_str}"
+
+    task = process_sync_batch.apply_async(
+        kwargs={
+            "payload": request.model_dump(mode="json"),
+            "organization_id": str(current_user.organization_id),
+            "pushed_by": str(current_user.id),
+        },
+        queue=queue_name,
+    )
+
+    return AsyncPushResponse(
+        job_id=task.id,
+        queue=queue_name,
+        status="queued",
+        branch_id=request.branch_id,
+        record_count=len(request.records),
+    )
+
+
+@router.get(
+    "/push-async/{job_id}",
+    summary="Poll async push job status",
+    description="Returns the status and result of a previously queued async push job.",
+)
+async def push_async_status(
+    job_id: str,
+    current_user: User = Depends(get_current_active_user),
+) -> dict:
+    from celery_app import celery_app
+    from celery.result import AsyncResult
+
+    result = AsyncResult(job_id, app=celery_app)
+    response = {
+        "job_id": job_id,
+        "status": result.status,  # PENDING, STARTED, SUCCESS, FAILURE, RETRY
+    }
+    if result.ready():
+        if result.successful():
+            response["result"] = result.get()
+        else:
+            response["error"] = str(result.result)
+    return response

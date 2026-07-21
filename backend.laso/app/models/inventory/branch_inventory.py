@@ -73,7 +73,18 @@ class BranchInventory(Base, TimestampMixin, SyncTrackingMixin):
         nullable=True,
         comment="Branch-specific selling price override"
     )
-    
+
+    version_id: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        nullable=False,
+        server_default="1",
+        comment=(
+            "Optimistic lock counter. Incremented on every inventory "
+            "deduction so concurrent sync writers can detect stale reads."
+        )
+    )
+
     # Relationships
     branch: Mapped["Branch"] = relationship(back_populates="inventory")
     drug: Mapped["Drug"] = relationship(back_populates="inventory")
@@ -152,6 +163,17 @@ class DrugBatch(Base, TimestampMixin, SyncTrackingMixin):
     cost_price: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
     selling_price: Mapped[Optional[float]] = mapped_column(Numeric(10, 2))
     
+    version_id: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        nullable=False,
+        server_default="1",
+        comment=(
+            "Optimistic lock counter. Incremented on every batch "
+            "deduction during offline sale sync."
+        )
+    )
+
     # Supplier information
     supplier: Mapped[Optional[str]] = mapped_column(String(255))
     purchase_order_id: Mapped[Optional[uuid.UUID]] = mapped_column(

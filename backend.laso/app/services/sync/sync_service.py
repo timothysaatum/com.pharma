@@ -47,7 +47,7 @@ It does NOT strip ``None`` values — intentional nulls (e.g. clearing
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone, date
+from datetime import datetime, timezone, date, timedelta
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -770,6 +770,39 @@ class SyncService:
                 next_pull_timestamp=now,
             )
 
+        # Enforce maximum batch size. Clients with large offline backlogs must
+        # chunk their outbox into batches of ≤100 records before pushing.
+        # This prevents lock contention on branch_inventory rows when many
+        # terminals reconnect simultaneously after a network outage.
+        if len(request.records) > 100:
+            error = (
+                f"Push batch too large: {len(request.records)} records. "
+                "Maximum is 100 per request — chunk your outbox before pushing."
+            )
+            logger.warning(
+                "Rejected oversized push: branch=%s records=%d",
+                request.branch_id, len(request.records),
+            )
+            return PushResponse(
+                accepted=[],
+                conflicts=[],
+                failed=[
+                    PushResult(
+                        local_id=r.local_id,
+                        table_name=r.table_name,
+                        success=False,
+                        error=error,
+                    )
+                    for r in request.records
+                ],
+                total_received=len(request.records),
+                total_accepted=0,
+                total_conflicts=0,
+                total_failed=len(request.records),
+                sync_timestamp=now,
+                next_pull_timestamp=now,
+            )
+
         table_priority = {
             "price_contracts": 0,
             "customers": 1,
@@ -915,6 +948,20 @@ class SyncService:
             len(accepted), len(conflicts), len(failed),
         )
 
+        # Compute acked_cursor: the ISO-8601 UTC timestamp of the latest
+        # operation receipt committed in this batch.  The client stores this
+        # and prunes its local sync_outbox of fully-acknowledged rows.
+        latest_receipt_ts = await db.scalar(
+            select(SyncOperationReceipt.created_at)
+            .where(
+                SyncOperationReceipt.branch_id == request.branch_id,
+                SyncOperationReceipt.organization_id == organization_id,
+            )
+            .order_by(SyncOperationReceipt.created_at.desc())
+            .limit(1)
+        )
+        acked_cursor = latest_receipt_ts.isoformat() if latest_receipt_ts else None
+
         return PushResponse(
             accepted=accepted,
             conflicts=conflicts,
@@ -925,6 +972,7 @@ class SyncService:
             total_failed=len(failed),
             sync_timestamp=now,
             next_pull_timestamp=now,
+            acked_cursor=acked_cursor,
         )
 
     # =========================================================================
@@ -1112,6 +1160,39 @@ class SyncService:
                 success=False,
                 error="Sales are immutable after creation; use cancel/refund endpoints.",
             ), None
+
+        # ------------------------------------------------------------------
+        # Backdating guard: reject offline sales created more than 7 days
+        # ago to prevent fraudulent antedating attacks.  A legitimate device
+        # that was offline for >7 days is an operational anomaly that must
+        # be reviewed by a manager before the records can be imported.
+        # ------------------------------------------------------------------
+        _MAX_OFFLINE_DAYS = 7
+        if record.created_offline_at is not None:
+            _cutoff = datetime.now(timezone.utc) - timedelta(days=_MAX_OFFLINE_DAYS)
+            _sale_ts = record.created_offline_at
+            if _sale_ts.tzinfo is None:
+                _sale_ts = _sale_ts.replace(tzinfo=timezone.utc)
+            if _sale_ts < _cutoff:
+                logger.warning(
+                    "Sync: Rejected backdated sale %s "
+                    "(created_offline_at=%s, cutoff=%s, branch=%s)",
+                    record.local_id,
+                    _sale_ts.isoformat(),
+                    _cutoff.isoformat(),
+                    branch_id,
+                )
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error=(
+                        f"Sale was created {_MAX_OFFLINE_DAYS}+ days ago "
+                        f"({_sale_ts.date().isoformat()}) and cannot be "
+                        "automatically synced. Contact your manager for "
+                        "manual reconciliation."
+                    ),
+                ), None
 
         existing = (await db.execute(
             select(Sale).where(
@@ -1302,6 +1383,54 @@ class SyncService:
                     error=f"Sale {field} does not match its line items.",
                 ), None
 
+        # ------------------------------------------------------------------
+        # Server-side price cross-check (fraud signal).
+        # Re-fetch server-canonical unit prices and compare with what the
+        # client sent.  A mismatch > 1% is logged as a suspicious event.
+        # This does NOT reject the sale (avoids disrupting pharmacy ops)
+        # but creates an auditable trail for manager review.
+        # ------------------------------------------------------------------
+        try:
+            price_warnings: list[str] = []
+            for item_dict in normalized_items:
+                raw_drug_id = item_dict.get("drug_id")
+                client_price = item_dict.get("unit_price")
+                if raw_drug_id is None or client_price is None:
+                    continue
+                server_drug = await db.scalar(
+                    select(Drug).where(
+                        Drug.id == uuid.UUID(str(raw_drug_id)),
+                        Drug.organization_id == organization_id,
+                    )
+                )
+                if server_drug is None or server_drug.unit_price is None:
+                    continue
+                try:
+                    client_d = Decimal(str(client_price))
+                    server_d = Decimal(str(server_drug.unit_price))
+                except (ArithmeticError, TypeError, ValueError):
+                    continue
+                if server_d > 0 and abs(client_d - server_d) / server_d > Decimal("0.01"):
+                    price_warnings.append(
+                        f"Drug {server_drug.name}: client_price={client_d}, "
+                        f"server_price={server_d}, "
+                        f"delta={abs(client_d - server_d)}"
+                    )
+            if price_warnings:
+                logger.warning(
+                    "Sync: Price mismatch detected in sale %s (branch=%s, cashier=%s): %s",
+                    record.local_id,
+                    branch_id,
+                    pushed_by,
+                    " | ".join(price_warnings),
+                )
+        except Exception:
+            # Never let the price check crash the sale
+            logger.exception(
+                "Sync: Price cross-check failed for sale %s; continuing.",
+                record.local_id,
+            )
+
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
         payment_status = str(safe_data.get("payment_status") or "completed")
         payment_status = _PAYMENT_STATUS_ALIASES.get(payment_status, payment_status)
@@ -1381,12 +1510,22 @@ class SyncService:
         try:
             inventory_plan = None
             if record.data.get("sync_protocol_version") == 2:
+                # Evaluate batch expiry at the time the cashier completed the
+                # sale (created_offline_at), not at the current sync time.
+                # This prevents valid offline sales from being rejected because
+                # a batch expired while the device was disconnected.
+                sale_date = (
+                    record.created_offline_at.date()
+                    if record.created_offline_at is not None
+                    else date.today()
+                )
                 inventory_plan, inventory_error = (
                     await SyncService._prepare_offline_sale_inventory(
                         db=db,
                         branch_id=branch_id,
                         items=normalized_items,
                         organization_id=organization_id,
+                        sale_date=sale_date,
                     )
                 )
                 if inventory_error:
@@ -2008,6 +2147,7 @@ class SyncService:
         branch_id: uuid.UUID,
         items: list[dict[str, Any]],
         organization_id: uuid.UUID,
+        sale_date: Optional[date] = None,
     ) -> tuple[
         Optional[tuple[dict[uuid.UUID, BranchInventory], dict[uuid.UUID, list[DrugBatch]]]],
         Optional[str],
@@ -2015,7 +2155,13 @@ class SyncService:
         """Lock and validate all stock needed by a protocol-v2 offline sale.
 
         Business rules:
-        1. Batches expiring today are still valid (``>= date.today()``).
+        1. Batches non-expired at ``sale_date`` are valid (``>= sale_date``).
+           ``sale_date`` should be the date the cashier completed the offline
+           sale (``created_offline_at``).  Defaults to ``date.today()`` when
+           not supplied, but callers should always provide it so that batches
+           are evaluated at sale time rather than sync time.  This prevents
+           valid offline sales from being rejected because a batch expired
+           while the device was disconnected.
         2. NULL expiry_date is treated as non-expired (some products lack dates).
         3. If items carry an explicit ``batch_id`` (the offline allocation), try
            those specific batches first.  If they no longer have enough stock,
@@ -2074,7 +2220,9 @@ class SyncService:
             .with_for_update()
         )).scalars().all()
 
-        today = date.today()
+        # Use the sale date for expiry checks so that batches valid at sale
+        # time are not incorrectly rejected when syncing after batch expiry.
+        today = sale_date if sale_date is not None else date.today()
 
         # Split into valid (non-expired, including today and NULL) and expired
         valid_batches: dict[uuid.UUID, list[DrugBatch]] = {}

@@ -392,6 +392,26 @@ class PushResponse(BaseSchema):
     # (e.g. inventory totals updated by a sale it just pushed)
     next_pull_timestamp: datetime
 
+    # Cursor for client-side log compaction.
+    # The client stores this value and prunes its local sync_outbox of all
+    # rows with synced_at <= acked_cursor to prevent disk bloat over time.
+    acked_cursor: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO-8601 UTC timestamp of the latest operation receipt committed "
+            "in this batch. Client prunes sync_outbox rows with "
+            "synced_at <= acked_cursor to prevent local disk bloat."
+        ),
+    )
+
+
+class AsyncPushResponse(BaseSchema):
+    """Returned immediately (HTTP 202) when a push batch is accepted into the async queue."""
+    job_id: str = Field(description="Celery task ID. Poll GET /sync/push-async/{job_id} for result.")
+    queue: str = Field(description="Redis queue the task was routed to.")
+    status: str = Field(default="queued")
+    branch_id: uuid.UUID
+    record_count: int = Field(description="Number of records submitted in this batch.")
 
 # ──────────────────────────────────────────────────────────────────────────────
 # CRR PUSH  (branch → server, via cr-sqlite crsql_changes)

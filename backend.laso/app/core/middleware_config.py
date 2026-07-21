@@ -13,6 +13,7 @@ import uuid
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,11 @@ def register_middleware(app: FastAPI, settings) -> None:
     cors_origins = get_cors_origins(settings)
     logger.info("CORS origins: %s", cors_origins)
 
-    # ── CORS ──────────────────────────────────────────────────────────────────
+    # ── GZip (decompresses incoming gzip requests; compresses responses ≥ 1 KB) ─
+    # Must be added before CORS so it wraps all responses, including preflight.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # ── CORS ──────────────────────────────────────────────────────────────
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origins,
@@ -57,7 +62,13 @@ def register_middleware(app: FastAPI, settings) -> None:
         ),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Accept", "X-Request-ID"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "X-Request-ID",
+            "Content-Encoding",   # Allow gzip-compressed sync push payloads
+        ],
     )
 
     # ── Request-ID ────────────────────────────────────────────────────────────
