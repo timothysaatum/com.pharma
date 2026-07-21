@@ -1126,6 +1126,15 @@ class SyncEngine {
     }
 
     async discardFailure(tableName: string, recordId: string): Promise<void> {
+        const db = await getDb();
+        try {
+            await db.execute(
+                `UPDATE ${tableName} SET sync_status = 'synced' WHERE id = $1`,
+                [recordId]
+            );
+        } catch (err) {
+            console.warn(`[SyncEngine] Failed to update sync_status to synced for ${tableName}:${recordId}:`, err);
+        }
         await dequeue(tableName, recordId);
         await this.loadPersistedQueueState();
     }
