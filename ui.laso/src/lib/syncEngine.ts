@@ -434,7 +434,8 @@ class SyncEngine {
             for (const item of response.failed) {
                 hadFailures = true;
                 const error = item.error?.trim() || "Server rejected the record without an error message.";
-                const attempts = await markQueueError(item.table_name, item.local_id, error);
+                const isDeferredRx = error.includes("Prescription not yet synced") || error.includes("is not yet synced");
+                const attempts = await markQueueError(item.table_name, item.local_id, error, isDeferredRx);
                 if (attempts >= MAX_PUSH_ATTEMPTS) {
                     deadLettered++;
                 }

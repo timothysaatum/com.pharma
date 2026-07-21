@@ -2325,7 +2325,8 @@ export async function dequeue(tableName: string, recordId: string): Promise<void
 export async function markQueueError(
   tableName: string,
   recordId: string,
-  error: string
+  error: string,
+  skipIncrement = false
 ): Promise<number> {
   const db = await getDb();
   const currentRows = await db.select<{ attempts: number }[]>(
@@ -2336,15 +2337,28 @@ export async function markQueueError(
   const nextAttemptAt = new Date(
     Date.now() + new RetryBackoff().getDelay(currentAttempts)
   ).toISOString();
-  await db.execute(
-    `UPDATE sync_queue
-     SET attempts = attempts + 1,
-         last_attempt_at = $1,
-         next_attempt_at = $2,
-         error = $3
-     WHERE table_name = $4 AND record_id = $5`,
-    [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
-  );
+
+  if (skipIncrement) {
+    await db.execute(
+      `UPDATE sync_queue
+       SET last_attempt_at = $1,
+           next_attempt_at = $2,
+           error = $3
+       WHERE table_name = $4 AND record_id = $5`,
+      [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
+    );
+  } else {
+    await db.execute(
+      `UPDATE sync_queue
+       SET attempts = attempts + 1,
+           last_attempt_at = $1,
+           next_attempt_at = $2,
+           error = $3
+       WHERE table_name = $4 AND record_id = $5`,
+      [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
+    );
+  }
+
   notifySyncQueueChanged();
   const rows = await db.select<{ attempts: number }[]>(
     "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
