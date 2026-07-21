@@ -1135,6 +1135,18 @@ class SyncEngine {
         } catch (err) {
             console.warn(`[SyncEngine] Failed to update sync_status to synced for ${tableName}:${recordId}:`, err);
         }
+
+        if (tableName === "sales") {
+            try {
+                await db.execute(
+                    `UPDATE offline_sales SET sync_status = 'synced' WHERE id = $1`,
+                    [recordId]
+                );
+            } catch (err) {
+                console.warn(`[SyncEngine] Failed to update offline_sales status for ${recordId}:`, err);
+            }
+        }
+
         await dequeue(tableName, recordId);
         await this.loadPersistedQueueState();
     }
