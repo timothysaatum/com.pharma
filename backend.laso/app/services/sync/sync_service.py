@@ -1178,7 +1178,7 @@ class SyncService:
             _sale_ts = record.created_offline_at
             if _sale_ts.tzinfo is None:
                 _sale_ts = _sale_ts.replace(tzinfo=timezone.utc)
-            if _sale_ts < _cutoff:
+            if _sale_ts < _cutoff and not record.force:
                 logger.warning(
                     "Sync: Rejected backdated sale %s "
                     "(created_offline_at=%s, cutoff=%s, branch=%s)",
@@ -1195,7 +1195,7 @@ class SyncService:
                         f"Sale was created {_MAX_OFFLINE_DAYS}+ days ago "
                         f"({_sale_ts.date().isoformat()}) and cannot be "
                         "automatically synced. Contact your manager for "
-                        "manual reconciliation."
+                        "manual reconciliation (admin can use force=true to override)."
                     ),
                 ), None
 
@@ -3357,20 +3357,25 @@ class SyncService:
         _parse_datetime_fields(safe)
         safe["updated_at"] = datetime.now(timezone.utc)
 
+        await db.flush()  # Ensure same-batch customer inserts are flushed to session before query
+
         customer_id = safe.get("customer_id")
-        customer_exists = await db.scalar(
-            select(Customer.id).where(
-                Customer.id == customer_id,
-                Customer.organization_id == organization_id,
+        if customer_id:
+            customer_exists = await db.scalar(
+                select(Customer.id).where(
+                    Customer.id == customer_id,
+                    Customer.organization_id == organization_id,
+                )
             )
-        )
-        if not customer_exists:
-            return PushResult(
-                local_id=record.local_id,
-                table_name="prescriptions",
-                success=False,
-                error=f"Customer {customer_id} not found in organization.",
-            ), None
+            if not customer_exists:
+                # Customer may be created in the same offline session but not yet committed across transactions.
+                # Return a retryable error so the client re-enqueues this prescription automatically.
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="prescriptions",
+                    success=False,
+                    error=f"Customer {customer_id} is not yet synced. Prescription will be retried automatically.",
+                ), None
 
         # Validate branch_id if an older/newer client sends it, then stamp the
         # authenticated sync branch so ownership never depends on client data.

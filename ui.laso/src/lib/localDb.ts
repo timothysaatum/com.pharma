@@ -2969,7 +2969,7 @@ export async function cacheBranchScopedDrugs(branchId: string, items: Drug[]): P
         (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
          sync_status, sync_version, synced_at, updated_at, created_at)
        VALUES ($1, $2, $3, $4, $5, NULL, $6, 'synced', 1, NULL, $7, $7)
-       ON CONFLICT(branch_id, drug_id) DO UPDATE SET
+       ON CONFLICT(id) DO UPDATE SET
          quantity = CASE
            WHEN excluded.quantity > 0 THEN excluded.quantity
            ELSE branch_inventory.quantity

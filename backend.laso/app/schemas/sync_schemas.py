@@ -301,10 +301,10 @@ class PushRecord(BaseSchema):
 class PushRequest(BaseSchema):
     """
     Batch of pending records the branch is pushing after reconnecting.
-    Max 500 records per request — client should chunk larger backlogs.
+    Max 100 records per request — client should chunk larger backlogs.
     """
     branch_id: uuid.UUID
-    records: List[PushRecord] = Field(..., min_length=1, max_length=500)
+    records: List[PushRecord] = Field(..., min_length=1, max_length=100)
 
     @field_validator("records")
     @classmethod

@@ -36,6 +36,7 @@ from decimal import Decimal
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1352,20 +1353,10 @@ async def test_push_batch_oversized_limit_rejected(
         r.data["cashier_id"] = str(user.id)
         records.append(r)
 
-    request = PushRequest(branch_id=branch.id, records=records)
+    with pytest.raises(ValidationError) as exc_info:
+        PushRequest(branch_id=branch.id, records=records)
 
-    response = await SyncService.push(
-        db=db,
-        request=request,
-        organization_id=org.id,
-        pushed_by=user.id,
-    )
-
-    # The entire batch should fail with an early size error
-    assert response.total_received == 101
-    assert response.total_accepted == 0
-    assert response.total_failed == 101
-    assert all("Push batch too large" in (f.error or "") for f in response.failed)
+    assert "100" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

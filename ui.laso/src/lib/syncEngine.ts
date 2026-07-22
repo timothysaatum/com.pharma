@@ -411,8 +411,16 @@ class SyncEngine {
             for (const conflict of response.conflicts) {
                 if (conflict.resolution === "server_wins") {
                     await this.applyServerRecord(conflict.table_name, conflict.server_record);
+                    // Extract the server-assigned ID so markSynced can rename the local row
+                    // and update dependent tables (e.g. offline_sales) to the canonical ID.
+                    // Without this, the local row stays with the client UUID while the pull
+                    // later upserts the server record under a different UUID — creating a
+                    // duplicate customer/prescription/sale.
+                    const conflictServerId = (
+                        conflict.server_record as Record<string, unknown> | null
+                    )?.id as string | undefined;
                     await dequeue(conflict.table_name, conflict.local_id);
-                    await this.markSynced(conflict.table_name, conflict.local_id);
+                    await this.markSynced(conflict.table_name, conflict.local_id, conflictServerId);
                 } else {
                     // manual_required — persist conflict for later review
                     await markQueueConflict(
@@ -615,6 +623,39 @@ class SyncEngine {
                         "DELETE FROM suppressed_crr_changes WHERE db_version <= $1",
                         [maxDbVersion],
                     );
+
+                    // Bug fix: CRR push has no per-row accepted[] list, so markSynced is
+                    // never called for CRR-pushed prescriptions. Without this, their
+                    // sync_status stays 'pending' forever, and the upsertMany guard on
+                    // pull skips them, making prescriptions created offline invisible
+                    // once the app reconnects.
+                    // In cr-sqlite, pk holds the record UUID for every column change row.
+                    const pushedRxPks = [
+                        ...new Set(
+                            changes
+                                .filter((c) => c.table === "prescriptions" && c.pk)
+                                .map((c) => String(c.pk))
+                                .filter(Boolean)
+                        ),
+                    ];
+                    if (pushedRxPks.length > 0) {
+                        const crrNow = new Date().toISOString();
+                        for (const rxId of pushedRxPks) {
+                            try {
+                                await db.execute(
+                                    `UPDATE prescriptions
+                                     SET sync_status = 'synced', synced_at = $1
+                                     WHERE id = $2 AND sync_status = 'pending'`,
+                                    [crrNow, rxId]
+                                );
+                            } catch {
+                                // Non-fatal: best effort; will be retried on the next sync cycle
+                            }
+                        }
+                        console.log(
+                            `[SyncEngine] CRR push: marked ${pushedRxPks.length} prescription(s) as synced`
+                        );
+                    }
                 } else if (hadFailures) {
                     console.warn(
                         "[SyncEngine] CRR push had failed rows; retaining push cursor at %d",
@@ -649,11 +690,27 @@ class SyncEngine {
             let repaired = 0;
             for (const sale of pendingSales) {
                 if (sale.sync_status === "synced") continue;
-                const queued = await db.select<{ record_id: string }[]>(
-                    "SELECT record_id FROM sync_queue WHERE table_name = 'sales' AND record_id = $1 LIMIT 1",
+                // Bug fix: previously skipped any sale with a sync_queue entry, including
+                // dead-lettered ones (attempts >= MAX_PUSH_ATTEMPTS). Those sales were
+                // frozen forever — present locally, never reaching the server.
+                const queued = await db.select<{ record_id: string; attempts: number }[]>(
+                    "SELECT record_id, attempts FROM sync_queue WHERE table_name = 'sales' AND record_id = $1 LIMIT 1",
                     [sale.id],
                 );
-                if (queued.length > 0) continue;
+                const isDeadLettered = queued.length > 0 && queued[0].attempts >= MAX_PUSH_ATTEMPTS;
+                if (queued.length > 0 && !isDeadLettered) continue;
+                if (isDeadLettered) {
+                    // Reset the dead-lettered entry so it is picked up on the next push cycle
+                    await db.execute(
+                        `UPDATE sync_queue
+                         SET attempts = 0, error = NULL, last_attempt_at = NULL, next_attempt_at = NULL
+                         WHERE table_name = 'sales' AND record_id = $1`,
+                        [sale.id]
+                    );
+                    repaired += 1;
+                    console.log(`[SyncEngine] Reset dead-lettered sale ${sale.id} for retry`);
+                    continue;
+                }
                 await enqueue("sales", sale.id, "create", 1, {
                     ...sale.sale_data,
                     items: sale.sale_items,
@@ -695,6 +752,8 @@ class SyncEngine {
             let totalRemoteChanges = 0;
             let totalMergeDirectives = 0;
             let hasMore = true;
+            let crrPullStallCount = 0; // tracks consecutive has_more=true with no db_version progress
+
 
             while (hasMore) {
                 const requestSinceDbVersion = sinceDbVersion;
@@ -738,8 +797,17 @@ class SyncEngine {
 
                 hasMore = response.has_more && newDbVersion > requestSinceDbVersion;
                 if (response.has_more && !hasMore) {
+                    crrPullStallCount++;
+                    if (crrPullStallCount >= 3) {
+                        throw new Error(
+                            `[SyncEngine] CRR pull stalled: server reported has_more but did not advance ` +
+                            `db_version after ${crrPullStallCount} consecutive attempts. ` +
+                            `Aborting to prevent an infinite loop; changes will be retried on the next sync cycle.`
+                        );
+                    }
                     console.warn(
-                        "[SyncEngine] CRR pull reported has_more without cursor progress; stopping to avoid a tight loop"
+                        `[SyncEngine] CRR pull: has_more=true but db_version stalled (attempt ${crrPullStallCount}/3); ` +
+                        "stopping to avoid a tight loop"
                     );
                 }
             }
@@ -1006,7 +1074,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.audit_logs.length) {
+        if (response.audit_logs?.length) {
             await upsertMany("audit_logs", response.audit_logs, [
                 "id", "organization_id", "user_id", "user_full_name", "action",
                 "entity_type", "entity_id", "changes", "ip_address", "user_agent",
@@ -1047,12 +1115,25 @@ class SyncEngine {
             );
 
             if (table === "sales") {
-                await db.execute(
-                    `UPDATE offline_sales
-                     SET sync_status = 'synced', error_message = NULL, updated_at = $1
-                     WHERE id = $2`,
-                    [now, localId]
-                );
+                // Bug fix: when the server assigned a new UUID (ID rename), update
+                // offline_sales.id to serverId before marking synced. Using localId
+                // would hit 0 rows after the rename, leaving the sale as 'pending'
+                // and causing a duplicate push on the next reconcile cycle.
+                if (serverId && serverId !== localId) {
+                    await db.execute(
+                        `UPDATE offline_sales
+                         SET id = $1, sync_status = 'synced', error_message = NULL, updated_at = $2
+                         WHERE id = $3`,
+                        [serverId, now, localId]
+                    );
+                } else {
+                    await db.execute(
+                        `UPDATE offline_sales
+                         SET sync_status = 'synced', error_message = NULL, updated_at = $1
+                         WHERE id = $2`,
+                        [now, serverId ?? localId]
+                    );
+                }
             }
         } catch {
             // Table may not have sync_status (e.g. sync_queue) — safe to ignore
