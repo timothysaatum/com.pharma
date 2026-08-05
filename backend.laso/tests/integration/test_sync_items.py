@@ -21,8 +21,10 @@ from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.models.prescriptions.prescription_model import Prescription
 from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.sales.sales_model import PurchaseOrder, Supplier
-from app.models.system_md.sys_models import SyncOperationReceipt
-from app.schemas.sync_schemas import PushRequest, PushRecord
+from app.models.system_md.sys_models import SyncOperationReceipt, SystemAlert
+from app.models.user.user_model import User
+from app.schemas.sync_schemas import PushRequest, PushRecord, PullRequest
+from app.schemas import sync_error_codes
 from app.services.sync.sync_service import SyncService
 
 
@@ -652,6 +654,11 @@ class TestSyncSaleItems:
             f"prescription_id={missing_prescription_id}"
         ]
         assert await db.get(Sale, sale_id) is None
+        # Contract check for docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+        # finding S4: this deferred-retry failure must carry the typed
+        # error_code the client's sync engine actually branches on
+        # (src/lib/syncErrorCodes.ts) — not just matching prose.
+        assert response.failed[0].error_code == sync_error_codes.DEPENDENCY_NOT_SYNCED
 
     async def test_push_batch_sorts_customer_prescription_before_sale(
         self,
@@ -2018,3 +2025,448 @@ class TestSyncSaleItems:
         assert existing is not None
         assert existing.organization_id == other_org.id
         assert existing.first_name == "Other"
+
+
+@pytest.mark.asyncio
+class TestVoidFailedSale:
+    """
+    Regression coverage for docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+    finding P3: voiding a dead-lettered offline sale must require manager
+    approval and leave an audit trail, unlike the old client-only
+    ``discardFailure`` which silently flipped a local flag.
+    """
+
+    async def test_self_approval_by_privileged_user_succeeds_and_is_audited(
+        self, db: AsyncSession, setup_test_data
+    ):
+        from app.api.v1.endpoints.sync_endpoints import void_failed_sale
+        from app.models.system_md.sys_models import AuditLog
+        from app.schemas.sync_schemas import VoidFailedSaleRequest
+
+        org, branch, user, drugs, customer = setup_test_data
+        sale_id = uuid.uuid4()
+
+        response = await void_failed_sale(
+            VoidFailedSaleRequest(
+                sale_id=sale_id,
+                branch_id=branch.id,
+                reason="Server permanently rejected: stock already reconciled manually",
+                manager_approval_user_id=user.id,
+                sale_number="OFF-SALE-999",
+                total_amount="42.50",
+                last_sync_error="insufficient stock",
+                sync_attempts=10,
+            ),
+            current_user=user,
+            db=db,
+        )
+
+        assert response.voided is True
+
+        audit = await db.get(AuditLog, response.audit_log_id)
+        assert audit is not None
+        assert audit.action == "void_unsynced_sale"
+        assert audit.entity_type == "Sale"
+        assert audit.entity_id == sale_id
+        assert audit.organization_id == org.id
+        assert audit.changes["approved_by"] == str(user.id)
+        assert audit.changes["sale_number"] == "OFF-SALE-999"
+        assert audit.changes["sync_attempts"] == 10
+
+    async def test_rejects_approver_without_refund_permission(
+        self, db: AsyncSession, setup_test_data
+    ):
+        from fastapi import HTTPException
+        from app.api.v1.endpoints.sync_endpoints import void_failed_sale
+        from app.schemas.sync_schemas import VoidFailedSaleRequest
+
+        org, branch, user, drugs, customer = setup_test_data
+
+        unprivileged = User(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            username="cashier",
+            email="cashier@pharmacy.com",
+            password_hash="hashed_pwd",
+            full_name="Cashier",
+            is_super_admin=False,
+            is_active=True,
+            assigned_branches=[branch.id],
+        )
+        db.add(unprivileged)
+        await db.commit()
+        # Mirror get_current_user's eager role load — .roles is otherwise a
+        # lazy relationship, and this test calls the endpoint function
+        # directly rather than through a real request.
+        unprivileged._effective_permissions = set()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await void_failed_sale(
+                VoidFailedSaleRequest(
+                    sale_id=uuid.uuid4(),
+                    branch_id=branch.id,
+                    reason="Trying to self-approve without permission",
+                    manager_approval_user_id=unprivileged.id,
+                ),
+                current_user=unprivileged,
+                db=db,
+            )
+
+        assert exc_info.value.status_code == 403
+        assert "permission" in exc_info.value.detail.lower()
+
+    async def test_rejects_when_caller_lacks_branch_access(
+        self, db: AsyncSession, setup_test_data
+    ):
+        from fastapi import HTTPException
+        from app.api.v1.endpoints.sync_endpoints import void_failed_sale
+        from app.schemas.sync_schemas import VoidFailedSaleRequest
+
+        org, branch, user, drugs, customer = setup_test_data
+
+        no_branch_user = User(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            username="no_branch",
+            email="no_branch@pharmacy.com",
+            password_hash="hashed_pwd",
+            full_name="No Branch",
+            is_super_admin=False,
+            is_active=True,
+            assigned_branches=[],
+        )
+        db.add(no_branch_user)
+        await db.commit()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await void_failed_sale(
+                VoidFailedSaleRequest(
+                    sale_id=uuid.uuid4(),
+                    branch_id=branch.id,
+                    reason="No branch access",
+                    manager_approval_user_id=user.id,
+                ),
+                current_user=no_branch_user,
+                db=db,
+            )
+
+        assert exc_info.value.status_code == 403
+        assert "branch" in exc_info.value.detail.lower()
+
+
+@pytest.mark.asyncio
+class TestOfflineSalePriceReconciliation:
+    """
+    Regression coverage for docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+    finding P1: offline sale prices must be reconciled against the same
+    branch-level price pricing_calculator.py uses online (not the org-wide
+    catalog price), and a mismatch must raise a persistent, reviewable
+    SystemAlert rather than only a log line.
+    """
+
+    async def test_price_drift_beyond_tolerance_raises_system_alert(
+        self, db: AsyncSession, setup_test_data
+    ):
+        org, branch, user, drugs, customer = setup_test_data
+        drug = drugs[0]
+
+        db.add(BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=100,
+            reserved_quantity=0,
+            selling_price=Decimal("10.00"),
+        ))
+        await db.commit()
+
+        sale_id = uuid.uuid4()
+        request = PushRequest(
+            branch_id=branch.id,
+            records=[PushRecord(
+                operation_id=uuid.uuid4(),
+                local_id=str(sale_id),
+                table_name="sales",
+                operation="create",
+                sync_version=1,
+                created_offline_at=datetime.now(timezone.utc),
+                data={
+                    "id": str(sale_id),
+                    "sale_number": "SYNC-PRICE-DRIFT-001",
+                    "subtotal": 25.0,
+                    "discount_amount": 0.0,
+                    "tax_amount": 0.0,
+                    "total_amount": 25.0,
+                    "payment_method": "cash",
+                    "cashier_id": str(user.id),
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "drug_id": str(drug.id),
+                            "drug_name": drug.name,
+                            "quantity": 5,
+                            "unit_price": 5.0,
+                            "subtotal": 25.0,
+                            "total_price": 25.0,
+                        }
+                    ],
+                },
+            )],
+        )
+
+        response = await SyncService.push(db, request, org.id, user.id)
+
+        assert response.total_accepted == 1, "price drift must not block the sale"
+
+        alerts = (await db.execute(
+            select(SystemAlert).where(
+                SystemAlert.organization_id == org.id,
+                SystemAlert.alert_type == "security",
+                SystemAlert.drug_id == drug.id,
+            )
+        )).scalars().all()
+        assert len(alerts) == 1
+        assert "SYNC-PRICE-DRIFT-001" in alerts[0].message
+        assert "5.0" in alerts[0].message or "5" in alerts[0].message
+        assert "10.00" in alerts[0].message or "10" in alerts[0].message
+        assert alerts[0].is_resolved is False
+
+    async def test_price_matching_branch_price_does_not_alert_even_when_catalog_price_differs(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """The old check compared against Drug.unit_price only — a branch
+        with its own selling_price that legitimately differs from the org
+        catalog price would have been a permanent false positive."""
+        org, branch, user, drugs, customer = setup_test_data
+        drug = drugs[0]
+        drug.unit_price = Decimal("100.00")
+
+        db.add(BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=100,
+            reserved_quantity=0,
+            selling_price=Decimal("5.00"),
+        ))
+        await db.commit()
+
+        sale_id = uuid.uuid4()
+        request = PushRequest(
+            branch_id=branch.id,
+            records=[PushRecord(
+                operation_id=uuid.uuid4(),
+                local_id=str(sale_id),
+                table_name="sales",
+                operation="create",
+                sync_version=1,
+                created_offline_at=datetime.now(timezone.utc),
+                data={
+                    "id": str(sale_id),
+                    "sale_number": "SYNC-PRICE-MATCH-001",
+                    "subtotal": 25.0,
+                    "discount_amount": 0.0,
+                    "tax_amount": 0.0,
+                    "total_amount": 25.0,
+                    "payment_method": "cash",
+                    "cashier_id": str(user.id),
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "drug_id": str(drug.id),
+                            "drug_name": drug.name,
+                            "quantity": 5,
+                            "unit_price": 5.0,
+                            "subtotal": 25.0,
+                            "total_price": 25.0,
+                        }
+                    ],
+                },
+            )],
+        )
+
+        response = await SyncService.push(db, request, org.id, user.id)
+        assert response.total_accepted == 1
+
+        alerts = (await db.execute(
+            select(SystemAlert).where(
+                SystemAlert.organization_id == org.id,
+                SystemAlert.alert_type == "security",
+                SystemAlert.drug_id == drug.id,
+            )
+        )).scalars().all()
+        assert alerts == []
+
+    async def test_contract_priced_sale_skips_price_reconciliation(
+        self, db: AsyncSession, setup_test_data
+    ):
+        org, branch, user, drugs, customer = setup_test_data
+        drug = drugs[0]
+
+        db.add(BranchInventory(
+            id=uuid.uuid4(),
+            branch_id=branch.id,
+            drug_id=drug.id,
+            quantity=100,
+            reserved_quantity=0,
+            selling_price=Decimal("10.00"),
+        ))
+        await db.commit()
+
+        sale_id = uuid.uuid4()
+        request = PushRequest(
+            branch_id=branch.id,
+            records=[PushRecord(
+                operation_id=uuid.uuid4(),
+                local_id=str(sale_id),
+                table_name="sales",
+                operation="create",
+                sync_version=1,
+                created_offline_at=datetime.now(timezone.utc),
+                data={
+                    "id": str(sale_id),
+                    "sale_number": "SYNC-PRICE-CONTRACT-001",
+                    "price_contract_id": str(uuid.uuid4()),
+                    "subtotal": 25.0,
+                    "discount_amount": 0.0,
+                    "tax_amount": 0.0,
+                    "total_amount": 25.0,
+                    "payment_method": "cash",
+                    "cashier_id": str(user.id),
+                    "status": "completed",
+                    "items": [
+                        {
+                            "id": str(uuid.uuid4()),
+                            "drug_id": str(drug.id),
+                            "drug_name": drug.name,
+                            "quantity": 5,
+                            "unit_price": 5.0,
+                            "subtotal": 25.0,
+                            "total_price": 25.0,
+                        }
+                    ],
+                },
+            )],
+        )
+
+        response = await SyncService.push(db, request, org.id, user.id)
+        assert response.total_accepted == 1
+
+        alerts = (await db.execute(
+            select(SystemAlert).where(
+                SystemAlert.organization_id == org.id,
+                SystemAlert.alert_type == "security",
+                SystemAlert.drug_id == drug.id,
+            )
+        )).scalars().all()
+        assert alerts == [], "contract-priced sales must skip catalog/branch price reconciliation"
+
+
+@pytest.mark.asyncio
+class TestPullPagination:
+    """
+    Regression coverage for docs/reviews/2026-08-11-offline-first-architecture-review.md
+    finding #5: the legacy /sync/pull path issued one unbounded query per
+    table with has_more never set, so a brand-new device's first sync
+    against a branch with a large sales history could time out and, since
+    last_sync_at only advances on full success, restart from scratch every
+    retry. This suite verifies pagination actually resumes and never loses
+    or duplicates rows, including when several rows share one updated_at.
+    """
+
+    async def _make_sale(self, org, branch, user, number, updated_at):
+        return Sale(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            branch_id=branch.id,
+            sale_number=number,
+            subtotal=Decimal("10.00"),
+            discount_amount=Decimal("0.00"),
+            tax_amount=Decimal("0.00"),
+            total_amount=Decimal("10.00"),
+            amount_paid=Decimal("10.00"),
+            change_amount=Decimal("0.00"),
+            payment_method="cash",
+            cashier_id=user.id,
+            status="completed",
+            updated_at=updated_at,
+        )
+
+    async def test_pull_paginates_and_resumes_without_loss_or_duplication(
+        self, db: AsyncSession, setup_test_data, monkeypatch
+    ):
+        from app.services.sync import sync_service as sync_service_module
+
+        monkeypatch.setattr(sync_service_module, "_PULL_PAGE_SIZE", 3)
+
+        org, branch, user, drugs, customer = setup_test_data
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        sales = [
+            await self._make_sale(org, branch, user, f"PAGE-SALE-{i}", base + timedelta(minutes=i))
+            for i in range(7)
+        ]
+        db.add_all(sales)
+        await db.commit()
+
+        seen_numbers: list[str] = []
+        since = None
+        rounds = 0
+        while True:
+            rounds += 1
+            assert rounds <= 10, "pagination did not terminate — likely an infinite loop"
+            response = await SyncService.pull(
+                db,
+                PullRequest(branch_id=branch.id, tables=["sales"], last_sync_at=since),
+                org.id,
+            )
+            seen_numbers.extend(s.sale_number for s in response.sales)
+            since = response.sync_timestamp
+            if not response.has_more:
+                break
+
+        assert rounds >= 3, "7 rows at page size 3 must take at least 3 round trips"
+        assert sorted(seen_numbers) == sorted(f"PAGE-SALE-{i}" for i in range(7))
+        assert len(seen_numbers) == len(set(seen_numbers)), "no sale should be delivered twice"
+
+    async def test_pull_pagination_boundary_holds_back_tied_timestamps(
+        self, db: AsyncSession, setup_test_data, monkeypatch
+    ):
+        """Rows 2 and 3 share the exact same updated_at and straddle the
+        page boundary (limit=2) — both must still be delivered, in some
+        page, exactly once."""
+        from app.services.sync import sync_service as sync_service_module
+
+        monkeypatch.setattr(sync_service_module, "_PULL_PAGE_SIZE", 2)
+
+        org, branch, user, drugs, customer = setup_test_data
+        base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        tied_ts = base + timedelta(minutes=1)
+        sales = [
+            await self._make_sale(org, branch, user, "TIE-SALE-0", base),
+            await self._make_sale(org, branch, user, "TIE-SALE-1", tied_ts),
+            await self._make_sale(org, branch, user, "TIE-SALE-2", tied_ts),
+            await self._make_sale(org, branch, user, "TIE-SALE-3", base + timedelta(minutes=2)),
+        ]
+        db.add_all(sales)
+        await db.commit()
+
+        seen_numbers: list[str] = []
+        since = None
+        rounds = 0
+        while True:
+            rounds += 1
+            assert rounds <= 10
+            response = await SyncService.pull(
+                db,
+                PullRequest(branch_id=branch.id, tables=["sales"], last_sync_at=since),
+                org.id,
+            )
+            seen_numbers.extend(s.sale_number for s in response.sales)
+            since = response.sync_timestamp
+            if not response.has_more:
+                break
+
+        assert sorted(seen_numbers) == [f"TIE-SALE-{i}" for i in range(4)]
+        assert len(seen_numbers) == len(set(seen_numbers))

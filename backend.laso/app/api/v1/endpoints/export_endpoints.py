@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_user, get_db, require_permission
+from app.core.deps import get_current_user, get_db, require_permission, require_any_permission
 from app.models.user.user_model import User
 from app.services.export.excel_export_service import ExcelExportService
 
@@ -21,7 +21,7 @@ router = APIRouter(prefix="/export", tags=["Export"])
 async def export_sales_excel(
     year: int = Query(...),
     month: Optional[int] = Query(None),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("process_sales", "view_reports")),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -52,7 +52,7 @@ async def export_sales_excel(
 async def export_inventory_excel(
     year: int = Query(...),
     month: int = Query(...),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_any_permission("view_inventory", "manage_inventory", "view_reports")),
     db: AsyncSession = Depends(get_db),
 ):
     """

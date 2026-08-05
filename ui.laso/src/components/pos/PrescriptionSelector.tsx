@@ -126,12 +126,14 @@ export function PrescriptionSelector({
                 { page: 1, size: 10, status_filter: "active", include_expired: false },
                 signal
             );
-            const fetched = result.items ?? [];
-            const rxDrugIds = rxItems.map((item) => item.drug.id);
-            const filtered = fetched.filter((rx) =>
-                rx.medications?.some((med) => rxDrugIds.includes(med.drug_id))
-            );
-            setPrescriptions(filtered.map(toSearchItem));
+            // The server search endpoint returns the lightweight
+            // PrescriptionSearchItem (medications_count only, not the
+            // medications array), by design — it's a quick-selection list,
+            // not a detail view. It can't be filtered by drug match
+            // client-side; the sale itself is still validated server-side
+            // against the chosen prescription's actual medications. Items
+            // are already in the right shape here — no re-mapping needed.
+            setPrescriptions(result.items ?? []);
         } catch (err) {
             if (err instanceof Error && err.name === "AbortError") return;
             try {

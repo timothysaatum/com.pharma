@@ -12,6 +12,7 @@ import { get, post } from "@/api/client";
 import type {
     PullRequest, PullResponse, PushRequest, PushResponse,
     CrrPushRequest, CrrPushResponse,
+    VoidFailedSaleRequest, VoidFailedSaleResponse,
 } from "@/types";
 
 export interface SyncStatusResponse {
@@ -52,4 +53,14 @@ export const syncApi = {
     /** POST /sync/crr-pull — pull crsql_changes delta from server */
     crrPull: (req: PullRequest): Promise<PullResponse> =>
         post<PullResponse>("/sync/crr-pull", req),
+
+    /**
+     * POST /sync/void-failed-sale
+     * Records an audited, manager-approved decision to stop retrying a
+     * dead-lettered offline sale. Requires connectivity — voiding a sale
+     * is a compliance-relevant action and must leave a server-side trail,
+     * unlike the old purely-local discard.
+     */
+    voidFailedSale: (req: VoidFailedSaleRequest): Promise<VoidFailedSaleResponse> =>
+        post<VoidFailedSaleResponse>("/sync/void-failed-sale", req),
 };

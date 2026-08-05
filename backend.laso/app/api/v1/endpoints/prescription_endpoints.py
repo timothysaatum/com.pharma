@@ -13,7 +13,7 @@ Features:
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, text, bindparam
+from sqlalchemy import select, and_, or_, text, bindparam, false
 from typing import Optional, List
 from datetime import date, datetime, timezone
 import uuid
@@ -456,12 +456,18 @@ async def list_prescriptions(
     """
     conditions = [Prescription.organization_id == current_user.organization_id]
 
-    # Scope prescriptions by user's assigned branches (facility isolation)
-    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
-    if not current_user.is_super_admin and assigned_strs:
-        conditions.append(Prescription.branch_id.in_(
-            [uuid.UUID(b) for b in assigned_strs]
-        ))
+    # Scope prescriptions by user's assigned branches (facility isolation).
+    # A non-elevated user with NO assigned branches must see nothing, not
+    # everything — see docs/decisions/0005-purchase-order-branch-authorization-gap.md
+    # for the same bug class first found (and fixed) on purchase orders.
+    if not current_user.is_super_admin:
+        assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+        if assigned_strs:
+            conditions.append(Prescription.branch_id.in_(
+                [uuid.UUID(b) for b in assigned_strs]
+            ))
+        else:
+            conditions.append(false())
 
     if customer_id:
         conditions.append(Prescription.customer_id == customer_id)
@@ -624,13 +630,18 @@ async def search_customer_prescriptions(
         Prescription.organization_id == current_user.organization_id,
     ]
 
-    # Scope by user's assigned branches (facility isolation)
-    assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
-    if not current_user.is_super_admin and assigned_strs:
-        conditions.append(Prescription.branch_id.in_(
-            [uuid.UUID(b) for b in assigned_strs]
-        ))
-    
+    # Scope by user's assigned branches (facility isolation). A non-elevated
+    # user with NO assigned branches must see nothing, not every branch's
+    # prescriptions for this customer — see docs/decisions/0005.
+    if not current_user.is_super_admin:
+        assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
+        if assigned_strs:
+            conditions.append(Prescription.branch_id.in_(
+                [uuid.UUID(b) for b in assigned_strs]
+            ))
+        else:
+            conditions.append(false())
+
     if not include_expired:
         conditions.append(Prescription.expiry_date >= date.today())
     

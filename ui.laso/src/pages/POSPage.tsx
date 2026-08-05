@@ -41,6 +41,7 @@ import {
     shouldUseOfflineSalePath,
 } from "@/lib/offlineFallback";
 import { appEvents, useAppEvent } from "@/lib/events";
+import type { Drug } from "@/types";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
 import { useOrganization } from "@/hooks/useOrganization";
@@ -436,7 +437,7 @@ export default function POSPage() {
                         patient_copay: null,
                         requires_prescription: item.requiresPrescription,
                         prescription_verified: item.prescriptionVerified,
-                        prescription_id: item.prescriptionVerified ? payload.prescription_id : null,
+                        prescription_id: item.prescriptionVerified ? (payload.prescription_id ?? null) : null,
                         allergy_check_performed: false,
                         created_at: now,
                         updated_at: now,

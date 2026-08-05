@@ -141,7 +141,7 @@ async def check_customer_allergies(
 
 async def load_and_validate_contract(
     db: AsyncSession,
-    contract_id: uuid.UUID,
+    contract_id: Optional[uuid.UUID],
     branch_id: uuid.UUID,
     drug_ids: List[uuid.UUID],
     user: User,
@@ -187,23 +187,46 @@ async def load_and_validate_contract(
     """
     today = date.today()
 
+    # Every sale resolves to a contract — compute_item_pricing() requires
+    # one (it isn't Optional and dereferences contract.* unconditionally).
+    # A cashier ringing up a plain walk-in sale doesn't pick one explicitly;
+    # fall back to the organization's designated default contract (the
+    # is_default_contract flag exists specifically for this). Without this
+    # fallback, no sale could ever be processed without an explicit
+    # price_contract_id — including the most basic cash sale — for any
+    # organization, live-discovered during deployment orchestration: see
+    # docs/reviews/2026-08-05-live-deployment-orchestration-report.md.
+    lookup_conditions = [
+        PriceContract.organization_id == user.organization_id,
+        PriceContract.is_deleted == False,
+        PriceContract.is_active == True,
+        PriceContract.status == "active",
+    ]
+    if contract_id is not None:
+        lookup_conditions.append(PriceContract.id == contract_id)
+    else:
+        lookup_conditions.append(PriceContract.is_default_contract == True)
+
     result = await db.execute(
         select(PriceContract)
         .options(selectinload(PriceContract.insurance_provider))
-        .where(
-            PriceContract.id == contract_id,
-            PriceContract.organization_id == user.organization_id,
-            PriceContract.is_deleted == False,
-            PriceContract.is_active == True,
-            PriceContract.status == "active",
-        )
+        .where(*lookup_conditions)
         .with_for_update()
     )
     contract = result.scalar_one_or_none()
     if not contract:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Price contract not found or not active.",
+            detail=(
+                "Price contract not found or not active."
+                if contract_id is not None
+                else (
+                    "No price contract was specified and this organization has no "
+                    "default contract configured. An admin must create a default "
+                    "price contract (Settings → Price Contracts) before sales can "
+                    "be processed."
+                )
+            ),
         )
 
     # Date range

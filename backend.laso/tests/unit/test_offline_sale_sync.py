@@ -1448,3 +1448,156 @@ async def test_push_response_returns_acked_cursor(
     parsed_dt = datetime.fromisoformat(response.acked_cursor)
     assert parsed_dt is not None
 
+
+
+# ── Clock-skew guards ──────────────────────────────────────────────────
+# Regression coverage for docs/reviews/2026-08-11-offline-first-architecture-review.md
+# finding #4: created_offline_at is unverified client input. The backdating
+# guard only ever bounded the past; a forward-skewed clock had no bound at
+# all, and a backward-skewed clock (within the still-allowed 7-day window)
+# could make an already-expired batch look valid at the claimed sale time.
+
+@pytest.mark.asyncio
+async def test_forward_dated_sale_rejected(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """A device clock skewed more than 24h into the future must be rejected,
+    not silently accepted with a future created_at that would corrupt
+    daily-sales/shift/tax-period reporting."""
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    batch = _make_batch(drug.id, branch.id, "BATCH-FUTURE", 10, date.today() + timedelta(days=365))
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    future_timestamp = datetime.now(timezone.utc) + timedelta(days=2)
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-FORWARD-SKEW",
+        drug_id=drug.id,
+        quantity=1,
+        created_offline_at=future_timestamp,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+
+    result, conflict = await SyncService._push_sale(
+        db=db, record=record, organization_id=org.id, branch_id=branch.id, pushed_by=user.id,
+    )
+
+    assert not result.success
+    assert "ahead of the server clock" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_minor_forward_skew_within_tolerance_is_accepted(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """Small clock drift / timezone edge cases must not block legitimate sales."""
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    batch = _make_batch(drug.id, branch.id, "BATCH-MINOR-SKEW", 10, date.today() + timedelta(days=365))
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    slightly_future = datetime.now(timezone.utc) + timedelta(hours=6)
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-MINOR-SKEW",
+        drug_id=drug.id,
+        quantity=1,
+        created_offline_at=slightly_future,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+
+    result, conflict = await SyncService._push_sale(
+        db=db, record=record, organization_id=org.id, branch_id=branch.id, pushed_by=user.id,
+    )
+
+    assert result.success
+
+
+@pytest.mark.asyncio
+async def test_backward_clock_skew_beyond_trust_window_cannot_launder_expired_batch(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """
+    A batch that expired 3 days ago must be rejected even if the client
+    claims (via created_offline_at) that the sale happened 5 days ago —
+    within the 7-day backdating window, but well beyond the 48h window
+    the server trusts for expiry evaluation. Before the fix, a backward-
+    skewed device clock could make this already-expired batch look valid
+    at the claimed sale time.
+    """
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    expiry = date.today() - timedelta(days=3)
+    batch = _make_batch(drug.id, branch.id, "BATCH-STALE-SKEW", 10, expiry)
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    claimed_sale_time = datetime.now(timezone.utc) - timedelta(days=5)
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-BACKWARD-SKEW",
+        drug_id=drug.id,
+        quantity=1,
+        created_offline_at=claimed_sale_time,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+
+    result, conflict = await SyncService._push_sale(
+        db=db, record=record, organization_id=org.id, branch_id=branch.id, pushed_by=user.id,
+    )
+
+    assert not result.success
+    assert "expired" in (result.error or "").lower() or "insufficient" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_legitimate_delayed_sync_within_trust_window_still_accepted(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """The original feature this trust window protects must still work:
+    a batch that expired after a legitimately-recent offline sale (well
+    within the 48h trust window) is still evaluated at sale time, not
+    sync time."""
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    expiry = date.today() - timedelta(days=1)  # expired yesterday
+    batch = _make_batch(drug.id, branch.id, "BATCH-RECENT-VALID", 10, expiry)
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    # 36 hours ago — within the 48h trust window, and the batch (expired
+    # yesterday) was still valid at that point.
+    claimed_sale_time = datetime.now(timezone.utc) - timedelta(hours=36)
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-RECENT-DELAYED-SYNC",
+        drug_id=drug.id,
+        quantity=1,
+        created_offline_at=claimed_sale_time,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+
+    result, conflict = await SyncService._push_sale(
+        db=db, record=record, organization_id=org.id, branch_id=branch.id, pushed_by=user.id,
+    )
+
+    assert result.success

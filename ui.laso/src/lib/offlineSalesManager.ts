@@ -14,52 +14,11 @@
 import {
   getDb,
   notifySyncQueueChanged,
+  type Database,
   type DbTransactionStatement,
 } from "@/lib/localDb";
 import { buildLocalSalePayload } from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
-
-/**
- * Allocate batches using FEFO (First Expiry, First Out) for a given drug
- * and quantity at a branch. Returns the list of batch allocations needed.
- * Throws if insufficient batch stock exists.
- */
-async function allocateBatchesFefo(
-  branchId: string,
-  drugId: string,
-  quantity: number,
-): Promise<Array<{ batchId: string; allocatedQty: number }>> {
-  const db = await getDb();
-  const validBatches = await db.select<Array<{ id: string; remaining_quantity: number; expiry_date: string }>>(
-    `SELECT id, remaining_quantity, expiry_date
-     FROM drug_batches
-     WHERE branch_id = $1
-       AND drug_id = $2
-       AND remaining_quantity > 0
-       AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE('now'))
-     ORDER BY expiry_date ASC, created_at ASC`,
-    [branchId, drugId]
-  );
-
-  let remaining = quantity;
-  const allocations: Array<{ batchId: string; allocatedQty: number }> = [];
-
-  for (const batch of validBatches) {
-    if (remaining <= 0) break;
-    const take = Math.min(batch.remaining_quantity, remaining);
-    allocations.push({ batchId: batch.id, allocatedQty: take });
-    remaining -= take;
-  }
-
-  if (remaining > 0) {
-    throw new Error(
-      `Insufficient non-expired batch stock for drug ${drugId}. ` +
-      `Available from valid batches: ${quantity - remaining}, requested: ${quantity}.`
-    );
-  }
-
-  return allocations;
-}
 
 export interface OfflineSaleRecord {
   id: string;
@@ -322,7 +281,7 @@ class OfflineSalesManager {
   }
 
   private async allocateBatchesForDrug(
-    db: any,
+    db: Database,
     branchId: string,
     drugId: string,
     quantity: number,

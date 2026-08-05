@@ -347,7 +347,7 @@ class PurchaseOrderService:
         """
         po = await PurchaseOrderService.get_purchase_order(db, po_id, include_details=True)
 
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "draft":
             raise HTTPException(
@@ -397,7 +397,7 @@ class PurchaseOrderService:
             )
 
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "pending":
             raise HTTPException(
@@ -445,7 +445,7 @@ class PurchaseOrderService:
             )
 
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "pending":
             raise HTTPException(
@@ -489,7 +489,7 @@ class PurchaseOrderService:
         path — use a dedicated reversal process for those.
         """
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status not in ("draft", "pending"):
             raise HTTPException(
@@ -575,7 +575,7 @@ class PurchaseOrderService:
                     detail="Purchase order not found",
                 )
 
-            PurchaseOrderService._assert_org_access(po, user)
+            PurchaseOrderService._assert_po_access(po, user)
 
             if po.status not in ("approved", "ordered"):
                 raise HTTPException(
@@ -637,43 +637,16 @@ class PurchaseOrderService:
                         detail=f"Cannot receive goods for a deleted drug (ID: {po_item.drug_id})",
                     )
 
-                # ── 1b. Guard: duplicate batch ──────────────────────────────
-                dup = await db.scalar(
-                    select(DrugBatch.id).where(
-                        DrugBatch.branch_id == po.branch_id,
-                        DrugBatch.drug_id == po_item.drug_id,
-                        DrugBatch.batch_number == item_receive.batch_number,
-                    )
-                )
-                if dup:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=(
-                            f"Batch '{item_receive.batch_number}' already exists "
-                            f"for this drug at this branch"
-                        ),
-                    )
-
-                # ── 2. Create DrugBatch ──────────────────────────────────────
-                batch = DrugBatch(
-                    id=uuid.uuid4(),
-                    branch_id=po.branch_id,
-                    drug_id=po_item.drug_id,
-                    batch_number=item_receive.batch_number,
-                    quantity=item_receive.quantity_received,
-                    remaining_quantity=item_receive.quantity_received,
-                    manufacturing_date=item_receive.manufacturing_date,
-                    expiry_date=item_receive.expiry_date,
-                    cost_price=po_item.unit_cost,
-                    supplier=po.supplier.name,
-                    purchase_order_id=po.id,
-                    created_at=_now(),
-                    updated_at=_now(),
-                )
-                db.add(batch)
-                batches_created += 1
-
-                # ── 3. Upsert BranchInventory (race-safe) ──────────────────
+                # ── 1b. Upsert BranchInventory (race-safe) ──────────────────
+                # Locked *before* the batch lookup below: DrugBatch has no
+                # unique constraint of its own (deliberately, for CRR conflict
+                # resolution — see docs/decisions), so it cannot serialize
+                # concurrent receipts of the same batch_number on its own.
+                # Taking this (branch, drug) lock first means two concurrent
+                # receive_goods calls for the same drug — including two
+                # identical-batch-number receipts — serialize here instead of
+                # both racing past the batch duplicate-check below (I6 in
+                # docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md).
                 # Use a savepoint + IntegrityError fallback so concurrent
                 # first-receipt for the same (branch, drug) does not collide.
                 from sqlalchemy.exc import IntegrityError
@@ -726,6 +699,69 @@ class PurchaseOrderService:
                         inventory.mark_as_pending_sync()
 
                 inventory_updated += 1
+
+                # ── 2. Find or append to an existing batch for this lot ─────
+                # A repeat receipt of the same (branch, drug, batch_number) —
+                # e.g. a large order delivered across two shipments — appends
+                # to the existing batch instead of being rejected. Matches
+                # the documented behavior in docs/plans/pharmacy_audit_plan.md
+                # §5.6 and closes I1 in the review above: the previous hard
+                # rejection forced staff to fabricate a distinct batch number
+                # to get stock in, corrupting lot traceability.
+                existing_batch = await db.scalar(
+                    select(DrugBatch)
+                    .where(
+                        DrugBatch.branch_id == po.branch_id,
+                        DrugBatch.drug_id == po_item.drug_id,
+                        DrugBatch.batch_number == item_receive.batch_number,
+                    )
+                    .with_for_update()
+                )
+                if existing_batch:
+                    if existing_batch.expiry_date != item_receive.expiry_date:
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail=(
+                                f"Batch '{item_receive.batch_number}' already exists for this "
+                                f"drug at this branch with expiry {existing_batch.expiry_date}, "
+                                f"which does not match the received expiry {item_receive.expiry_date}. "
+                                "Use a distinct batch number for a different expiry lot."
+                            ),
+                        )
+                    existing_batch.quantity += item_receive.quantity_received
+                    existing_batch.remaining_quantity += item_receive.quantity_received
+                    if existing_batch.manufacturing_date is None:
+                        existing_batch.manufacturing_date = item_receive.manufacturing_date
+                    if existing_batch.supplier is None:
+                        existing_batch.supplier = po.supplier.name
+                    if existing_batch.purchase_order_id is None:
+                        existing_batch.purchase_order_id = po.id
+                    existing_batch.updated_at = _now()
+                    existing_batch.mark_as_pending_sync()
+                    batch = existing_batch
+                    warnings.append(
+                        f"Batch '{item_receive.batch_number}' already existed — appended "
+                        f"{item_receive.quantity_received} units (new total: "
+                        f"{existing_batch.remaining_quantity})"
+                    )
+                else:
+                    batch = DrugBatch(
+                        id=uuid.uuid4(),
+                        branch_id=po.branch_id,
+                        drug_id=po_item.drug_id,
+                        batch_number=item_receive.batch_number,
+                        quantity=item_receive.quantity_received,
+                        remaining_quantity=item_receive.quantity_received,
+                        manufacturing_date=item_receive.manufacturing_date,
+                        expiry_date=item_receive.expiry_date,
+                        cost_price=po_item.unit_cost,
+                        supplier=po.supplier.name,
+                        purchase_order_id=po.id,
+                        created_at=_now(),
+                        updated_at=_now(),
+                    )
+                    db.add(batch)
+                    batches_created += 1
 
                 # ── 4. StockAdjustment audit row ─────────────────────────────
                 adjustment = StockAdjustment(
@@ -874,7 +910,7 @@ class PurchaseOrderService:
         - All drug IDs must belong to the organisation
         """
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "draft":
             raise HTTPException(
@@ -974,7 +1010,7 @@ class PurchaseOrderService:
     ) -> PurchaseOrder:
         """Update quantity and/or unit cost on a draft PO item."""
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "draft":
             raise HTTPException(
@@ -1040,7 +1076,7 @@ class PurchaseOrderService:
     ) -> PurchaseOrder:
         """Remove an item from a draft PO."""
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         if po.status != "draft":
             raise HTTPException(
@@ -1090,7 +1126,7 @@ class PurchaseOrderService:
     ) -> List[PurchaseOrderItemWithDetails]:
         """Return all items for a PO with resolved drug details (single JOIN)."""
         po = await PurchaseOrderService.get_purchase_order(db, po_id)
-        PurchaseOrderService._assert_org_access(po, user)
+        PurchaseOrderService._assert_po_access(po, user)
 
         rows = await db.execute(
             select(PurchaseOrderItem, Drug)
@@ -1124,12 +1160,46 @@ class PurchaseOrderService:
     # =========================================================================
 
     @staticmethod
-    def _assert_org_access(po: PurchaseOrder, user: User) -> None:
-        """Raise 403 if the PO belongs to a different organisation."""
+    def _has_cross_branch_po_access(user: User) -> bool:
+        """
+        Users who may act on purchase orders across every branch in their org.
+
+        Mirrors the rule already used by the PO list endpoint (decision 0005):
+        super admins, and users who hold an org-wide PO permission, are not
+        restricted to their assigned branches.
+        """
+        return (
+            user.is_super_admin
+            or user.has_permission("approve_purchase_orders")
+            or user.has_permission("view_reports")
+        )
+
+    @staticmethod
+    def _assert_po_access(po: PurchaseOrder, user: User) -> None:
+        """
+        Raise 403 if the PO belongs to a different organisation, or to a
+        branch the user is not permitted to act on.
+
+        A non-elevated user with no assigned branches must be denied access
+        entirely rather than falling through to unrestricted access — see
+        docs/decisions/0005-purchase-order-branch-authorization-gap.md, which
+        this generalizes from the list endpoint to every PO operation
+        (get, submit, approve, reject, cancel, receive, and item CRUD).
+        """
         if po.organization_id != user.organization_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Access denied",
+            )
+
+        if PurchaseOrderService._has_cross_branch_po_access(user):
+            return
+
+        assigned_branch_ids = {str(b) for b in (user.assigned_branches or [])}
+        if not assigned_branch_ids or str(po.branch_id) not in assigned_branch_ids:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to purchase orders for this branch",
             )
 
     @staticmethod

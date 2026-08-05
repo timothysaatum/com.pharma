@@ -272,3 +272,90 @@ class TestPriceContractsIntegration:
         # Fixed price 75 * 2 = 150 (instead of 100 * 2 = 200)
         assert response.sale.total_amount == Decimal("150.00")
         assert response.sale.total_discount_amount == Decimal("50.00")
+
+    async def test_sale_without_explicit_contract_falls_back_to_org_default(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """
+        Regression coverage for docs/reviews/2026-08-05-live-deployment-orchestration-report.md:
+        a cashier ringing up a plain walk-in sale never picks a
+        price_contract_id explicitly. Before this fix, load_and_validate_contract
+        had no None-handling at all, so EVERY sale without an explicit
+        contract 404'd — including the most basic cash sale, live-discovered
+        while orchestrating a fresh deployment end-to-end. The org's
+        is_default_contract must be resolved automatically instead.
+        """
+        org, branch, user, drugs, customer = setup_test_data
+
+        default_contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STANDARD",
+            contract_name="Standard Pricing",
+            contract_type="standard",
+            is_default_contract=True,
+            discount_percentage=0,
+            applies_to_all_branches=True,
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(default_contract)
+
+        batch = DrugBatch(
+            id=uuid.uuid4(), drug_id=drugs[0].id, branch_id=branch.id,
+            batch_number="BATCH-DEFAULT", expiry_date=date.today() + timedelta(days=365),
+            quantity=100, remaining_quantity=100,
+        )
+        db.add(batch)
+        inventory = BranchInventory(
+            id=uuid.uuid4(), branch_id=branch.id, drug_id=drugs[0].id,
+            quantity=100, reserved_quantity=0, selling_price=Decimal("100.00"),
+        )
+        db.add(inventory)
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=1)],
+            payment_method="cash",
+            amount_paid=Decimal("100.00"),
+        )
+
+        response = await SalesService.process_sale(db, sale_data, user)
+        assert response.sale.total_amount == Decimal("100.00")
+        assert response.sale.price_contract_id == default_contract.id
+
+    async def test_sale_without_contract_and_without_org_default_gives_actionable_error(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """No price_contract_id given, and the org has no default contract
+        configured — must fail with a clear, actionable message instead of
+        the generic 'not found' (which would look like a client bug rather
+        than a missing org setup step)."""
+        org, branch, user, drugs, customer = setup_test_data
+
+        batch = DrugBatch(
+            id=uuid.uuid4(), drug_id=drugs[0].id, branch_id=branch.id,
+            batch_number="BATCH-NODEFAULT", expiry_date=date.today() + timedelta(days=365),
+            quantity=100, remaining_quantity=100,
+        )
+        db.add(batch)
+        inventory = BranchInventory(
+            id=uuid.uuid4(), branch_id=branch.id, drug_id=drugs[0].id,
+            quantity=100, reserved_quantity=0, selling_price=Decimal("100.00"),
+        )
+        db.add(inventory)
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=1)],
+            payment_method="cash",
+            amount_paid=Decimal("100.00"),
+        )
+
+        with pytest.raises(Exception) as exc_info:
+            await SalesService.process_sale(db, sale_data, user)
+        assert "default" in str(exc_info.value).lower()

@@ -17,11 +17,13 @@ import uuid
 import logging
 
 from app.models.pharmacy.pharmacy_model import Organization, Branch
+from app.models.pricing.pricing_model import PriceContract
 from app.models.user.user_model import User, Role, UserRole, Permission
 from app.models.system_md.sys_models import AuditLog
 from app.schemas.branch_schemas import BranchCreate
 from app.utils.iso_dates import to_iso
 from app.core.security import SecurityUtils
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -166,6 +168,17 @@ class OrganizationOnboardingService:
             # Update admin's assigned branches (assign to all created branches)
             admin_user.assigned_branches = [branch.id for branch in created_branches]
             
+            # Create a default price contract. Sale processing resolves
+            # every sale to a PriceContract — compute_item_pricing() requires
+            # one and isn't Optional — falling back to the organization's
+            # is_default_contract when the cashier doesn't pick one
+            # explicitly (see load_and_validate_contract). Without one
+            # seeded here, no sale — not even a plain cash walk-in sale —
+            # could be processed until an admin manually created a
+            # contract, live-discovered during deployment orchestration:
+            # see docs/reviews/2026-08-05-live-deployment-orchestration-report.md.
+            await self._create_default_price_contract(organization.id, admin_user.id)
+
             # Initialize organization settings
             await self._initialize_organization_settings(organization)
             
@@ -342,6 +355,37 @@ class OrganizationOnboardingService:
         user_role = UserRole(user_id=user_id, role_id=role_id)
         self.db.add(user_role)
         await self.db.flush()
+
+    async def _create_default_price_contract(
+        self, organization_id: uuid.UUID, created_by: uuid.UUID
+    ) -> PriceContract:
+        """
+        Seed the organization's default (0% discount, applies-to-all-branches)
+        price contract, so plain cash sales work immediately without any
+        manual setup. See the call site for why this is required, not
+        cosmetic — sale processing has no code path that skips contract
+        resolution.
+        """
+        contract = PriceContract(
+            organization_id=organization_id,
+            contract_code="STANDARD",
+            contract_name="Standard Pricing",
+            description="Default contract — catalog pricing, no discount.",
+            contract_type="standard",
+            is_default_contract=True,
+            discount_type="percentage",
+            discount_percentage=0,
+            applies_to_prescription_only=False,
+            applies_to_otc=True,
+            applies_to_all_branches=True,
+            effective_from=date.today(),
+            status="active",
+            is_active=True,
+            created_by=created_by,
+        )
+        self.db.add(contract)
+        await self.db.flush()
+        return contract
     
     async def _create_organization(
         self,

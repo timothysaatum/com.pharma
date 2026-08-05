@@ -9,10 +9,11 @@ Mounts at /api/v1/sync (under the sync router)
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_current_active_user, get_db
+from app.models.pharmacy.pharmacy_model import Branch
 from app.models.user.user_model import User
 from app.schemas.sync_schemas import (
     CrrPushRequest,
@@ -131,7 +132,20 @@ async def crr_pull(
         await db.commit()
 
     max_db = await shadow.max_db_version()
+
+    # Every table's ownership is resolved to this org either directly (most
+    # tables carry organization_id) or via branch membership (branch_inventory
+    # / drug_batches, which only carry branch_id) — see S1 in
+    # docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md.
+    org_branch_ids = (
+        await db.execute(
+            select(Branch.id).where(Branch.organization_id == current_user.organization_id)
+        )
+    ).scalars().all()
+
     changes = await shadow.get_changes_since(
+        organization_id=str(current_user.organization_id),
+        org_branch_ids=[str(b) for b in org_branch_ids],
         since_db_version=request.crr_since_db_version,
     )
 

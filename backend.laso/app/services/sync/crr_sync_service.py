@@ -24,6 +24,7 @@ import uuid
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.customer.customer_model import Customer
 from app.models.inventory.inventory_model import Drug
 from app.schemas.sync_schemas import (
     CrrPushRecord,
@@ -37,9 +38,46 @@ logger = logging.getLogger(__name__)
 
 
 # ── Table-level FK / validation rules ─────────────────────────────────
+#
+# Every pushable (non-server-authoritative) CRR table MUST have a validator
+# here that at minimum enforces tenant ownership. Without one, a merged row
+# is upserted into Postgres via ON CONFLICT (id) DO UPDATE with whatever
+# organization_id/branch_id the client embedded — i.e. a client could
+# overwrite another organization's row by referencing its id. This closes
+# S2 in docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md.
 
 # Tables that are FK-validated before the merge is accepted
 _CRR_VALIDATORS: Dict[str, callable] = {}
+
+
+def _validate_scope(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    *,
+    check_organization: bool,
+    check_branch: bool,
+) -> Optional[str]:
+    """
+    Reject a merged row whose embedded organization_id/branch_id doesn't
+    match the authenticated push's scope.
+
+    The branch_id passed in here is the request's branch_id, which the
+    endpoint already verified is one the pushing user is assigned to
+    (``_user_can_sync_branch``) — so requiring an exact match also transitively
+    enforces organization ownership for tables that only carry branch_id
+    (branch_inventory, drug_batches), which have no organization_id column
+    of their own to check.
+    """
+    if check_organization:
+        row_org = str(merged.get("organization_id") or "")
+        if row_org != str(organization_id):
+            return f"organization_id {row_org!r} does not match authenticated organization"
+    if check_branch:
+        row_branch = str(merged.get("branch_id") or "")
+        if row_branch != str(branch_id):
+            return f"branch_id {row_branch!r} does not match the branch this push was authorized for"
+    return None
 
 
 async def _validate_branch_inventory(
@@ -52,6 +90,12 @@ async def _validate_branch_inventory(
 
     Returns an error string or None if valid.
     """
+    scope_error = _validate_scope(
+        merged, organization_id, branch_id, check_organization=False, check_branch=True
+    )
+    if scope_error:
+        return scope_error
+
     drug_id = merged.get("drug_id", "")
     if not drug_id:
         return "Missing drug_id"
@@ -81,7 +125,102 @@ async def _validate_branch_inventory(
     return None
 
 
+async def _validate_drug_batch(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Validate a merged drug_batches row (branch-scoped, no organization_id column)."""
+    scope_error = _validate_scope(
+        merged, organization_id, branch_id, check_organization=False, check_branch=True
+    )
+    if scope_error:
+        return scope_error
+
+    drug_id = merged.get("drug_id", "")
+    if not drug_id:
+        return "Missing drug_id"
+
+    drug = await db.scalar(
+        select(Drug.id).where(
+            Drug.id == drug_id,
+            Drug.organization_id == organization_id,
+        )
+    )
+    if not drug:
+        return f"Drug {drug_id} not found in organization"
+
+    try:
+        qty = int(merged.get("quantity", 0))
+        remaining = int(merged.get("remaining_quantity", 0))
+    except (TypeError, ValueError):
+        return "Invalid quantity values"
+
+    if qty < 0 or remaining < 0:
+        return "Batch quantities cannot be negative"
+    if remaining > qty:
+        return f"remaining_quantity {remaining} cannot exceed quantity {qty}"
+
+    return None
+
+
+async def _validate_customer(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Validate a merged customers row (organization-scoped, no branch_id column)."""
+    return _validate_scope(
+        merged, organization_id, branch_id, check_organization=True, check_branch=False
+    )
+
+
+async def _validate_prescription(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Validate a merged prescriptions row."""
+    scope_error = _validate_scope(
+        merged, organization_id, branch_id, check_organization=True, check_branch=True
+    )
+    if scope_error:
+        return scope_error
+
+    customer_id = merged.get("customer_id", "")
+    if customer_id:
+        customer = await db.scalar(
+            select(Customer.id).where(
+                Customer.id == customer_id,
+                Customer.organization_id == organization_id,
+            )
+        )
+        if not customer:
+            return f"Customer {customer_id} not found in organization"
+
+    return None
+
+
+async def _validate_purchase_order(
+    merged: Dict[str, Any],
+    organization_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    db: AsyncSession,
+) -> Optional[str]:
+    """Validate a merged purchase_orders row."""
+    return _validate_scope(
+        merged, organization_id, branch_id, check_organization=True, check_branch=True
+    )
+
+
 _CRR_VALIDATORS["branch_inventory"] = _validate_branch_inventory
+_CRR_VALIDATORS["drug_batches"] = _validate_drug_batch
+_CRR_VALIDATORS["customers"] = _validate_customer
+_CRR_VALIDATORS["prescriptions"] = _validate_prescription
+_CRR_VALIDATORS["purchase_orders"] = _validate_purchase_order
 
 
 # ── Main service ──────────────────────────────────────────────────────
@@ -244,6 +383,14 @@ class CrrSyncService:
                     error = f"Row {row_id} not found after merge in table {table}"
                 elif validator is not None:
                     error = await validator(merged, organization_id, branch_id, db)
+                else:
+                    # Fail closed: every pushable (non-server-authoritative)
+                    # CRR table must have an ownership validator. A table
+                    # reaching here with none would upsert into Postgres
+                    # with whatever organization_id/branch_id the client
+                    # embedded, unchecked — see S2 in
+                    # docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md.
+                    error = f"No push validator registered for CRR table {table!r}"
 
                 if error:
                     logger.warning(

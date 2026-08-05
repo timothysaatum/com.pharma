@@ -1165,36 +1165,14 @@ class InventoryService:
                     detail="Purchase order not found in this branch.",
                 )
 
-        # Duplicate batch check
-        result = await db.execute(
-            select(DrugBatch).where(
-                DrugBatch.branch_id    == batch_data.branch_id,
-                DrugBatch.drug_id      == batch_data.drug_id,
-                DrugBatch.batch_number == batch_data.batch_number,
-            )
-        )
-        if result.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"Batch '{batch_data.batch_number}' already exists "
-                    "for this drug at this branch."
-                ),
-            )
-
         async with db.begin_nested():
-            # Create the batch
-            batch = DrugBatch(
-                id=uuid.uuid4(),
-                **batch_data.model_dump(),
-                created_at=datetime.now(timezone.utc),
-                updated_at=datetime.now(timezone.utc),
-            )
-            batch.mark_as_pending_sync()
-            db.add(batch)
-            await db.flush()  # get batch.id before touching inventory
-
-            # ADD incoming quantity to BranchInventory (never overwrite)
+            # Lock the BranchInventory row first — this also serializes
+            # concurrent create_batch calls for the same (branch, drug),
+            # including two identical-batch-number receipts racing each
+            # other. DrugBatch has no unique constraint of its own
+            # (deliberately, for CRR conflict resolution), so it cannot
+            # serialize this race on its own. See I6 in
+            # docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md.
             inv_res = await db.execute(
                 select(BranchInventory)
                 .where(
@@ -1206,6 +1184,56 @@ class InventoryService:
             inventory = inv_res.scalar_one_or_none()
 
             previous_quantity = inventory.quantity if inventory else 0
+
+            # Find or append to an existing batch for this lot. A repeat
+            # receipt of the same (branch, drug, batch_number) — e.g. a
+            # large order delivered across two shipments — appends to the
+            # existing batch instead of being rejected, matching the
+            # documented behavior in docs/plans/pharmacy_audit_plan.md
+            # §5.6. Closes I1: the previous hard rejection forced staff to
+            # fabricate a distinct batch number to get stock in, corrupting
+            # lot traceability.
+            existing_batch = await db.scalar(
+                select(DrugBatch)
+                .where(
+                    DrugBatch.branch_id    == batch_data.branch_id,
+                    DrugBatch.drug_id      == batch_data.drug_id,
+                    DrugBatch.batch_number == batch_data.batch_number,
+                )
+                .with_for_update()
+            )
+            if existing_batch:
+                if existing_batch.expiry_date != batch_data.expiry_date:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Batch '{batch_data.batch_number}' already exists for this drug "
+                            f"at this branch with expiry {existing_batch.expiry_date}, which "
+                            f"does not match the received expiry {batch_data.expiry_date}. "
+                            "Use a distinct batch number for a different expiry lot."
+                        ),
+                    )
+                existing_batch.quantity += batch_data.quantity
+                existing_batch.remaining_quantity += batch_data.quantity
+                if existing_batch.manufacturing_date is None:
+                    existing_batch.manufacturing_date = batch_data.manufacturing_date
+                if existing_batch.supplier is None:
+                    existing_batch.supplier = batch_data.supplier
+                if existing_batch.purchase_order_id is None:
+                    existing_batch.purchase_order_id = batch_data.purchase_order_id
+                existing_batch.updated_at = datetime.now(timezone.utc)
+                existing_batch.mark_as_pending_sync()
+                batch = existing_batch
+            else:
+                batch = DrugBatch(
+                    id=uuid.uuid4(),
+                    **batch_data.model_dump(),
+                    created_at=datetime.now(timezone.utc),
+                    updated_at=datetime.now(timezone.utc),
+                )
+                batch.mark_as_pending_sync()
+                db.add(batch)
+                await db.flush()  # get batch.id before touching inventory
 
             if not inventory:
                 inventory = BranchInventory(

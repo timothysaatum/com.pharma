@@ -4,3 +4,8 @@
 *.db
 *.db-wal
 *.db-shm
+
+# Linter/tool caches
+.ruff_cache/
+__pycache__/
+*.pyc

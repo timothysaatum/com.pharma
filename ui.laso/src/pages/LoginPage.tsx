@@ -149,7 +149,7 @@ export default function LoginPage() {
                     {[
                         { value: "99.9%", label: "Uptime" },
                         { value: "< 1s", label: "Response time" },
-                        { value: "256-bit", label: "Encryption" },
+                        { value: "Offline", label: "Always works" },
                     ].map((stat) => (
                         <div
                             key={stat.label}

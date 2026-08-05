@@ -16,6 +16,13 @@ from app.schemas.sync_schemas import (
 )
 from app.services.sync.sync_service import SyncService
 from app.services.sync.shadow_db import ShadowDB, _CRR_TABLE_CONFIG, _crr_table_columns
+from app.services.sync.crr_sync_service import (
+    _validate_branch_inventory,
+    _validate_customer,
+    _validate_drug_batch,
+    _validate_prescription,
+    _validate_purchase_order,
+)
 
 
 class _Dialect:
@@ -342,7 +349,7 @@ async def test_shadow_without_crsqlite_reports_unavailable_instead_of_sql_error(
     with pytest.raises(RuntimeError, match="CRR sync is unavailable"):
         await shadow.max_db_version()
     with pytest.raises(RuntimeError, match="CRR sync is unavailable"):
-        await shadow.get_changes_since()
+        await shadow.get_changes_since(organization_id="test-org")
 
 
 @pytest.mark.asyncio
@@ -459,3 +466,198 @@ async def test_reconcile_skips_server_authoritative_tables(tmp_path, monkeypatch
 
     assert (checked, updated) == (1, 0)
     assert called is False
+
+
+# ─── S1: get_changes_since must be scoped to a single organization ────────
+# Regression coverage for docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+# finding S1 — the CRR pull endpoint had no org/branch filter at all, so
+# every client could pull every other organization's changes.
+
+async def _init_real_shadow(tmp_path):
+    """Initialize a ShadowDB with the real cr-sqlite extension, or skip."""
+    shadow = ShadowDB()
+    await shadow.initialize(db_path=str(tmp_path / "shadow.db"))
+    if not shadow.crr_available:
+        pytest.skip("cr-sqlite extension not available in this environment")
+    return shadow
+
+
+def _insert_branch_inventory_row(conn, row_id: str, branch_id: str) -> None:
+    conn.execute(
+        "INSERT INTO branch_inventory "
+        "(id, branch_id, drug_id, quantity, reserved_quantity, updated_at, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (row_id, branch_id, "drug-1", 10, 0, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"),
+    )
+    conn.commit()
+
+
+def _packed_pk(conn, table: str, row_id: str):
+    return conn.execute(
+        f"SELECT crsql_pack_columns(id) FROM [{table}] WHERE id = ?", (row_id,)
+    ).fetchone()[0]
+
+
+@pytest.mark.asyncio
+async def test_get_changes_since_scopes_by_organization(tmp_path):
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+
+    _insert_branch_inventory_row(conn, "row-a", "branch-a1")
+    _insert_branch_inventory_row(conn, "row-b", "branch-b1")
+
+    row_a_pk = _packed_pk(conn, "branch_inventory", "row-a")
+    row_b_pk = _packed_pk(conn, "branch_inventory", "row-b")
+
+    org_a_changes = await shadow.get_changes_since(
+        organization_id="org-a", org_branch_ids=["branch-a1"]
+    )
+    org_a_pks = {c["pk"] for c in org_a_changes}
+    assert row_a_pk in org_a_pks
+    assert row_b_pk not in org_a_pks, "org A must never see org B's changes"
+
+    org_b_changes = await shadow.get_changes_since(
+        organization_id="org-b", org_branch_ids=["branch-b1"]
+    )
+    org_b_pks = {c["pk"] for c in org_b_changes}
+    assert row_b_pk in org_b_pks
+    assert row_a_pk not in org_b_pks, "org B must never see org A's changes"
+
+
+@pytest.mark.asyncio
+async def test_get_changes_since_requires_org_branch_ids_for_branch_only_tables(tmp_path):
+    """A caller that forgets to pass org_branch_ids must not see branch-only
+    tables (branch_inventory/drug_batches) unfiltered — they have no
+    organization_id column of their own, so omitting org_branch_ids must
+    fail closed (return nothing), not fail open."""
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    _insert_branch_inventory_row(conn, "row-a", "branch-a1")
+
+    changes = await shadow.get_changes_since(organization_id="org-a")
+    assert changes == []
+
+
+@pytest.mark.asyncio
+async def test_get_changes_since_still_scopes_delete_tombstones(tmp_path):
+    """A hard-deleted row (delete_crr_row) no longer exists in the shadow
+    table, so ownership must be resolved from the crr_row_owners index
+    populated at insert-time, not from a live join — otherwise the delete
+    tombstone would be silently dropped instead of scoped."""
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    _insert_branch_inventory_row(conn, "row-a", "branch-a1")
+    row_a_pk = _packed_pk(conn, "branch_inventory", "row-a")
+
+    await shadow.delete_crr_row("branch_inventory", "row-a")
+
+    changes = await shadow.get_changes_since(
+        organization_id="org-a", org_branch_ids=["branch-a1"]
+    )
+    assert row_a_pk in {c["pk"] for c in changes}, (
+        "delete tombstone must still be attributed to its org after the row is gone"
+    )
+
+
+# ─── S2: push validators must enforce tenant ownership ────────────────────
+# Regression coverage for finding S2 — only branch_inventory had a
+# validator, and even it didn't check branch_id, so a client could
+# overwrite another organization's/branch's row via ON CONFLICT upsert.
+
+@pytest.mark.asyncio
+async def test_branch_inventory_validator_rejects_foreign_branch():
+    org_id = uuid.uuid4()
+    authorized_branch = uuid.uuid4()
+    other_branch = uuid.uuid4()
+    merged = {
+        "drug_id": "drug-1",
+        "branch_id": str(other_branch),
+        "quantity": 10,
+        "reserved_quantity": 0,
+    }
+    error = await _validate_branch_inventory(merged, org_id, authorized_branch, db=None)
+    assert error is not None
+    assert "branch_id" in error
+
+
+@pytest.mark.asyncio
+async def test_drug_batch_validator_rejects_foreign_branch():
+    org_id = uuid.uuid4()
+    authorized_branch = uuid.uuid4()
+    other_branch = uuid.uuid4()
+    merged = {
+        "drug_id": "drug-1",
+        "branch_id": str(other_branch),
+        "quantity": 10,
+        "remaining_quantity": 5,
+    }
+    error = await _validate_drug_batch(merged, org_id, authorized_branch, db=None)
+    assert error is not None
+    assert "branch_id" in error
+
+
+@pytest.mark.asyncio
+async def test_customer_validator_rejects_foreign_organization():
+    org_id = uuid.uuid4()
+    other_org = uuid.uuid4()
+    merged = {"id": "c1", "organization_id": str(other_org), "first_name": "X"}
+    error = await _validate_customer(merged, org_id, uuid.uuid4(), db=None)
+    assert error is not None
+    assert "organization_id" in error
+
+
+@pytest.mark.asyncio
+async def test_customer_validator_accepts_matching_organization():
+    org_id = uuid.uuid4()
+    merged = {"id": "c1", "organization_id": str(org_id), "first_name": "X"}
+    error = await _validate_customer(merged, org_id, uuid.uuid4(), db=None)
+    assert error is None
+
+
+@pytest.mark.asyncio
+async def test_purchase_order_validator_rejects_foreign_branch():
+    org_id = uuid.uuid4()
+    authorized_branch = uuid.uuid4()
+    other_branch = uuid.uuid4()
+    merged = {
+        "id": "po1",
+        "organization_id": str(org_id),
+        "branch_id": str(other_branch),
+        "po_number": "PO-1",
+    }
+    error = await _validate_purchase_order(merged, org_id, authorized_branch, db=None)
+    assert error is not None
+    assert "branch_id" in error
+
+
+@pytest.mark.asyncio
+async def test_purchase_order_validator_rejects_foreign_organization():
+    org_id = uuid.uuid4()
+    other_org = uuid.uuid4()
+    branch_id = uuid.uuid4()
+    merged = {
+        "id": "po1",
+        "organization_id": str(other_org),
+        "branch_id": str(branch_id),
+        "po_number": "PO-1",
+    }
+    error = await _validate_purchase_order(merged, org_id, branch_id, db=None)
+    assert error is not None
+    assert "organization_id" in error
+
+
+@pytest.mark.asyncio
+async def test_prescription_validator_rejects_foreign_organization():
+    org_id = uuid.uuid4()
+    other_org = uuid.uuid4()
+    branch_id = uuid.uuid4()
+    merged = {
+        "id": "rx1",
+        "organization_id": str(other_org),
+        "branch_id": str(branch_id),
+        "prescription_number": "RX-1",
+        "customer_id": "",
+    }
+    error = await _validate_prescription(merged, org_id, branch_id, db=None)
+    assert error is not None
+    assert "organization_id" in error

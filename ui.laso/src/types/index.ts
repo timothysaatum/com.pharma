@@ -1562,6 +1562,22 @@ export interface CrrPushResponse {
     audit_errors: Record<string, string>;
 }
 
+export interface VoidFailedSaleRequest {
+    sale_id: string;
+    branch_id: string;
+    reason: string;
+    manager_approval_user_id: string;
+    sale_number?: string | null;
+    total_amount?: string | null;
+    last_sync_error?: string | null;
+    sync_attempts?: number | null;
+}
+
+export interface VoidFailedSaleResponse {
+    voided: boolean;
+    audit_log_id: string;
+}
+
 export interface PushRecord {
     operation_id: string;
     table_name: string;
@@ -1584,6 +1600,12 @@ export interface PushResult {
     server_id?: string;
     success: boolean;
     error?: string;
+    /**
+     * Structured classification of `error` — see @/lib/syncErrorCodes.
+     * `error` is prose for logging/display only; use `error_code` for
+     * retry-logic branching, never a substring match on `error`.
+     */
+    error_code?: string;
 }
 
 export interface PushConflict {

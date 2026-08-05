@@ -345,12 +345,7 @@ async def get_purchase_order(
 ) -> PurchaseOrderWithDetails:
     """Fetch a purchase order with full item and supplier details."""
     po = await PurchaseOrderService.get_purchase_order(db, po_id, include_details=True)
-
-    if po.organization_id != current_user.organization_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="This purchase order belongs to a different organization"
-        )
+    PurchaseOrderService._assert_po_access(po, current_user)
 
     return await PurchaseOrderService._build_po_with_details(db, po)
 

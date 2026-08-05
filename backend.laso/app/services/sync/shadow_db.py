@@ -708,8 +708,93 @@ class ShadowDB:
         else:
             self._crr_available = False
 
+        if self._crr_available:
+            self._init_row_ownership_tracking(conn)
+
         conn.commit()
         self._conn = conn
+
+    def _init_row_ownership_tracking(self, conn: sqlite3.Connection) -> None:
+        """
+        Maintain a (table, pk) -> (organization_id, branch_id) index that
+        survives row deletion, via triggers on every CRR table.
+
+        ``crsql_changes`` rows carry no tenant information at all — only a
+        cr-sqlite-encoded pk. A plain join against the live table can
+        attribute an INSERT/UPDATE change to a tenant, but after a hard
+        delete (see ``delete_crr_row``) the underlying row is gone, so that
+        join would silently drop the delete-tombstone instead of scoping
+        it. This index is populated by AFTER INSERT/UPDATE triggers — so it
+        covers every write path without every caller needing to remember to
+        maintain it — and rows are *never* removed from it, so
+        ``get_changes_since`` can still scope tombstones correctly.
+
+        This closes the cross-tenant pull leak documented as finding S1 in
+        docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md:
+        previously ``get_changes_since`` had no organization/branch filter
+        at all, so every client pulled every organization's changes.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS crr_row_owners (
+                table_name      TEXT NOT NULL,
+                pk              BLOB NOT NULL,
+                organization_id TEXT,
+                branch_id       TEXT,
+                PRIMARY KEY (table_name, pk)
+            )
+        """)
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crr_row_owners_org "
+            "ON crr_row_owners(table_name, organization_id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_crr_row_owners_branch "
+            "ON crr_row_owners(table_name, branch_id)"
+        )
+
+        for table_name in _CRR_TABLE_CONFIG:
+            columns = _crr_table_columns(table_name)
+            has_org = "organization_id" in columns
+            has_branch = "branch_id" in columns
+            if not has_org and not has_branch:
+                # No tenant column at all on this table — nothing to scope.
+                # None of the current CRR tables hit this; skip defensively
+                # rather than crash if one is ever added without either.
+                continue
+
+            new_org_expr = "NEW.organization_id" if has_org else "NULL"
+            new_branch_expr = "NEW.branch_id" if has_branch else "NULL"
+            col_org_expr = "organization_id" if has_org else "NULL"
+            col_branch_expr = "branch_id" if has_branch else "NULL"
+
+            for event, suffix in (("INSERT", "ai"), ("UPDATE", "au")):
+                conn.execute(f"""
+                    CREATE TRIGGER IF NOT EXISTS [trg_own_{suffix}_{table_name}]
+                    AFTER {event} ON [{table_name}]
+                    BEGIN
+                        INSERT INTO crr_row_owners (table_name, pk, organization_id, branch_id)
+                        VALUES ('{table_name}', crsql_pack_columns(NEW.id), {new_org_expr}, {new_branch_expr})
+                        ON CONFLICT (table_name, pk) DO UPDATE SET
+                            organization_id = excluded.organization_id,
+                            branch_id = excluded.branch_id;
+                    END;
+                """)
+
+            # Backfill rows written before this index existed (or by a path
+            # that predates these triggers). Idempotent — safe every startup.
+            # The otherwise-redundant WHERE clause works around a SQLite
+            # grammar ambiguity: without it, "INSERT ... SELECT ... ON
+            # CONFLICT" fails to parse because the parser can't tell ON
+            # is introducing the upsert clause rather than a join.
+            conn.execute(f"""
+                INSERT INTO crr_row_owners (table_name, pk, organization_id, branch_id)
+                SELECT '{table_name}', crsql_pack_columns(id), {col_org_expr}, {col_branch_expr}
+                FROM [{table_name}]
+                WHERE 1 = 1
+                ON CONFLICT (table_name, pk) DO UPDATE SET
+                    organization_id = excluded.organization_id,
+                    branch_id = excluded.branch_id
+            """)
 
     async def get_all_shadow_row_hashes(self, table: str) -> dict[str, str]:
         """Fetch all row IDs and their server row hashes from a shadow DB table."""
@@ -981,14 +1066,31 @@ class ShadowDB:
     # ── List all rows that changed in crsql_changes (for pull) ────────
 
     async def get_changes_since(
-        self, since_db_version: int = 0, limit: int = 500
+        self,
+        organization_id: str,
+        org_branch_ids: Optional[List[str]] = None,
+        since_db_version: int = 0,
+        limit: int = 500,
     ) -> List[Dict[str, Any]]:
-        """Return crsql_changes rows with db_version > since_db_version.
+        """Return crsql_changes rows with db_version > since_db_version,
+        scoped to a single organization.
 
         This is what the client pulls to apply server-side changes locally.
+
+        ``organization_id`` is mandatory: without it this would return every
+        tenant's changes to every client (see S1 in
+        docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md).
+        Rows are attributed via the ``crr_row_owners`` index maintained by
+        ``_init_row_ownership_tracking`` — a row belongs to this org if
+        either its own ``organization_id`` matches, or (for tables that
+        only carry ``branch_id``, e.g. branch_inventory/drug_batches) its
+        branch is one of this org's branches, passed in via
+        ``org_branch_ids``.
         """
         if not self._crr_available:
             raise RuntimeError("Server CRR sync is unavailable")
+
+        branch_ids = list(org_branch_ids or [])
 
         def _sync() -> List[Dict[str, Any]]:
             with self._lock:
@@ -996,14 +1098,28 @@ class ShadowDB:
                 if conn is None:
                     raise RuntimeError("Shadow DB not initialised")
                 conn.row_factory = sqlite3.Row
+
+                owner_match = "o.organization_id = ?"
+                params: List[Any] = [organization_id]
+                if branch_ids:
+                    placeholders = ", ".join("?" for _ in branch_ids)
+                    owner_match += f" OR (o.organization_id IS NULL AND o.branch_id IN ({placeholders}))"
+                    params.extend(branch_ids)
+
+                query = f"""
+                    SELECT c."table", c.pk, c.cid, c.val, c.col_version, c.db_version,
+                           c.site_id, c.cl, c.seq
+                    FROM crsql_changes c
+                    JOIN crr_row_owners o
+                      ON o.table_name = c."table" AND o.pk = c.pk
+                    WHERE c.db_version > ?
+                      AND ({owner_match})
+                    ORDER BY c.db_version, c.seq
+                    LIMIT ?
+                """
                 cur = conn.execute(
-                    """SELECT "table", pk, cid, val, col_version, db_version,
-                             site_id, cl, seq
-                      FROM crsql_changes
-                      WHERE db_version > ?
-                      ORDER BY db_version, seq
-                      LIMIT ?""",
-                    (since_db_version, limit),
+                    query,
+                    [since_db_version, *params, limit],
                 )
                 return [dict(r) for r in cur.fetchall()]
 

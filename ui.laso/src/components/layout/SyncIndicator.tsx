@@ -10,6 +10,8 @@ import { useState } from "react";
 import { RefreshCw, WifiOff, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncConflictModal } from "@/components/layout/SyncConflictModal";
+import { VoidSaleFailureModal } from "@/components/layout/VoidSaleFailureModal";
+import type { QueuedFailure } from "@/lib/localDb";
 
 function formatRelative(isoString: string | null): string {
     if (!isoString) return "Never";
@@ -27,6 +29,7 @@ interface SyncIndicatorProps {
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
     const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, discardFailure } = useSyncStatus();
     const [showConflictModal, setShowConflictModal] = useState(false);
+    const [voidingFailure, setVoidingFailure] = useState<QueuedFailure | null>(null);
 
     const hasConflicts = conflicts.length > 0;
     const hasFailures = failures.length > 0;
@@ -147,11 +150,19 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                                     {failure.table_name ?? "sync"}: {failure.error ?? "Unknown error"}
                                 </span>
                                 <button
-                                    onClick={() => discardFailure(failure.table_name, failure.record_id)}
-                                    title="Discard this failed record from the sync queue"
+                                    onClick={() =>
+                                        failure.table_name === "sales"
+                                            ? setVoidingFailure(failure)
+                                            : discardFailure(failure.table_name, failure.record_id)
+                                    }
+                                    title={
+                                        failure.table_name === "sales"
+                                            ? "Void this sale — requires a reason and is recorded on the server"
+                                            : "Discard this failed record from the sync queue"
+                                    }
                                     className="text-red-400 hover:text-red-300 font-semibold px-1 rounded hover:bg-red-500/10 transition-colors ml-1 flex-shrink-0"
                                 >
-                                    Discard
+                                    {failure.table_name === "sales" ? "Void…" : "Discard"}
                                 </button>
                             </div>
                         ))}
@@ -166,6 +177,10 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             <SyncConflictModal
                 open={showConflictModal}
                 onClose={() => setShowConflictModal(false)}
+            />
+            <VoidSaleFailureModal
+                failure={voidingFailure}
+                onClose={() => setVoidingFailure(null)}
             />
         </div>
     );

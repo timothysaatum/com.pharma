@@ -24,8 +24,10 @@ export interface SyncState {
         conflict: QueuedConflict,
         resolution: "server_wins" | "local_wins"
     ) => Promise<void>;
-    /** Discard a permanently failed sync record */
+    /** Discard a permanently failed sync record (non-sale tables only — see voidFailedSale) */
     discardFailure: (tableName: string, recordId: string) => Promise<void>;
+    /** Audited, manager-approved void for a permanently failed sale */
+    voidFailedSale: (failure: QueuedFailure, reason: string, approverUserId: string) => Promise<void>;
 }
 
 export function useSyncStatus(): SyncState {
@@ -60,5 +62,11 @@ export function useSyncStatus(): SyncState {
         []
     );
 
-    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict, discardFailure };
+    const voidFailedSale = useCallback(
+        (failure: QueuedFailure, reason: string, approverUserId: string) =>
+            syncEngine.voidFailedSale(failure, reason, approverUserId),
+        []
+    );
+
+    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict, discardFailure, voidFailedSale };
 }

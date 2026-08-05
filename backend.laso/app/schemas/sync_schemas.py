@@ -357,6 +357,14 @@ class PushResult(BaseSchema):
     server_id: Optional[str] = None
     success: bool
     error: Optional[str] = None
+    error_code: Optional[str] = Field(
+        default=None,
+        description=(
+            "Structured classification of `error` for retry logic (see "
+            "app/schemas/sync_error_codes.py). `error` itself is prose for "
+            "logging/display only and must not be pattern-matched by clients."
+        ),
+    )
     fk_fixes: Optional[List[str]] = Field(
         default=None,
         description="FK fields that were cleared/fixed during sync (e.g. ['price_contract_id', 'customer_id'])"
@@ -532,3 +540,29 @@ class CrrPushResponse(BaseSchema):
     )
     accepted_audit_event_ids: List[str] = Field(default_factory=list)
     audit_errors: Dict[str, str] = Field(default_factory=dict)
+
+
+class VoidFailedSaleRequest(BaseSchema):
+    """
+    Give up on syncing an offline sale that has permanently failed (dead-
+    lettered) — the audited replacement for silently flipping the local
+    sync_status to "synced". See docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+    finding P3: a sale that fails to sync represents drugs already
+    dispensed and money already taken with no server-side record, so
+    discarding it must require the same manager-approval gate as a refund
+    and must leave an audit trail — even though no Sale row was ever
+    created server-side for it.
+    """
+    sale_id: uuid.UUID
+    branch_id: uuid.UUID
+    reason: str = Field(..., min_length=1, max_length=1000)
+    manager_approval_user_id: uuid.UUID
+    sale_number: Optional[str] = None
+    total_amount: Optional[str] = None
+    last_sync_error: Optional[str] = None
+    sync_attempts: Optional[int] = None
+
+
+class VoidFailedSaleResponse(BaseSchema):
+    voided: bool
+    audit_log_id: uuid.UUID

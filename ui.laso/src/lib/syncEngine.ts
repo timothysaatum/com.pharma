@@ -39,6 +39,7 @@ import {
     isOfflineError,
 } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
+import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED } from "@/lib/syncErrorCodes";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import type {
     PullRequest,
@@ -442,8 +443,8 @@ class SyncEngine {
             for (const item of response.failed) {
                 hadFailures = true;
                 const error = item.error?.trim() || "Server rejected the record without an error message.";
-                const isDeferredRx = error.includes("Prescription not yet synced") || error.includes("is not yet synced");
-                const attempts = await markQueueError(item.table_name, item.local_id, error, isDeferredRx);
+                const isDeferredDependency = item.error_code === SYNC_ERROR_DEPENDENCY_NOT_SYNCED;
+                const attempts = await markQueueError(item.table_name, item.local_id, error, isDeferredDependency);
                 if (attempts >= MAX_PUSH_ATTEMPTS) {
                     deadLettered++;
                 }
@@ -690,27 +691,26 @@ class SyncEngine {
             let repaired = 0;
             for (const sale of pendingSales) {
                 if (sale.sync_status === "synced") continue;
-                // Bug fix: previously skipped any sale with a sync_queue entry, including
-                // dead-lettered ones (attempts >= MAX_PUSH_ATTEMPTS). Those sales were
-                // frozen forever — present locally, never reaching the server.
                 const queued = await db.select<{ record_id: string; attempts: number }[]>(
                     "SELECT record_id, attempts FROM sync_queue WHERE table_name = 'sales' AND record_id = $1 LIMIT 1",
                     [sale.id],
                 );
-                const isDeadLettered = queued.length > 0 && queued[0].attempts >= MAX_PUSH_ATTEMPTS;
-                if (queued.length > 0 && !isDeadLettered) continue;
-                if (isDeadLettered) {
-                    // Reset the dead-lettered entry so it is picked up on the next push cycle
-                    await db.execute(
-                        `UPDATE sync_queue
-                         SET attempts = 0, error = NULL, last_attempt_at = NULL, next_attempt_at = NULL
-                         WHERE table_name = 'sales' AND record_id = $1`,
-                        [sale.id]
-                    );
-                    repaired += 1;
-                    console.log(`[SyncEngine] Reset dead-lettered sale ${sale.id} for retry`);
-                    continue;
-                }
+                // A queue entry already exists for this sale — whether still
+                // retrying or dead-lettered, it is not a "missing envelope."
+                // Dead-lettered sales must stay dead-lettered here: resetting
+                // them automatically, every sync cycle, is exactly the S3 bug
+                // (docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md)
+                // — a permanently-failing sale retried forever, silently,
+                // because the reset ran before pendingFailures could ever
+                // observe it past the dead-letter threshold. A dead-lettered
+                // sale now stays visible in the UI until the user explicitly
+                // retries (resetPendingFailures, via the "Sync now" button)
+                // or voids it (the audited void-failed-sale flow).
+                if (queued.length > 0) continue;
+                // No queue entry at all — the envelope is genuinely missing
+                // (e.g. the app crashed after writing the sale locally but
+                // before enqueue() completed). Re-enqueue it fresh so it is
+                // picked up by the next push, starting at attempts=0.
                 await enqueue("sales", sale.id, "create", 1, {
                     ...sale.sale_data,
                     items: sale.sale_items,
@@ -827,16 +827,27 @@ class SyncEngine {
 
     // ── Full pull for a table that has never been synced ─────────────
     private async pullTableFull(table: string): Promise<void> {
+        // Paginated as of the server's pull pagination fix — a branch with
+        // more than one page's worth of rows (500) now returns
+        // has_more=true with a resume sync_timestamp. Previously has_more
+        // was never set on this path, so omitting last_sync_at here was
+        // harmless (every call always terminated after one page); now it
+        // must be threaded through each iteration or this loop would spin
+        // forever re-fetching the same first page. See finding #5 in
+        // docs/reviews/2026-08-11-offline-first-architecture-review.md.
         let hasMore = true;
+        let since: string | undefined;
         while (hasMore) {
             const request: Partial<PullRequest> = {
                 branch_id: this.branchId!,
                 tables: [table],
+                last_sync_at: since,
             };
             const response = await syncApi.pull(request as PullRequest);
             await this.applyPullResponse(response);
             await setLastSyncAt(response.sync_timestamp, table, this.branchId ?? undefined);
             hasMore = response.has_more;
+            since = response.sync_timestamp;
         }
     }
 
@@ -861,23 +872,23 @@ class SyncEngine {
                     const r = row as Record<string, unknown>;
                     const localId = r.id;
                     if (typeof localId === "string") {
-                        const existing = table === "purchase_orders"
-                            ? await db.select<{ sync_status: string; po_number?: string }[]>(
-                                "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
-                                [localId]
-                            )
-                            : await db.select<{ sync_status: string; po_number?: string }[]>(
-                                `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
-                                [localId]
-                            );
+                        // Never let a pull overwrite a row this device still has
+                        // locally-pending changes for, regardless of table —
+                        // purchase_orders previously only protected offline-
+                        // created drafts (OFFLINE-PO- prefix), silently
+                        // allowing a pull to clobber a locally-edited existing
+                        // PO still awaiting sync. This path is effectively
+                        // unreachable on current (CRR-migrated) installs —
+                        // purchase_orders sync via the CRR pull instead — but
+                        // left correct rather than as a latent trap for any
+                        // future non-CRR fallback. See finding #4 (multi-device
+                        // drift) in docs/reviews/2026-08-11-offline-first-architecture-review.md.
+                        const existing = await db.select<{ sync_status: string }[]>(
+                            `SELECT sync_status FROM ${table} WHERE id = $1 LIMIT 1`,
+                            [localId]
+                        );
                         const localStatus = existing[0]?.sync_status;
-                        const isProtectedOfflinePurchaseOrder =
-                            table === "purchase_orders"
-                            && (existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false);
-                        if (
-                            (localStatus === "pending" || localStatus === "conflict")
-                            && (table !== "purchase_orders" || isProtectedOfflinePurchaseOrder)
-                        ) {
+                        if (localStatus === "pending" || localStatus === "conflict") {
                             continue;
                         }
                     }
@@ -1210,6 +1221,43 @@ class SyncEngine {
         }
     }
 
+    /**
+     * Audited, manager-approved replacement for discardFailure() when the
+     * failed record is a sale. A sale that fails to sync represents drugs
+     * already dispensed and money already taken with no server-side
+     * record — silently flipping a local flag (the old discardFailure
+     * behaviour) erased that fact with no trace. This requires
+     * connectivity and a server-side permission check (mirrors
+     * refund/cancel's manager_approval_user_id gate) before the local
+     * record is dequeued. See docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md
+     * finding P3.
+     */
+    async voidFailedSale(
+        failure: QueuedFailure,
+        reason: string,
+        approverUserId: string
+    ): Promise<void> {
+        if (!navigator.onLine || !isBackendReachable()) {
+            throw new Error(
+                "Voiding a sale requires connectivity — it must be recorded on the server."
+            );
+        }
+
+        const local = failure.local_data ?? {};
+        await syncApi.voidFailedSale({
+            sale_id: failure.record_id,
+            branch_id: String(local.branch_id ?? ""),
+            reason,
+            manager_approval_user_id: approverUserId,
+            sale_number: typeof local.sale_number === "string" ? local.sale_number : null,
+            total_amount: local.total_amount != null ? String(local.total_amount) : null,
+            last_sync_error: failure.error,
+            sync_attempts: failure.attempts,
+        });
+
+        await this.discardFailure(failure.table_name, failure.record_id);
+    }
+
     async discardFailure(tableName: string, recordId: string): Promise<void> {
         const db = await getDb();
         try {
@@ -1265,6 +1313,16 @@ class SyncEngine {
 
     private onOffline(): void {
         console.info("[SyncEngine] Gone offline");
+        // A previously scheduled retry would otherwise fire while genuinely
+        // offline and silently no-op (scheduleRetry re-checks navigator.onLine
+        // at fire time) — cancel it outright instead of leaving a wasted
+        // timer running. The 'online' event and the periodic sync interval
+        // both independently resume retrying once connectivity returns, so
+        // this is a cleanup, not a correctness fix on its own.
+        if (this.retryTimeoutId) {
+            clearTimeout(this.retryTimeoutId);
+            this.retryTimeoutId = null;
+        }
         this.setStatus("offline");
     }
 

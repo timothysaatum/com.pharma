@@ -4,6 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.models.pricing.pricing_model import PriceContract
 from app.models.user.user_model import User
 from app.services.org.organization_onboarding_service import (
     OrganizationOnboardingService,
@@ -42,6 +43,21 @@ async def test_onboarding_creates_admin_roles_and_default_branch(
     assert len(admin.assigned_branches) == 1
     assert {role.name for role in admin.roles} == {"Admin"}
     assert admin.verify_password("Secure-Admin-Password-2026!") is True
+
+    # Regression: docs/reviews/2026-08-05-live-deployment-orchestration-report.md
+    # — sale processing has no code path that works without a resolved
+    # PriceContract, so onboarding must seed a default one or no sale
+    # (including a plain cash walk-in) could ever be processed.
+    default_contract = (await db.execute(
+        select(PriceContract).where(
+            PriceContract.organization_id == result["organization"].id,
+            PriceContract.is_default_contract == True,
+        )
+    )).scalar_one()
+    assert default_contract.status == "active"
+    assert default_contract.is_active is True
+    assert default_contract.applies_to_all_branches is True
+    assert default_contract.discount_percentage == 0
 
     with pytest.raises(HTTPException) as duplicate:
         await service.create_organization_with_admin(

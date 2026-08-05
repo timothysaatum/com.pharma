@@ -98,6 +98,53 @@ export async function getDb(): Promise<Database> {
 // Each migration runs exactly once, tracked by user_version pragma.
 // ─────────────────────────────────────────────────────────────────────────────
 
+/** Highest schema version this build knows how to migrate to. Bump this
+ * alongside adding a new migrate_vN. */
+const MAX_KNOWN_SCHEMA_VERSION = 22;
+
+/**
+ * One-time repair for devices whose local DB was left in the specific
+ * half-migrated state migrate_v15 could produce before it was wrapped in a
+ * transaction: branch_inventory_crr exists (with data) but branch_inventory
+ * does not, and user_version is still 14. Without this, such a device would
+ * fail migrate_v15 forever on every launch (its INSERT ... FROM
+ * branch_inventory errors because that table no longer exists) — the app
+ * ships a fix for future migrations but the already-broken ones need this
+ * one-time heal. Safe to call unconditionally: it's a no-op unless the
+ * exact broken state is detected.
+ */
+export async function repairIncompleteV15Migration(db: Database, user_version: number): Promise<void> {
+  if (user_version >= 15) return;
+  const hasOld = await tableExists(db, "branch_inventory");
+  const hasStaged = await tableExists(db, "branch_inventory_crr");
+  if (!hasOld && hasStaged) {
+    console.warn(
+      "[localDb] Detected incomplete migrate_v15 (branch_inventory missing, " +
+      "branch_inventory_crr present) — repairing before migrations run."
+    );
+    await db.execute("ALTER TABLE branch_inventory_crr RENAME TO branch_inventory");
+  }
+}
+
+/**
+ * Refuse to proceed if the local DB's schema is newer than this build
+ * understands (e.g. a downgrade, or a device that synced its app but not
+ * this component). Continuing would run the `ensure*Schema` repair
+ * functions — which assume a schema shape this build knows about — against
+ * an unknown newer schema, risking silent corruption. Failing loudly here
+ * is safer: the caller already treats a migration failure as a blocking
+ * sync/init error today.
+ */
+export async function guardAgainstSchemaDowngrade(_db: Database, user_version: number): Promise<void> {
+  if (user_version > MAX_KNOWN_SCHEMA_VERSION) {
+    throw new Error(
+      `[localDb] Local database schema (v${user_version}) is newer than this app build ` +
+      `supports (v${MAX_KNOWN_SCHEMA_VERSION}). Refusing to start to avoid corrupting data — ` +
+      "please update the application."
+    );
+  }
+}
+
 async function runMigrations(db: Database): Promise<void> {
   // If MockDb, user_version check will return empty or throw, so we guard.
   try {
@@ -105,6 +152,9 @@ async function runMigrations(db: Database): Promise<void> {
         "PRAGMA user_version"
       );
       const user_version = rows?.[0]?.user_version ?? 0;
+
+      await repairIncompleteV15Migration(db, user_version);
+      await guardAgainstSchemaDowngrade(db, user_version);
 
       if (user_version < 1) await migrate_v1(db);
       if (user_version < 2) await migrate_v2(db);
@@ -605,62 +655,79 @@ async function migrate_v14(db: Database): Promise<void> {
 /// Migration v15: convert branch_inventory to a cr-sqlite CRR table.
 /// cr-sqlite v0.16+ requires every NOT NULL non-PK column to have a DEFAULT.
 /// Recreate the table with missing defaults, then run crsql_as_crr().
-async function migrate_v15(db: Database): Promise<void> {
-    // Recreate branch_inventory with DEFAULTs on all NOT NULL non-PK columns.
-  // sentinel defaults: zero-text for FK, 0 for numeric
-  // NOTE: cr-sqlite v0.16+ does NOT support additional UNIQUE constraints on CRR tables.
-  // The UNIQUE(branch_id, drug_id) was removed — deduplication is handled at the
-  // application level (server-side CrrSyncService validates FK/ranges).
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS branch_inventory_crr (
-      id                TEXT NOT NULL PRIMARY KEY,
-      branch_id         TEXT NOT NULL DEFAULT '',
-      drug_id           TEXT NOT NULL DEFAULT '',
-      quantity          INTEGER NOT NULL DEFAULT 0,
-      reserved_quantity INTEGER NOT NULL DEFAULT 0,
-      location          TEXT,
-      selling_price     REAL,
-      sync_status       TEXT NOT NULL DEFAULT 'synced',
-      sync_version      INTEGER NOT NULL DEFAULT 1,
-      synced_at         TEXT,
-      updated_at        TEXT NOT NULL DEFAULT '',
-      created_at        TEXT NOT NULL DEFAULT ''
-    )
-  `);
-  // Deduplicate by (branch_id, drug_id) — keep the row with the latest updated_at
-  await db.execute(`
-    INSERT INTO branch_inventory_crr
-    SELECT id, branch_id, drug_id, quantity, reserved_quantity,
-           location, selling_price, sync_status, sync_version, synced_at,
-           updated_at, created_at
-    FROM (
-      SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY branch_id, drug_id ORDER BY updated_at DESC
-      ) AS rn
-      FROM branch_inventory
-    )
-    WHERE rn = 1
-  `);
-  await db.execute("DROP TABLE branch_inventory");
-  await db.execute("ALTER TABLE branch_inventory_crr RENAME TO branch_inventory");
-
-  // Convert to CRDT replicated row (requires cr-sqlite extension loaded)
+export async function migrate_v15(db: Database): Promise<void> {
+  // Wrapped in a transaction — see v16/v17/v22 for the same pattern. Without
+  // this, a crash between DROP TABLE branch_inventory and the subsequent
+  // RENAME left a device with neither table, and every future launch would
+  // fail this same migration again (the retry's INSERT ... FROM
+  // branch_inventory fails because the source table no longer exists),
+  // permanently bricking that device with no repair path but deleting the
+  // local DB. See docs/reviews/2026-08-11-offline-first-architecture-review.md.
+  await db.execute("BEGIN IMMEDIATE");
   try {
-    await db.execute_batch("SELECT crsql_as_crr('branch_inventory')");
-    console.log("[localDb] branch_inventory converted to CRR");
-    await db.execute(
-      "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-      ["crr_enabled_branch_inventory", "1"]
-    );
-  } catch (e) {
-    console.warn("[localDb] crsql_as_crr not available — running without CRDT:", e);
-    await db.execute(
-      "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-      ["crr_enabled_branch_inventory", "0"]
-    );
-  }
+    // Recreate branch_inventory with DEFAULTs on all NOT NULL non-PK columns.
+    // sentinel defaults: zero-text for FK, 0 for numeric
+    // NOTE: cr-sqlite v0.16+ does NOT support additional UNIQUE constraints on CRR tables.
+    // The UNIQUE(branch_id, drug_id) was removed — deduplication is handled at the
+    // application level (server-side CrrSyncService validates FK/ranges).
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS branch_inventory_crr (
+        id                TEXT NOT NULL PRIMARY KEY,
+        branch_id         TEXT NOT NULL DEFAULT '',
+        drug_id           TEXT NOT NULL DEFAULT '',
+        quantity          INTEGER NOT NULL DEFAULT 0,
+        reserved_quantity INTEGER NOT NULL DEFAULT 0,
+        location          TEXT,
+        selling_price     REAL,
+        sync_status       TEXT NOT NULL DEFAULT 'synced',
+        sync_version      INTEGER NOT NULL DEFAULT 1,
+        synced_at         TEXT,
+        updated_at        TEXT NOT NULL DEFAULT '',
+        created_at        TEXT NOT NULL DEFAULT ''
+      )
+    `);
+    // Deduplicate by (branch_id, drug_id) — keep the row with the latest updated_at
+    await db.execute(`
+      INSERT INTO branch_inventory_crr
+      SELECT id, branch_id, drug_id, quantity, reserved_quantity,
+             location, selling_price, sync_status, sync_version, synced_at,
+             updated_at, created_at
+      FROM (
+        SELECT *, ROW_NUMBER() OVER (
+          PARTITION BY branch_id, drug_id ORDER BY updated_at DESC
+        ) AS rn
+        FROM branch_inventory
+      )
+      WHERE rn = 1
+    `);
+    await db.execute("DROP TABLE branch_inventory");
+    await db.execute("ALTER TABLE branch_inventory_crr RENAME TO branch_inventory");
 
-  await db.execute("PRAGMA user_version = 15");
+    // Convert to CRDT replicated row (requires cr-sqlite extension loaded).
+    // A failure here is an accepted degraded mode (extension unavailable),
+    // not a migration failure — it must NOT roll back the DDL above, so it
+    // stays in its own nested try/catch, same as every later CRR migration.
+    try {
+      await db.execute_batch("SELECT crsql_as_crr('branch_inventory')");
+      console.log("[localDb] branch_inventory converted to CRR");
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        ["crr_enabled_branch_inventory", "1"]
+      );
+    } catch (e) {
+      console.warn("[localDb] crsql_as_crr not available — running without CRDT:", e);
+      await db.execute(
+        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+        ["crr_enabled_branch_inventory", "0"]
+      );
+    }
+
+    await db.execute("PRAGMA user_version = 15");
+    await db.execute("COMMIT");
+  } catch (e) {
+    try { await db.execute("ROLLBACK"); } catch { /* best effort */ }
+    throw e;
+  }
 }
 
 /// Migration v16: convert drug_batches, customers, prescriptions, purchase_orders, sales
@@ -1305,7 +1372,7 @@ export async function ensureSuppressedCrrChangesSchema(db: Database): Promise<vo
 // CRR TABLE SCHEMA HELPERS (used by migrate_v19)
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function tableExists(db: Database, name: string): Promise<boolean> {
+export async function tableExists(db: Database, name: string): Promise<boolean> {
   const rows = await db.select<{ name: string }[]>(
     "SELECT name FROM sqlite_master WHERE type='table' AND name=$1", [name]
   );

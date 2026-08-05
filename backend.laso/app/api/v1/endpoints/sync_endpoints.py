@@ -11,16 +11,21 @@ Add to your v1 router:
     v1_router.include_router(sync_router)
 """
 
+import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.deps import get_current_active_user, get_db
-from app.models.user.user_model import User
+from app.models.system_md.sys_models import AuditLog
+from app.models.user.user_model import Permission, User
 from app.schemas.sync_schemas import (
     PullRequest, PullResponse,
     PushRequest, PushResponse, AsyncPushResponse,
+    VoidFailedSaleRequest, VoidFailedSaleResponse,
 )
 from app.services.sync.sync_service import SyncService
 
@@ -116,6 +121,88 @@ async def push(
         organization_id=current_user.organization_id,
         pushed_by=current_user.id,
     )
+
+
+@router.post(
+    "/void-failed-sale",
+    response_model=VoidFailedSaleResponse,
+    summary="Void a sale that permanently failed to sync",
+    description="""
+Gives up on retrying a dead-lettered offline sale, and records an audited,
+manager-approved record of the decision.
+
+A sale that fails to sync represents drugs already dispensed and money
+already taken at the register, with **no server-side record** — the
+Postgres `sales` table never received it. This endpoint does not (and
+cannot) create that missing Sale row; it exists so abandoning the sync
+attempt is a deliberate, permission-gated, auditable action instead of a
+silent local flag flip, matching the manager-approval gate already
+required for refunds and cancellations.
+
+**Permissions:** the approving user (``manager_approval_user_id``, which
+may be the caller themselves) must hold `process_refunds` or be a super
+admin.
+""",
+)
+async def void_failed_sale(
+    request: VoidFailedSaleRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> VoidFailedSaleResponse:
+    if not _user_can_sync_branch(current_user, request.branch_id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You do not have access to this branch.",
+        )
+
+    if request.manager_approval_user_id == current_user.id:
+        approver = current_user
+    else:
+        approver_res = await db.execute(
+            select(User).where(
+                User.id == request.manager_approval_user_id,
+                User.organization_id == current_user.organization_id,
+            ).options(selectinload(User.roles))
+        )
+        approver = approver_res.scalar_one_or_none()
+        if not approver:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Approving manager not found.",
+            )
+
+    if not (approver.is_super_admin or approver.has_permission(Permission.PROCESS_REFUNDS)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Approving manager does not have required permissions.",
+        )
+
+    audit_log = AuditLog(
+        id=uuid.uuid4(),
+        organization_id=current_user.organization_id,
+        user_id=current_user.id,
+        action="void_unsynced_sale",
+        entity_type="Sale",
+        entity_id=request.sale_id,
+        changes={
+            "sale_id": str(request.sale_id),
+            "branch_id": str(request.branch_id),
+            "sale_number": request.sale_number,
+            "total_amount": request.total_amount,
+            "reason": request.reason,
+            "last_sync_error": request.last_sync_error,
+            "sync_attempts": request.sync_attempts,
+            "approved_by": str(approver.id),
+            "approved_by_name": getattr(approver, "full_name", None) or approver.email,
+            "voided_by": str(current_user.id),
+        },
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(audit_log)
+    await db.commit()
+    await db.refresh(audit_log)
+
+    return VoidFailedSaleResponse(voided=True, audit_log_id=audit_log.id)
 
 
 @router.get(

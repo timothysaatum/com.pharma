@@ -74,7 +74,7 @@ from app.models.sales.sales_model import (
     SaleItemBatchAllocation,
     Supplier,
 )
-from app.models.system_md.sys_models import AuditLog, SyncOperationReceipt
+from app.models.system_md.sys_models import AuditLog, SyncOperationReceipt, SystemAlert
 from app.models.user.user_model import User
 from app.schemas.customer_schemas import CustomerResponse
 from app.schemas.syst_schemas import AuditLogResponse
@@ -93,6 +93,7 @@ from app.schemas.sync_schemas import (
     PushResponse,
     PushResult,
 )
+from app.schemas import sync_error_codes
 from app.services.inventory.inventory_service import InventoryService
 from app.services.sales.pricing.pricing_calculator import d as _d, r2 as _r2
 from app.services.sales.utils.sale_helpers import (
@@ -125,6 +126,15 @@ SYNC_TABLES: tuple[str, ...] = (
     "purchase_orders",
     "audit_logs",
 )
+
+# Page size for the legacy /sync/pull endpoint (matches the CRR pull's
+# LIMIT 500 convention). Without this, a brand-new device's first pull
+# against an established branch's full sales history was a single
+# unbounded query that could exceed the client's 15s timeout and — because
+# last_sync_at only advances on full success — restart from scratch on
+# every retry. See finding #5 in
+# docs/reviews/2026-08-11-offline-first-architecture-review.md.
+_PULL_PAGE_SIZE: int = 500
 
 # ---------------------------------------------------------------------------
 # Conflict resolution rules per table
@@ -563,43 +573,52 @@ class SyncService:
 
         result = PullResponse(sync_timestamp=now)
         total  = 0
+        # Resume points for tables that hit the page limit this round. If
+        # any are present, the response is paginated (has_more=True) and
+        # the *earliest* resume point becomes the next sync_timestamp —
+        # safe for every table, since a table that already fully drained
+        # simply returns zero new rows when re-queried from an earlier
+        # point, while a lagging table correctly continues from where it
+        # left off. See _pull_table's docstring for why plain LIMIT/OFFSET
+        # or a bare `since` bump isn't safe here.
+        resume_points: List[datetime] = []
+
+        async def _pull(model: Any, *filters: Any, options: Optional[list] = None) -> List[Any]:
+            rows, next_since = await SyncService._pull_table(
+                db, model, since, *filters, options=options, limit=_PULL_PAGE_SIZE,
+            )
+            if next_since is not None:
+                resume_points.append(next_since)
+            return rows
 
         if "drugs" in tables:
-            rows = await SyncService._pull_table(
-                db, Drug, since, Drug.organization_id == organization_id
-            )
+            rows = await _pull(Drug, Drug.organization_id == organization_id)
             result.drugs = [DrugResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         if "drug_categories" in tables:
-            rows = await SyncService._pull_table(
-                db, DrugCategory, since,
-                DrugCategory.organization_id == organization_id,
+            rows = await _pull(
+                DrugCategory, DrugCategory.organization_id == organization_id,
             )
             result.drug_categories = [DrugCategoryResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         if "price_contracts" in tables:
-            rows = await SyncService._pull_table(
-                db, PriceContract, since,
-                PriceContract.organization_id == organization_id,
+            rows = await _pull(
+                PriceContract, PriceContract.organization_id == organization_id,
             )
             result.price_contracts = [PriceContractResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         if "customers" in tables:
-            rows = await SyncService._pull_table(
-                db, Customer, since,
-                Customer.organization_id == organization_id,
+            rows = await _pull(
+                Customer, Customer.organization_id == organization_id,
             )
             result.customers = [CustomerResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         if "prescriptions" in tables:
-            rows = await SyncService._pull_table(
-                db, Prescription, since,
-                Prescription.branch_id == branch_id,
-            )
+            rows = await _pull(Prescription, Prescription.branch_id == branch_id)
             result.prescriptions = [
                 PrescriptionSyncResponse.model_validate(r).model_copy(
                     update={"sync_status": "synced"}
@@ -609,10 +628,7 @@ class SyncService:
             total += len(rows)
 
         if "branch_inventory" in tables:
-            rows = await SyncService._pull_table(
-                db, BranchInventory, since,
-                BranchInventory.branch_id == branch_id,
-            )
+            rows = await _pull(BranchInventory, BranchInventory.branch_id == branch_id)
             result.branch_inventory = [
                 BranchInventoryResponse.model_validate(r).model_copy(
                     update={"sync_status": "synced"}
@@ -622,10 +638,7 @@ class SyncService:
             total += len(rows)
 
         if "drug_batches" in tables:
-            rows = await SyncService._pull_table(
-                db, DrugBatch, since,
-                DrugBatch.branch_id == branch_id,
-            )
+            rows = await _pull(DrugBatch, DrugBatch.branch_id == branch_id)
             result.drug_batches = [
                 DrugBatchResponse.model_validate(r).model_copy(
                     update={"sync_status": "synced"}
@@ -635,9 +648,8 @@ class SyncService:
             total += len(rows)
 
         if "sales" in tables:
-            rows = await SyncService._pull_table(
-                db, Sale, since,
-                Sale.branch_id == branch_id,
+            rows = await _pull(
+                Sale, Sale.branch_id == branch_id,
                 options=[selectinload(Sale.items)],
             )
             result.sales = []
@@ -658,10 +670,7 @@ class SyncService:
             total += len(rows)
 
         if "purchase_orders" in tables:
-            rows = await SyncService._pull_table(
-                db, PurchaseOrder, since,
-                PurchaseOrder.branch_id == branch_id,
-            )
+            rows = await _pull(PurchaseOrder, PurchaseOrder.branch_id == branch_id)
             result.purchase_orders = [
                 PurchaseOrderResponse.model_validate(r).model_copy(
                     update={"sync_status": "synced"}
@@ -671,17 +680,18 @@ class SyncService:
             total += len(rows)
 
         if "audit_logs" in tables:
-            rows = await SyncService._pull_table(
-                db, AuditLog, since,
-                AuditLog.organization_id == organization_id,
-            )
+            rows = await _pull(AuditLog, AuditLog.organization_id == organization_id)
             result.audit_logs = [AuditLogResponse.model_validate(r) for r in rows]
             total += len(rows)
 
         result.total_records = total
+        if resume_points:
+            result.has_more = True
+            result.sync_timestamp = min(resume_points)
+
         logger.info(
-            "Pull completed: branch=%s since=%s records=%d",
-            branch_id, since, total,
+            "Pull completed: branch=%s since=%s records=%d has_more=%s",
+            branch_id, since, total, result.has_more,
         )
         return result
 
@@ -692,23 +702,62 @@ class SyncService:
         since: Optional[datetime],
         *filters,
         options: Optional[list] = None,
-    ) -> List[Any]:
+        limit: Optional[int] = None,
+    ) -> Tuple[List[Any], Optional[datetime]]:
         """
-        Fetch all rows matching ``filters``, optionally restricted to those
-        with ``updated_at > since``.
+        Fetch rows matching ``filters``, optionally restricted to those with
+        ``updated_at > since``, ordered for stable pagination.
 
         Soft-deleted rows (``sync_status='deleted'``) are intentionally
         included so clients know to remove them locally.
+
+        Without ``limit`` this is unbounded — safe for small reference
+        tables, but a brand-new device's first pull against an established
+        branch's full sales history (tens of thousands of rows, each with
+        nested items) can then time out client-side and, because
+        ``last_sync_at`` only advances on a fully successful response,
+        restart the entire query from scratch on every retry — some
+        branches could never complete an initial sync. See finding #5 in
+        docs/reviews/2026-08-11-offline-first-architecture-review.md.
+
+        With ``limit``, returns at most ``limit`` rows plus a resume
+        timestamp (or ``None`` when no more rows remain). To make the
+        resume point safe even when many rows share the same microsecond
+        ``updated_at`` (plausible under concurrent writes), any trailing
+        rows in the page that share the last row's ``updated_at`` are held
+        back for the next page — otherwise a subsequent ``updated_at >
+        resume_point`` query could skip a sibling row that has the exact
+        same timestamp but lost the arbitrary tie-break ordering. The one
+        rows-held-back is skipped only if it would empty the whole page
+        (i.e. more than ``limit`` rows share one exact timestamp) since
+        that must still make forward progress.
         """
         conditions = list(filters)
         if since is not None:
             conditions.append(model.updated_at > since)
 
-        stmt   = select(model).where(and_(*conditions))
+        stmt = select(model).where(and_(*conditions)).order_by(model.updated_at.asc(), model.id.asc())
         if options:
             stmt = stmt.options(*options)
+        if limit is not None:
+            # Fetch one extra row so we can tell whether more data follows.
+            stmt = stmt.limit(limit + 1)
+
         result = await db.execute(stmt)
-        return list(result.scalars().all())
+        rows = list(result.scalars().all())
+
+        if limit is None or len(rows) <= limit:
+            return rows, None
+
+        page = rows[:limit]
+        boundary_ts = page[-1].updated_at
+        trimmed = [r for r in page if r.updated_at != boundary_ts]
+        if trimmed:
+            return trimmed, trimmed[-1].updated_at
+        # Extreme edge case: every row in the page shares one timestamp.
+        # Return the full page rather than stalling on an empty one — the
+        # client will simply do one extra round trip if siblings remain.
+        return page, boundary_ts
 
     # =========================================================================
     # PUSH
@@ -1199,6 +1248,41 @@ class SyncService:
                     ),
                 ), None
 
+            # ------------------------------------------------------------------
+            # Forward-skew guard: the backdating check above only bounds how
+            # far in the PAST created_offline_at can be — there was no bound
+            # at all on the future. A device with a clock skewed forward
+            # (misconfigured timezone, bad RTC) would otherwise record a sale
+            # with a created_at in the future, corrupting daily-sales/shift/
+            # tax-period reporting for however long it takes someone to
+            # notice the drift. A generous tolerance covers legitimate
+            # timezone edge cases (max UTC offset is +14h) without covering
+            # a clock that's wrong by days. See finding #4 (clock skew) in
+            # docs/reviews/2026-08-11-offline-first-architecture-review.md.
+            # ------------------------------------------------------------------
+            _MAX_FORWARD_SKEW = timedelta(hours=24)
+            if _sale_ts > datetime.now(timezone.utc) + _MAX_FORWARD_SKEW and not record.force:
+                logger.warning(
+                    "Sync: Rejected forward-dated sale %s "
+                    "(created_offline_at=%s, server_now=%s, branch=%s)",
+                    record.local_id,
+                    _sale_ts.isoformat(),
+                    datetime.now(timezone.utc).isoformat(),
+                    branch_id,
+                )
+                return PushResult(
+                    local_id=record.local_id,
+                    table_name="sales",
+                    success=False,
+                    error=(
+                        f"Sale's recorded time ({_sale_ts.isoformat()}) is more than "
+                        f"{int(_MAX_FORWARD_SKEW.total_seconds() // 3600)} hours ahead of "
+                        "the server clock — this device's clock may be set incorrectly. "
+                        "Contact your manager for manual reconciliation "
+                        "(admin can use force=true to override)."
+                    ),
+                ), None
+
         existing = (await db.execute(
             select(Sale).where(
                 Sale.organization_id == organization_id,
@@ -1389,52 +1473,103 @@ class SyncService:
                 ), None
 
         # ------------------------------------------------------------------
-        # Server-side price cross-check (fraud signal).
-        # Re-fetch server-canonical unit prices and compare with what the
-        # client sent.  A mismatch > 1% is logged as a suspicious event.
-        # This does NOT reject the sale (avoids disrupting pharmacy ops)
-        # but creates an auditable trail for manager review.
+        # Price reconciliation.
+        # An offline sale locks in whatever price the client charged at the
+        # time — if the price changed on the server while the device was
+        # offline (routine, not an edge case, in a pharmacy that reprices),
+        # that divergence was previously only ever a log line nobody would
+        # see. Re-derive the price each item *should* have charged (the
+        # same branch-level resolution order pricing_calculator.py uses
+        # online: BranchInventory.selling_price, falling back to
+        # Drug.unit_price) and compare. Contract-priced sales are skipped —
+        # a contract discount is expected divergence from the list price,
+        # not drift — reconciling those would need re-evaluating the
+        # contract's live terms, out of scope here. A mismatch beyond
+        # tolerance does NOT reject the sale (the drugs are already
+        # dispensed) but raises a persistent, reviewable SystemAlert instead
+        # of a log-only warning, so a manager actually sees it. See P1 in
+        # docs/reviews/2026-08-04-inventory-sync-sales-independent-review.md.
         # ------------------------------------------------------------------
-        try:
-            price_warnings: list[str] = []
-            for item_dict in normalized_items:
-                raw_drug_id = item_dict.get("drug_id")
-                client_price = item_dict.get("unit_price")
-                if raw_drug_id is None or client_price is None:
-                    continue
-                server_drug = await db.scalar(
-                    select(Drug).where(
-                        Drug.id == uuid.UUID(str(raw_drug_id)),
-                        Drug.organization_id == organization_id,
+        if not record.data.get("price_contract_id"):
+            try:
+                catalog_by_drug: dict[uuid.UUID, tuple[str, Any]] = {
+                    row[0]: (row[1], row[2])
+                    for row in (await db.execute(
+                        select(Drug.id, Drug.name, Drug.unit_price).where(
+                            Drug.id.in_(item_drug_ids),
+                            Drug.organization_id == organization_id,
+                        )
+                    )).all()
+                }
+                branch_price_by_drug: dict[uuid.UUID, Any] = dict((await db.execute(
+                    select(BranchInventory.drug_id, BranchInventory.selling_price).where(
+                        BranchInventory.branch_id == branch_id,
+                        BranchInventory.drug_id.in_(item_drug_ids),
                     )
-                )
-                if server_drug is None or server_drug.unit_price is None:
-                    continue
-                try:
-                    client_d = Decimal(str(client_price))
-                    server_d = Decimal(str(server_drug.unit_price))
-                except (ArithmeticError, TypeError, ValueError):
-                    continue
-                if server_d > 0 and abs(client_d - server_d) / server_d > Decimal("0.01"):
+                )).all())
+
+                price_warnings: list[str] = []
+                for item_dict in normalized_items:
+                    drug_id = item_dict.get("drug_id")
+                    client_price = item_dict.get("unit_price")
+                    if drug_id is None or client_price is None:
+                        continue
+                    drug_name, catalog_price = catalog_by_drug.get(drug_id, (None, None))
+                    server_price = branch_price_by_drug.get(drug_id)
+                    if server_price is None:
+                        server_price = catalog_price
+                    if server_price is None:
+                        continue
+                    try:
+                        client_d = Decimal(str(client_price))
+                        server_d = Decimal(str(server_price))
+                    except (ArithmeticError, TypeError, ValueError):
+                        continue
+                    if server_d <= 0 or abs(client_d - server_d) / server_d <= Decimal("0.01"):
+                        continue
+
+                    delta_pct = (abs(client_d - server_d) / server_d * 100).quantize(Decimal("0.1"))
+                    label = drug_name or str(drug_id)
                     price_warnings.append(
-                        f"Drug {server_drug.name}: client_price={client_d}, "
-                        f"server_price={server_d}, "
-                        f"delta={abs(client_d - server_d)}"
+                        f"Drug {label}: client_price={client_d}, server_price={server_d}, "
+                        f"delta={delta_pct}%"
                     )
-            if price_warnings:
-                logger.warning(
-                    "Sync: Price mismatch detected in sale %s (branch=%s, cashier=%s): %s",
+                    db.add(
+                        SystemAlert(
+                            id=uuid.uuid4(),
+                            organization_id=organization_id,
+                            branch_id=branch_id,
+                            alert_type="security",
+                            severity="high" if delta_pct > 10 else "medium",
+                            title=f"Price mismatch on offline sale: {label}",
+                            message=(
+                                f"Offline sale {record.data.get('sale_number', record.local_id)} "
+                                f"charged {client_d} for {label}, but the current branch price is "
+                                f"{server_d} ({delta_pct}% difference). This typically means the "
+                                "price changed while the device was offline. The sale was not "
+                                "blocked (drugs were already dispensed) — review for a possible "
+                                "price adjustment or refund."
+                            ),
+                            drug_id=drug_id,
+                            is_resolved=False,
+                            created_at=datetime.now(timezone.utc),
+                            updated_at=datetime.now(timezone.utc),
+                        )
+                    )
+                if price_warnings:
+                    logger.warning(
+                        "Sync: Price mismatch detected in sale %s (branch=%s, cashier=%s): %s",
+                        record.local_id,
+                        branch_id,
+                        pushed_by,
+                        " | ".join(price_warnings),
+                    )
+            except Exception:
+                # Never let the price check crash the sale
+                logger.exception(
+                    "Sync: Price cross-check failed for sale %s; continuing.",
                     record.local_id,
-                    branch_id,
-                    pushed_by,
-                    " | ".join(price_warnings),
                 )
-        except Exception:
-            # Never let the price check crash the sale
-            logger.exception(
-                "Sync: Price cross-check failed for sale %s; continuing.",
-                record.local_id,
-            )
 
         safe_data = _whitelist(record.data, _SALE_WRITABLE)
         payment_status = str(safe_data.get("payment_status") or "completed")
@@ -1528,6 +1663,7 @@ class SyncService:
                         "is not yet synced. Sale will be retried automatically "
                         "once the prescription is available on the server."
                     ),
+                    error_code=sync_error_codes.DEPENDENCY_NOT_SYNCED,
                     fk_fixes=fk_fixes if fk_fixes else None,
                 ), None
             return PushResult(
@@ -1548,11 +1684,29 @@ class SyncService:
                 # sale (created_offline_at), not at the current sync time.
                 # This prevents valid offline sales from being rejected because
                 # a batch expired while the device was disconnected.
-                sale_date = (
-                    record.created_offline_at.date()
-                    if record.created_offline_at is not None
-                    else date.today()
-                )
+                #
+                # created_offline_at is unverified client input, bounded only
+                # by the 7-day backdating guard above — within that window, a
+                # device with a clock skewed backward (deliberately or via a
+                # dead RTC battery) could make an already-expired batch look
+                # valid at the claimed sale time, letting expired stock be
+                # recorded as legitimately sold. Trust the claimed timestamp
+                # fully only within a much tighter window than the general
+                # 7-day sync-acceptance one; beyond that, clamp to the edge
+                # of the trusted window (still generous enough for a device
+                # offline over a long weekend) rather than the far-past
+                # claimed date, so an actually-expired-today batch can't be
+                # laundered through a stale clock. See finding #4 in
+                # docs/reviews/2026-08-11-offline-first-architecture-review.md.
+                _MAX_TRUSTED_SKEW_FOR_EXPIRY = timedelta(hours=48)
+                _earliest_trusted = datetime.now(timezone.utc) - _MAX_TRUSTED_SKEW_FOR_EXPIRY
+                if record.created_offline_at is None:
+                    sale_date = date.today()
+                else:
+                    _claimed = record.created_offline_at
+                    if _claimed.tzinfo is None:
+                        _claimed = _claimed.replace(tzinfo=timezone.utc)
+                    sale_date = max(_claimed, _earliest_trusted).date()
                 inventory_plan, inventory_error = (
                     await SyncService._prepare_offline_sale_inventory(
                         db=db,
@@ -3375,6 +3529,7 @@ class SyncService:
                     table_name="prescriptions",
                     success=False,
                     error=f"Customer {customer_id} is not yet synced. Prescription will be retried automatically.",
+                    error_code=sync_error_codes.DEPENDENCY_NOT_SYNCED,
                 ), None
 
         # Validate branch_id if an older/newer client sends it, then stamp the
