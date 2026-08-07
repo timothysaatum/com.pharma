@@ -1,8 +1,10 @@
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use rand::{rngs::OsRng, RngCore};
 use rusqlite::{params_from_iter, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use tauri::State;
 
@@ -133,13 +135,377 @@ pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, 
     ))
 }
 
-pub fn init_db(db_dir: Option<PathBuf>, ext_path: Option<PathBuf>) -> Result<DbState, String> {
+// ─── SQLCipher at-rest encryption ──────────────────────────────────────
+//
+// `laso.db` holds prescriptions, customer PII, and controlled-substance
+// dispensing records, so it must never sit on disk unencrypted. This
+// section generates/manages the SQLCipher raw key format and drives a
+// crash-safe, resumable migration from a plaintext install to an
+// encrypted one. The safety boundary is atomic filesystem rename (SQLite
+// has no cross-file transaction primitive), matching the bar of care set
+// by this codebase's `migrate_v15`/`repairIncompleteV15Migration` pattern
+// in `ui.laso/src/lib/localDb.ts`: detect a specific stuck state on every
+// launch, heal it, no-op otherwise — never trust a one-shot flag.
+
+const PLAINTEXT_SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
+
+/// Generate a fresh SQLCipher raw-key (32 CSPRNG bytes, hex-encoded as
+/// `x'<64 hex chars>'`). Never derived from anything user-typed.
+pub(crate) fn generate_sqlcipher_raw_key() -> String {
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("x'{hex}'")
+}
+
+/// Reads the first 16 bytes of a file, if it exists and is long enough.
+fn read_header_bytes(path: &Path) -> Option<[u8; 16]> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buf = [0u8; 16];
+    file.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// Cheap plaintext-vs-encrypted detection: plaintext SQLite files start
+/// with the literal magic header `"SQLite format 3\0"`; SQLCipher output
+/// does not (it's the ciphertext of the first page). A missing/empty/short
+/// file is treated as "not plaintext" (fresh install path).
+fn is_plaintext_sqlite(path: &Path) -> bool {
+    read_header_bytes(path).as_ref() == Some(PLAINTEXT_SQLITE_MAGIC)
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn migration_tmp_path(db_path: &Path) -> PathBuf {
+    with_suffix(db_path, ".encrypting-tmp")
+}
+
+fn migration_bak_path(db_path: &Path) -> PathBuf {
+    with_suffix(db_path, ".pre-encryption.bak")
+}
+
+/// WAL/SHM sidecar files SQLite maintains next to a database file. Journal
+/// mode is a persistent property of the file itself, so a plaintext DB that
+/// was ever run in WAL mode (which this app always enables) can have recent
+/// writes sitting in `<db>-wal` rather than `<db>` — and leaving a stale
+/// plaintext `-wal` file lying around after migration would be exactly the
+/// kind of residual-PII-on-disk leak this change exists to close.
+fn sidecar_paths(db_path: &Path) -> (PathBuf, PathBuf) {
+    (with_suffix(db_path, "-wal"), with_suffix(db_path, "-shm"))
+}
+
+fn remove_with_sidecars(path: &Path) {
+    let _ = std::fs::remove_file(path);
+    let (wal, shm) = sidecar_paths(path);
+    let _ = std::fs::remove_file(&wal);
+    let _ = std::fs::remove_file(&shm);
+}
+
+/// Rename `from` to `to`, carrying along any WAL/SHM sidecars so they don't
+/// linger under the old filename (or collide with the destination's future
+/// sidecars).
+fn rename_with_sidecars(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::rename(from, to)?;
+    let (from_wal, from_shm) = sidecar_paths(from);
+    let (to_wal, to_shm) = sidecar_paths(to);
+    if from_wal.exists() {
+        let _ = std::fs::rename(&from_wal, &to_wal);
+    }
+    if from_shm.exists() {
+        let _ = std::fs::rename(&from_shm, &to_shm);
+    }
+    Ok(())
+}
+
+fn sql_string_literal(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push('\'');
+        }
+        out.push(ch);
+    }
+    out.push('\'');
+    out
+}
+
+fn open_and_key(path: &Path, key: &str) -> Result<Connection, String> {
+    let conn = Connection::open(path)
+        .map_err(|e| format!("Cannot open {}: {e}", path.display()))?;
+    conn.pragma_update(None, "key", key)
+        .map_err(|e| format!("Cannot set SQLCipher key on {}: {e}", path.display()))?;
+    Ok(conn)
+}
+
+/// Integrity-only check on an already-encrypted database: confirms every
+/// page decrypts (`cipher_integrity_check`) and the resulting SQLite
+/// structure is sound (`integrity_check`). Deliberately does NOT compare
+/// row counts against anything — this is also used to validate a
+/// live, already-migrated DB that may have accumulated new data since
+/// migration, where row counts are expected to have grown.
+fn check_encrypted_integrity(conn: &Connection) -> Result<(), String> {
+    let mut cipher_issues: Vec<String> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare("PRAGMA cipher_integrity_check")
+            .map_err(|e| format!("cipher_integrity_check failed: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("cipher_integrity_check failed: {e}"))?;
+        for row in rows {
+            cipher_issues.push(row.map_err(|e| format!("cipher_integrity_check row error: {e}"))?);
+        }
+    }
+    if !cipher_issues.is_empty() {
+        return Err(format!(
+            "cipher_integrity_check reported issues: {}",
+            cipher_issues.join("; ")
+        ));
+    }
+
+    let integrity: String = conn
+        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+        .map_err(|e| format!("integrity_check failed: {e}"))?;
+    if integrity.to_lowercase() != "ok" {
+        return Err(format!("integrity_check reported: {integrity}"));
+    }
+    Ok(())
+}
+
+fn verify_encrypted_db_intact(db_path: &Path, key: &str) -> Result<(), String> {
+    let conn = open_and_key(db_path, key)?;
+    check_encrypted_integrity(&conn)
+}
+
+/// Full pre-finalize verification of a freshly-built encrypted copy: the
+/// integrity checks above, PLUS an exact row-count comparison against the
+/// still-untouched plaintext original that produced it. Row-count equality
+/// only makes sense here because, at this point, nothing has written to the
+/// new copy since it was exported — it's not yet "live".
+fn verify_migrated_db(plain_path: &Path, encrypted_path: &Path, key: &str) -> Result<(), String> {
+    let encrypted_conn = open_and_key(encrypted_path, key)?;
+    check_encrypted_integrity(&encrypted_conn)?;
+
+    let plain_conn = Connection::open(plain_path)
+        .map_err(|e| format!("Cannot reopen plaintext original for verification: {e}"))?;
+
+    let table_names: Vec<String> = {
+        let mut stmt = plain_conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
+            .map_err(|e| format!("Cannot list tables: {e}"))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| format!("Cannot list tables: {e}"))?;
+        rows.collect::<Result<_, _>>()
+            .map_err(|e| format!("Cannot list tables: {e}"))?
+    };
+
+    for table in table_names {
+        let quoted = format!("\"{}\"", table.replace('"', "\"\""));
+        let plain_count: i64 = plain_conn
+            .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| row.get(0))
+            .map_err(|e| format!("Cannot count rows in {table} (plaintext): {e}"))?;
+        let migrated_count: i64 = encrypted_conn
+            .query_row(&format!("SELECT COUNT(*) FROM {quoted}"), [], |row| row.get(0))
+            .map_err(|e| format!("Cannot count rows in {table} (migrated): {e}"))?;
+        if plain_count != migrated_count {
+            return Err(format!(
+                "Row count mismatch in table {table}: plaintext={plain_count}, migrated={migrated_count}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Build a new encrypted copy of `plain_path` at `tmp_path` via SQLCipher's
+/// standard plaintext-to-encrypted conversion. Never touches `plain_path`.
+fn build_encrypted_copy(plain_path: &Path, tmp_path: &Path, key: &str) -> Result<(), String> {
+    // Clean up any stray leftover from a previous crashed attempt so we
+    // always start from a clean slate.
+    remove_with_sidecars(tmp_path);
+
+    let conn = Connection::open(plain_path)
+        .map_err(|e| format!("Cannot open plaintext DB for migration: {e}"))?;
+
+    let attach_sql = format!(
+        "ATTACH DATABASE {} AS encrypted KEY {};",
+        sql_string_literal(&tmp_path.to_string_lossy()),
+        sql_string_literal(key),
+    );
+    conn.execute_batch(&attach_sql)
+        .map_err(|e| format!("Cannot attach encrypted target DB: {e}"))?;
+
+    conn.query_row("SELECT sqlcipher_export('encrypted')", [], |_row| Ok(()))
+        .map_err(|e| format!("sqlcipher_export failed: {e}"))?;
+
+    conn.execute_batch("DETACH DATABASE encrypted;")
+        .map_err(|e| format!("Cannot detach encrypted target DB: {e}"))?;
+
+    Ok(())
+}
+
+/// Drives the crash-safe, resumable plaintext -> encrypted migration.
+///
+/// Returns `Ok(Some(warning))` when the app should still start (falling
+/// back to whatever DB state is safely usable) but something worth
+/// surfacing happened; `Ok(None)` when everything is normal; `Err` only
+/// when this function cannot guarantee `db_path` is left in a directly
+/// openable state (an unrecoverable filesystem failure) — the caller
+/// treats that as fatal, same as this codebase already treats a missing
+/// cr-sqlite extension as fatal, rather than silently risking data loss.
+///
+/// Invariant on every non-`Err` return: `db_path` either does not exist
+/// (fresh install — the caller will create it) or exists and is directly
+/// openable, and `is_plaintext_sqlite(db_path)` correctly reflects whether
+/// the caller should set `PRAGMA key` on it.
+fn ensure_db_ready(db_path: &Path, key: &str) -> Result<Option<String>, String> {
+    let bak_path = migration_bak_path(db_path);
+    let tmp_path = migration_tmp_path(db_path);
+
+    // ── Heal the one genuinely stateful crash window: a kill between the
+    // two renames in the "finalize" step below (original safely renamed to
+    // `.bak`, but the new encrypted copy never made it into place as
+    // `laso.db`). ──
+    if !db_path.exists() && bak_path.exists() {
+        if tmp_path.exists() && verify_migrated_db(&bak_path, &tmp_path, key).is_ok() {
+            std::fs::rename(&tmp_path, db_path).map_err(|e| {
+                format!(
+                    "Self-heal: verified encrypted copy exists but could not be placed at {}: {e}. \
+                     Original plaintext DB remains safe at {}.",
+                    db_path.display(),
+                    bak_path.display()
+                )
+            })?;
+            // Migration just completed via self-heal. Keep `.bak` for one
+            // more successful launch before deleting it (checked below on
+            // a later call), same as the non-crash path.
+            return Ok(Some(
+                "DB encryption migration self-healed after an interrupted previous launch".to_string(),
+            ));
+        }
+
+        // The new copy is missing or failed verification: restore the
+        // known-good plaintext backup so the app has a working DB, and
+        // fall through to retry migration from scratch below.
+        remove_with_sidecars(&tmp_path);
+        rename_with_sidecars(&bak_path, db_path).map_err(|e| {
+            format!(
+                "Self-heal: could not restore pre-encryption backup {} to {}: {e}. \
+                 Manual recovery required.",
+                bak_path.display(),
+                db_path.display()
+            )
+        })?;
+    }
+
+    if !db_path.exists() {
+        // Fresh install: nothing to migrate. Clear any stray tmp file just
+        // in case (harmless if none exists).
+        remove_with_sidecars(&tmp_path);
+        return Ok(None);
+    }
+
+    if is_plaintext_sqlite(db_path) {
+        if let Err(e) = build_encrypted_copy(db_path, &tmp_path, key) {
+            remove_with_sidecars(&tmp_path);
+            return Ok(Some(format!(
+                "DB encryption migration failed while building encrypted copy, original untouched, will retry next launch: {e}"
+            )));
+        }
+        if let Err(e) = verify_migrated_db(db_path, &tmp_path, key) {
+            remove_with_sidecars(&tmp_path);
+            return Ok(Some(format!(
+                "DB encryption migration failed verification, original untouched, will retry next launch: {e}"
+            )));
+        }
+
+        // Verified good. Finalize: original -> backup, then new copy -> live.
+        // This pair of renames is the one window a crash can land in — see
+        // the heal branch above for how it's detected and repaired.
+        rename_with_sidecars(db_path, &bak_path)
+            .map_err(|e| format!("DB encryption migration could not back up original: {e}"))?;
+
+        if let Err(rename_err) = std::fs::rename(&tmp_path, db_path) {
+            // Try once more (transient FS hiccups), else restore the
+            // backup so this launch still has a working DB rather than
+            // leaving db_path missing (which `Connection::open` would
+            // otherwise silently "fix" by creating an empty database).
+            if tmp_path.exists() && std::fs::rename(&tmp_path, db_path).is_ok() {
+                return Ok(Some(format!(
+                    "DB encryption migration finalize rename failed once but succeeded on retry: {rename_err}"
+                )));
+            }
+            rename_with_sidecars(&bak_path, db_path).map_err(|restore_err| {
+                format!(
+                    "DB encryption migration finalize failed ({rename_err}) and restoring the plaintext \
+                     backup also failed ({restore_err}). Manual recovery required using {} and {}.",
+                    bak_path.display(),
+                    tmp_path.display()
+                )
+            })?;
+            return Ok(Some(format!(
+                "DB encryption migration finalize failed, restored plaintext backup, will retry next launch: {rename_err}"
+            )));
+        }
+
+        return Ok(Some(
+            "DB successfully migrated to encrypted storage".to_string(),
+        ));
+    }
+
+    // `db_path` exists and is not plaintext: already encrypted, either from
+    // a completed migration or a fresh SQLCipher install from a prior run.
+    // Grace-period cleanup: only delete the backup once this DB opens and
+    // passes an integrity check on a LATER launch than the one that
+    // created it (never trust a one-shot completion flag).
+    if bak_path.exists() {
+        if let Err(e) = verify_encrypted_db_intact(db_path, key) {
+            return Ok(Some(format!(
+                "Post-migration DB failed integrity verification; keeping backup at {} until this is resolved: {e}",
+                bak_path.display()
+            )));
+        }
+        remove_with_sidecars(&bak_path);
+    }
+
+    Ok(None)
+}
+
+pub fn init_db(
+    db_dir: Option<PathBuf>,
+    ext_path: Option<PathBuf>,
+    encryption_key: &str,
+) -> Result<DbState, String> {
     // Resolve DB path: use app's data dir or fallback to CWD
     let db_dir = db_dir.unwrap_or_else(|| PathBuf::from("."));
     std::fs::create_dir_all(&db_dir).map_err(|e| format!("Cannot create DB dir: {e}"))?;
 
     let db_path = db_dir.join("laso.db");
+
+    let migration_warning = ensure_db_ready(&db_path, encryption_key)?;
+
+    // Whether `PRAGMA key` should be set on this connection: it must be set
+    // for a fresh install (so the file is created encrypted) and for an
+    // already-encrypted file, but must NOT be set when `ensure_db_ready`
+    // had to fall back to an intact plaintext DB (SQLCipher only decodes
+    // as ciphertext once a key is set — setting one on a genuinely
+    // plaintext file would make it unreadable).
+    let needs_key = !is_plaintext_sqlite(&db_path);
+
     let conn = Connection::open(&db_path).map_err(|e| format!("Cannot open SQLite DB: {e}"))?;
+
+    // PRAGMA key MUST be the very first statement executed on this
+    // connection — SQLCipher requires it before any other pragma or query.
+    if needs_key {
+        conn.pragma_update(None, "key", encryption_key)
+            .map_err(|e| format!("Cannot set SQLCipher key: {e}"))?;
+    }
 
     // Enable WAL mode
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
@@ -172,18 +538,120 @@ pub fn init_db(db_dir: Option<PathBuf>, ext_path: Option<PathBuf>) -> Result<DbS
 
     Ok(DbState {
         conn: Mutex::new(conn),
-        startup_warning: None,
+        startup_warning: migration_warning,
     })
 }
 
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        crsqlite_platform_dir, execute_transaction, init_db, json_to_rusqlite,
-        resolve_extension_path, TransactionStatement,
+        build_encrypted_copy, crsqlite_platform_dir, ensure_db_ready, execute_transaction,
+        extension_load_path, generate_sqlcipher_raw_key, init_db, is_plaintext_sqlite,
+        json_to_rusqlite, migration_bak_path, migration_tmp_path, rename_with_sidecars,
+        resolve_extension_path, TransactionStatement, PLAINTEXT_SQLITE_MAGIC,
     };
     use rusqlite::{types::Value, Connection};
     use std::path::Path;
+
+    /// Fixed key for tests — production always uses
+    /// `generate_sqlcipher_raw_key()` via the OS keyring; tests inject an
+    /// explicit key so they never touch the real keyring (see
+    /// `get_or_create_key_from_store` in `lib.rs` for that round-trip test).
+    const TEST_KEY: &str =
+        "x'0202020202020202020202020202020202020202020202020202020202020202'";
+
+    fn fresh_temp_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "pharmacare-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// SPIKE — TEMPORARY, see plan P1-6 Step 0.
+    /// Verifies that `conn.load_extension()` (used to load the vendored
+    /// cr-sqlite extension) still works against a SQLCipher-linked rusqlite
+    /// connection, including AFTER `PRAGMA key` has been set. This is the
+    /// go/no-go check for the whole DB-encryption approach.
+    #[test]
+    fn spike_sqlcipher_load_extension_after_pragma_key() {
+        let extension =
+            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
+
+        let temp = std::env::temp_dir().join(format!(
+            "pharmacare-sqlcipher-spike-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let db_path = temp.join("spike.db");
+
+        let key = "x'0101010101010101010101010101010101010101010101010101010101010101'";
+
+        // 1. Open a fresh (SQLCipher) connection and set PRAGMA key FIRST.
+        let conn = Connection::open(&db_path).unwrap();
+        conn.pragma_update(None, "key", key)
+            .expect("PRAGMA key should succeed on a SQLCipher-linked connection");
+
+        // 2. Prove the connection is actually SQLCipher-encrypted by forcing
+        //    a write, then confirming a fresh connection WITHOUT the key
+        //    cannot read it as plaintext SQLite.
+        conn.execute_batch("CREATE TABLE spike (id INTEGER PRIMARY KEY NOT NULL, val TEXT); INSERT INTO spike (id, val) VALUES (1, 'hello');")
+            .expect("should be able to create/write on the keyed connection");
+
+        // 3. Load the cr-sqlite extension AFTER PRAGMA key has been set.
+        let ext_load_path = extension_load_path(&extension);
+        unsafe {
+            conn.load_extension(&ext_load_path, None)
+                .expect("cr-sqlite extension should load on a SQLCipher connection with a key already set");
+        }
+
+        // 4. Call an actual cr-sqlite function end-to-end, not just "loaded
+        //    without erroring".
+        let site_id: Vec<u8> = conn
+            .query_row("SELECT crsql_site_id()", [], |row| row.get(0))
+            .expect("crsql_site_id() should work on a SQLCipher-linked, keyed connection");
+        assert!(!site_id.is_empty(), "site_id should be non-empty");
+
+        // 5. Also confirm cr-sqlite's own bookkeeping tables/functions work,
+        //    not just a no-arg getter: exercise crsql_as_crr on a real table.
+        conn.execute_batch("SELECT crsql_as_crr('spike');")
+            .expect("crsql_as_crr should work against a SQLCipher-linked connection");
+        let changes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM crsql_changes", [], |row| row.get(0))
+            .expect("crsql_changes virtual table should be queryable");
+        assert!(changes >= 1, "expected at least one recorded change");
+
+        drop(conn);
+
+        // 6. Sanity check: reopening WITHOUT the key must NOT see plaintext
+        //    (proves the file is genuinely encrypted, not just PRAGMA key
+        //    being silently ignored by a non-SQLCipher build).
+        let conn_no_key = Connection::open(&db_path).unwrap();
+        let unkeyed_result: Result<i64, _> =
+            conn_no_key.query_row("SELECT COUNT(*) FROM spike", [], |row| row.get(0));
+        assert!(
+            unkeyed_result.is_err(),
+            "opening the SQLCipher DB without the key should fail to read plaintext, but got: {unkeyed_result:?}"
+        );
+        drop(conn_no_key);
+
+        // 7. Reopen WITH the key and confirm data + cr-sqlite state survived.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.pragma_update(None, "key", key).unwrap();
+        let val: String = conn2
+            .query_row("SELECT val FROM spike WHERE id = 1", [], |row| row.get(0))
+            .expect("data should survive close/reopen with the same key");
+        assert_eq!(val, "hello");
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
 
     #[test]
     fn real_crsqlite_extension_loads_without_degraded_warning() {
@@ -206,7 +674,7 @@ mod startup_tests {
             std::env::temp_dir().join(format!("pharmacare-valid-extension-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&temp);
 
-        let state = init_db(Some(temp.clone()), Some(extension))
+        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
             .expect("real cr-sqlite extension should initialize");
         assert_eq!(state.startup_warning, None);
         let site_id: Vec<u8> = state
@@ -232,7 +700,7 @@ mod startup_tests {
         let invalid = temp.join("crsqlite.invalid");
         std::fs::write(&invalid, b"not a shared library").unwrap();
 
-        let err = init_db(Some(temp.clone()), Some(invalid))
+        let err = init_db(Some(temp.clone()), Some(invalid), TEST_KEY)
             .err()
             .expect("invalid cr-sqlite extension must fail startup");
         assert!(err.contains("Cannot load cr-sqlite extension"));
@@ -248,12 +716,233 @@ mod startup_tests {
         ));
         let _ = std::fs::remove_dir_all(&temp);
 
-        let err = init_db(Some(temp.clone()), None)
+        let err = init_db(Some(temp.clone()), None, TEST_KEY)
             .err()
             .expect("missing cr-sqlite extension must fail startup");
         assert!(err.contains("CR-SQLite extension is required"));
 
         let _ = std::fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn generate_sqlcipher_raw_key_is_well_formed_and_random() {
+        let a = generate_sqlcipher_raw_key();
+        let b = generate_sqlcipher_raw_key();
+        assert_ne!(a, b, "two generated keys should not collide");
+        for key in [&a, &b] {
+            assert!(
+                key.starts_with("x'") && key.ends_with('\''),
+                "key should use SQLCipher raw-key format: {key}"
+            );
+            let hex = &key[2..key.len() - 1];
+            assert_eq!(hex.len(), 64, "should encode 32 bytes as 64 hex chars: {key}");
+            assert!(
+                hex.chars().all(|c| c.is_ascii_hexdigit()),
+                "should be all hex digits: {key}"
+            );
+        }
+    }
+
+    #[test]
+    fn fresh_install_creates_encrypted_db() {
+        let extension =
+            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
+        let temp = fresh_temp_dir("fresh-install-encrypted");
+
+        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+            .expect("fresh install should initialize");
+        assert_eq!(state.startup_warning, None);
+        drop(state);
+
+        let db_path = temp.join("laso.db");
+        let mut header = [0u8; 16];
+        {
+            use std::io::Read;
+            let mut f = std::fs::File::open(&db_path).unwrap();
+            f.read_exact(&mut header).unwrap();
+        }
+        assert_ne!(
+            &header, PLAINTEXT_SQLITE_MAGIC,
+            "a freshly created laso.db must not carry the plaintext SQLite magic header"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn ensure_db_ready_migrates_plaintext_without_needing_cr_sqlite() {
+        // Exercises the migration state machine directly, decoupled from
+        // cr-sqlite extension loading (which happens later in `init_db`).
+        let temp = fresh_temp_dir("ensure-db-ready-direct");
+        let db_path = temp.join("laso.db");
+        {
+            let seed = Connection::open(&db_path).unwrap();
+            seed.execute_batch(
+                "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT); \
+                 INSERT INTO customers (id, name) VALUES (1, 'Jane Doe');",
+            )
+            .unwrap();
+        }
+        assert!(is_plaintext_sqlite(&db_path));
+
+        let warning = ensure_db_ready(&db_path, TEST_KEY).expect("migration should succeed");
+        assert!(
+            warning.unwrap_or_default().contains("migrated"),
+            "should report a successful migration"
+        );
+        assert!(!is_plaintext_sqlite(&db_path));
+        assert!(
+            migration_bak_path(&db_path).exists(),
+            "pre-encryption backup should be retained for the grace period"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn plaintext_db_migrates_to_encrypted_in_place() {
+        let extension =
+            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
+        let temp = fresh_temp_dir("plaintext-migrates");
+        let db_path = temp.join("laso.db");
+
+        // Pre-seed a real plaintext SQLite DB with sample rows, as an
+        // existing install would have on disk before this feature ships.
+        {
+            let seed = Connection::open(&db_path).unwrap();
+            seed.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT); \
+                 INSERT INTO customers (id, name) VALUES (1, 'Jane Doe'), (2, 'John Smith');",
+            )
+            .unwrap();
+        }
+        assert!(
+            is_plaintext_sqlite(&db_path),
+            "seed DB must be plaintext SQLite before migration"
+        );
+
+        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+            .expect("plaintext DB should migrate and initialize");
+
+        assert!(
+            !is_plaintext_sqlite(&db_path),
+            "laso.db should be encrypted after migration"
+        );
+
+        {
+            let conn = state.conn.lock().unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM customers", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 2, "row count must match the plaintext original exactly");
+            let name: String = conn
+                .query_row("SELECT name FROM customers WHERE id = 1", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(name, "Jane Doe");
+        }
+        drop(state);
+
+        // Independently reopen with the stored key to prove the data lives
+        // in the encrypted file on disk, not just in the live connection.
+        let reopened = Connection::open(&db_path).unwrap();
+        reopened.pragma_update(None, "key", TEST_KEY).unwrap();
+        let count: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM customers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 2);
+
+        assert!(
+            migration_bak_path(&db_path).exists(),
+            "pre-encryption backup should be retained for one more launch, not deleted immediately"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    #[test]
+    fn killed_mid_migration_self_heals_on_next_launch() {
+        let extension =
+            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
+        let temp = fresh_temp_dir("killed-mid-migration");
+        let db_path = temp.join("laso.db");
+
+        {
+            let seed = Connection::open(&db_path).unwrap();
+            seed.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT); \
+                 INSERT INTO customers (id, name) VALUES (1, 'Jane Doe'), (2, 'John Smith');",
+            )
+            .unwrap();
+        }
+
+        let tmp_path = migration_tmp_path(&db_path);
+        let bak_path = migration_bak_path(&db_path);
+
+        // Simulate a kill in the middle of the finalize step: the fully
+        // verified encrypted copy has been built, and the original has
+        // just been renamed to `.bak` — but the second rename (tmp ->
+        // live) never happened.
+        build_encrypted_copy(&db_path, &tmp_path, TEST_KEY).expect("build encrypted copy");
+        rename_with_sidecars(&db_path, &bak_path).expect("rename original to backup");
+        assert!(!db_path.exists(), "simulated crash window: laso.db should be missing");
+        assert!(bak_path.exists());
+        assert!(tmp_path.exists());
+
+        // Next launch: init_db must detect and repair this without any
+        // data loss, in a single call.
+        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+            .expect("self-heal should succeed and initialize normally");
+
+        assert!(db_path.exists(), "laso.db should exist again after self-heal");
+        assert!(!is_plaintext_sqlite(&db_path), "healed laso.db should be encrypted");
+        assert!(
+            state
+                .startup_warning
+                .as_deref()
+                .unwrap_or("")
+                .contains("self-heal"),
+            "startup_warning should mention the self-heal: {:?}",
+            state.startup_warning
+        );
+
+        {
+            let conn = state.conn.lock().unwrap();
+            let count: i64 = conn
+                .query_row("SELECT COUNT(*) FROM customers", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(count, 2, "no data loss across the self-heal");
+            let name: String = conn
+                .query_row("SELECT name FROM customers WHERE id = 1", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(name, "Jane Doe");
+        }
+
+        // The backup is intentionally kept for one more successful launch
+        // before being cleaned up — it should still be here right after
+        // the heal itself.
+        assert!(
+            bak_path.exists(),
+            "backup should be retained through the heal launch itself"
+        );
+        drop(state);
+
+        // A follow-up successful launch on the now-healed, now-encrypted DB
+        // is what finally cleans up the backup.
+        let state2 = init_db(
+            Some(temp.clone()),
+            Some(resolve_extension_path(None).unwrap()),
+            TEST_KEY,
+        )
+        .expect("follow-up launch should succeed");
+        assert!(
+            !bak_path.exists(),
+            "backup should be cleaned up after a later successful launch"
+        );
+        drop(state2);
+
+        let _ = std::fs::remove_dir_all(&temp);
     }
 
     #[test]
