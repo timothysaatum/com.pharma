@@ -18,7 +18,7 @@
 import { getDb, enqueue } from "@/lib/localDb";
 import type {
     Sale, DrugBatch, StockAdjustmentCreate,
-    PurchaseOrder, Customer, Prescription,
+    PurchaseOrder, Customer, Prescription, BranchInventory,
 } from "@/types";
 
 const AUDIT_LOG_COLUMNS = new Set([
@@ -383,6 +383,31 @@ export const writeLocal = {
         await upsertAndEnqueue(
             "drug_batches",
             batchData as Record<string, unknown>,
+            operation,
+            { sync_protocol_version: 2 }
+        );
+    },
+
+    /**
+     * Create or update a branch_inventory row's branch-owned metadata
+     * (existence, shelf location, branch selling price). Mirrors `drugBatch`:
+     * `branch_inventory` is client-authoritative offline per the sync
+     * ownership model (see syncEngine.ts header), so both a brand-new
+     * branch/drug link (`addDrugToBranch`) and a metadata edit
+     * (`updateBranchDrug`) upsert through the same helper — the server
+     * handles create/update identically (upsert on branch_id + drug_id).
+     *
+     * NOTE: this is metadata only. Quantity deltas (sales, adjustments,
+     * batch receipts) go through `writeLocal.inventory` instead, which
+     * increments/decrements in place rather than overwriting the row.
+     */
+    branchDrug: async (
+        branchInventory: Omit<BranchInventory, "sync_status" | "sync_version"> & { id: string },
+        operation: "create" | "update" = "create",
+    ): Promise<void> => {
+        await upsertAndEnqueue(
+            "branch_inventory",
+            branchInventory as Record<string, unknown>,
             operation,
             { sync_protocol_version: 2 }
         );

@@ -11,6 +11,7 @@ import { inventoryApi } from "@/api/inventory";
 import { drugApi } from "@/api/drugs";
 import { branchApi } from "@/api/branches";
 import { localRead } from "@/lib/localRead";
+import { writeLocal } from "@/lib/localWrite";
 import { cacheBranchInventoryRows } from "@/lib/localDb";
 import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
@@ -22,6 +23,7 @@ import { appEvents, useAppEvent } from "@/lib/events";
 import { withTimeout } from "@/lib/withTimeout";
 import { DataFreshnessIndicator } from "@/components/DataFreshnessIndicator";
 import type {
+    BranchInventory,
     BranchInventoryWithDetails,
     LowStockItem,
     ExpiringBatchItem,
@@ -293,11 +295,13 @@ const ADJUSTMENT_OPTIONS: {
 function AdjustStockPanel({
     item,
     branchId,
+    adjustedBy,
     onSuccess,
     onClose,
 }: {
     item: BranchInventoryWithDetails;
     branchId: string;
+    adjustedBy: string;
     onSuccess: () => void;
     onClose: () => void;
 }) {
@@ -324,19 +328,28 @@ function AdjustStockPanel({
         if (!canSubmit) return;
         setSubmitting(true);
         setError(null);
+        const payload: StockAdjustmentCreate = {
+            branch_id: branchId,
+            drug_id: item.drug_id,
+            adjustment_type: adjustType,
+            quantity_change: quantityChange,
+            reason: reason.trim() || undefined,
+        };
         try {
-            const payload: StockAdjustmentCreate = {
-                branch_id: branchId,
-                drug_id: item.drug_id,
-                adjustment_type: adjustType,
-                quantity_change: quantityChange,
-                reason: reason.trim() || undefined,
-            };
             await inventoryApi.adjust(payload);
             onSuccess();
         } catch (err) {
-            setError(parseApiError(err));
-            setSubmitting(false);
+            if (isOfflineError(err)) {
+                await writeLocal.stockAdjustment({
+                    ...payload,
+                    id: crypto.randomUUID(),
+                    adjusted_by: adjustedBy,
+                });
+                onSuccess();
+            } else {
+                setError(parseApiError(err));
+                setSubmitting(false);
+            }
         }
     };
 
@@ -478,15 +491,35 @@ function BranchDrugSettingsPanel({
     const save = async () => {
         setSubmitting(true);
         setError(null);
+        const updates = {
+            location: location.trim() || null,
+            selling_price: sellingPrice === "" ? null : Number(sellingPrice),
+        };
         try {
-            await inventoryApi.updateBranchDrug(branchId, item.drug_id, {
-                location: location.trim() || null,
-                selling_price: sellingPrice === "" ? null : Number(sellingPrice),
-            });
+            await inventoryApi.updateBranchDrug(branchId, item.drug_id, updates);
             onSuccess();
         } catch (err) {
-            setError(parseApiError(err));
-            setSubmitting(false);
+            if (isOfflineError(err)) {
+                const branchInventory: BranchInventory = {
+                    id: item.id,
+                    branch_id: branchId,
+                    drug_id: item.drug_id,
+                    quantity: item.quantity,
+                    reserved_quantity: item.reserved_quantity,
+                    location: updates.location,
+                    selling_price: updates.selling_price,
+                    sync_status: item.sync_status,
+                    sync_version: item.sync_version,
+                    synced_at: item.synced_at,
+                    created_at: item.created_at,
+                    updated_at: item.updated_at,
+                };
+                await writeLocal.branchDrug(branchInventory, "update");
+                onSuccess();
+            } else {
+                setError(parseApiError(err));
+                setSubmitting(false);
+            }
         }
     };
 
@@ -542,8 +575,14 @@ function BranchDrugSettingsPanel({
             </div>
 
             <div className="px-5 py-4 border-t border-slate-100 flex items-center justify-between gap-2">
-                <button type="button" onClick={remove} disabled={removing || submitting || item.quantity > 0 || item.reserved_quantity > 0}
-                    title={item.quantity > 0 || item.reserved_quantity > 0 ? "Only zero-stock drugs can be removed" : "Remove from branch"}
+                <button type="button" onClick={remove} disabled={removing || submitting || item.quantity > 0 || item.reserved_quantity > 0 || !navigator.onLine}
+                    title={
+                        !navigator.onLine
+                            ? "Removing a drug from a branch requires an online connection"
+                            : item.quantity > 0 || item.reserved_quantity > 0
+                                ? "Only zero-stock drugs can be removed"
+                                : "Remove from branch"
+                    }
                     className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-sm font-semibold text-red-600 hover:bg-red-50 disabled:opacity-40 disabled:hover:bg-transparent">
                     {removing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
                     Remove
@@ -596,19 +635,32 @@ function AddBranchDrugModal({
         if (!selectedDrug) return;
         setSubmitting(true);
         setError(null);
+        const data = {
+            branch_id: branchId,
+            drug_id: selectedDrug.id,
+            quantity: 0,
+            reserved_quantity: 0,
+            location: location.trim() || null,
+            selling_price: sellingPrice === "" ? null : Number(sellingPrice),
+        };
         try {
-            await inventoryApi.addDrugToBranch(branchId, {
-                branch_id: branchId,
-                drug_id: selectedDrug.id,
-                quantity: 0,
-                reserved_quantity: 0,
-                location: location.trim() || null,
-                selling_price: sellingPrice === "" ? null : Number(sellingPrice),
-            });
+            await inventoryApi.addDrugToBranch(branchId, data);
             onAdded();
         } catch (err) {
-            setError(parseApiError(err));
-            setSubmitting(false);
+            if (isOfflineError(err)) {
+                const now = new Date().toISOString();
+                await writeLocal.branchDrug({
+                    id: crypto.randomUUID(),
+                    ...data,
+                    synced_at: null,
+                    created_at: now,
+                    updated_at: now,
+                }, "create");
+                onAdded();
+            } else {
+                setError(parseApiError(err));
+                setSubmitting(false);
+            }
         }
     };
 
@@ -725,7 +777,7 @@ function TransferStockPanel({
 
     const qty = parseInt(quantity) || 0;
     const exceedsAvailable = qty > available;
-    const canSubmit = qty > 0 && !exceedsAvailable && toBranchId && reason.trim() && !submitting && available > 0;
+    const canSubmit = qty > 0 && !exceedsAvailable && toBranchId && reason.trim() && !submitting && available > 0 && navigator.onLine;
 
     const handleSubmit = async () => {
         if (!canSubmit) return;
@@ -841,6 +893,7 @@ function TransferStockPanel({
                     Cancel
                 </button>
                 <button onClick={handleSubmit} disabled={!canSubmit} type="button"
+                    title={!navigator.onLine ? "Transferring stock between branches requires an online connection" : undefined}
                     className="px-5 py-2.5 text-sm font-bold text-white bg-brand-600 hover:bg-brand-700 rounded-xl disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2">
                     {submitting
                         ? <><RefreshCw className="w-4 h-4 animate-spin" /> Transferring…</>
@@ -854,7 +907,7 @@ function TransferStockPanel({
 // ─── InventoryPage ────────────────────────────────────────────────────────────
 
 export default function InventoryPage() {
-    const { activeBranchId } = useAuthStore();
+    const { activeBranchId, user } = useAuthStore();
     const [activeView, setActiveView] = useState<ActiveView>("stock");
 
     // ── Stock view state ──────────────────────────────────────
@@ -1718,7 +1771,7 @@ export default function InventoryPage() {
                             <BatchViewerPanel item={panelItem} branchId={activeBranchId} onClose={closePanel} />
                         )}
                         {sidePanel === "adjust" && (
-                            <AdjustStockPanel item={panelItem} branchId={activeBranchId} onSuccess={handlePanelSuccess} onClose={closePanel} />
+                            <AdjustStockPanel item={panelItem} branchId={activeBranchId} adjustedBy={user?.id ?? ""} onSuccess={handlePanelSuccess} onClose={closePanel} />
                         )}
                         {sidePanel === "transfer" && (
                             <TransferStockPanel item={panelItem} fromBranchId={activeBranchId} onSuccess={handlePanelSuccess} onClose={closePanel} />
