@@ -43,7 +43,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
 from app.models.inventory.inventory_model import Drug
 from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
-from app.models.system_md.sys_models import SyncOperationReceipt
+from app.models.system_md.sys_models import SyncOperationReceipt, SystemAlert
 from app.schemas.sync_schemas import PushRecord, PushRequest
 from app.services.sync.sync_service import SyncService
 
@@ -1691,3 +1691,192 @@ async def test_legitimate_delayed_sync_within_trust_window_still_accepted(
     )
 
     assert result.success
+
+
+# ── P1-8: proactive alert for sales stuck retrying forever ─────────────
+#
+# These scenarios go through SyncService.push() (not SyncService._push_sale
+# directly, unlike most tests above) because failure_count and the
+# SystemAlert side effect live in push()'s per-record loop, keyed off the
+# SyncOperationReceipt for a given operation_id — retrying the same
+# operation_id via repeated push() calls, exactly like
+# test_sync_operation_receipt_persistence does for the success path, is
+# what exercises the receipt-reuse-on-retry code path.
+
+@pytest_asyncio.fixture
+async def stuck_sale_setup(db: AsyncSession, sync_drug):
+    """A drug with just enough stock to make a 10-unit sale fail with
+    'Insufficient stock' every time, matching test_insufficient_stock_rejected."""
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 3)
+    batch = _make_batch(drug.id, branch.id, "BATCH-STUCK", 3, date.today() + timedelta(days=365))
+    db.add_all([inventory, batch])
+    await db.commit()
+    return drug, org, branch, user, inventory, batch
+
+
+async def _push_once(db, org, branch, user, push_request):
+    return await SyncService.push(
+        db=db, request=push_request, organization_id=org.id, pushed_by=user.id,
+    )
+
+
+async def _stuck_sale_alerts(db: AsyncSession, sale_id: uuid.UUID):
+    result = await db.execute(
+        select(SystemAlert).where(
+            SystemAlert.entity_type == "sale",
+            SystemAlert.entity_id == sale_id,
+        )
+    )
+    return result.scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_stuck_sale_alert_created_at_fifth_failure(
+    db: AsyncSession,
+    stuck_sale_setup,
+):
+    """Failing to push the same sale (same operation_id) 5 times in a row
+    raises exactly one SystemAlert."""
+    drug, org, branch, user, inventory, batch = stuck_sale_setup
+
+    op_id = uuid.uuid4()
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id, sale_number="OFF-SALE-STUCK-5",
+        drug_id=drug.id, quantity=10, operation_id=op_id,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    push_request = PushRequest(branch_id=branch.id, records=[record])
+
+    for attempt in range(1, 6):
+        response = await _push_once(db, org, branch, user, push_request)
+        assert response.total_failed == 1, f"attempt {attempt} unexpectedly succeeded"
+        assert "Insufficient" in (response.failed[0].error or "")
+
+    receipt = await db.get(SyncOperationReceipt, op_id)
+    assert receipt is not None
+    assert receipt.failure_count == 5
+
+    alerts = await _stuck_sale_alerts(db, sale_id)
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.alert_type == "system_error"
+    assert alert.entity_type == "sale"
+    assert alert.entity_id == sale_id
+    assert alert.organization_id == org.id
+    assert alert.branch_id == branch.id
+    assert alert.is_resolved is False
+
+
+@pytest.mark.asyncio
+async def test_stuck_sale_alert_no_duplicate_on_sixth_failure(
+    db: AsyncSession,
+    stuck_sale_setup,
+):
+    """A 6th (and 7th) consecutive failure of the same operation_id must
+    not create a second alert row."""
+    drug, org, branch, user, inventory, batch = stuck_sale_setup
+
+    op_id = uuid.uuid4()
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id, sale_number="OFF-SALE-STUCK-6",
+        drug_id=drug.id, quantity=10, operation_id=op_id,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    push_request = PushRequest(branch_id=branch.id, records=[record])
+
+    for _ in range(7):
+        response = await _push_once(db, org, branch, user, push_request)
+        assert response.total_failed == 1
+
+    receipt = await db.get(SyncOperationReceipt, op_id)
+    assert receipt.failure_count == 7
+
+    alerts = await _stuck_sale_alerts(db, sale_id)
+    assert len(alerts) == 1
+    assert alerts[0].is_resolved is False
+
+
+@pytest.mark.asyncio
+async def test_stuck_sale_alert_auto_resolves_on_eventual_success(
+    db: AsyncSession,
+    stuck_sale_setup,
+):
+    """Once stock is replenished and the same operation_id finally pushes
+    successfully, the alert raised at the 5th failure is auto-resolved."""
+    drug, org, branch, user, inventory, batch = stuck_sale_setup
+
+    op_id = uuid.uuid4()
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id, sale_number="OFF-SALE-STUCK-RESOLVE",
+        drug_id=drug.id, quantity=10, operation_id=op_id,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    push_request = PushRequest(branch_id=branch.id, records=[record])
+
+    for _ in range(5):
+        response = await _push_once(db, org, branch, user, push_request)
+        assert response.total_failed == 1
+
+    alerts = await _stuck_sale_alerts(db, sale_id)
+    assert len(alerts) == 1
+    assert alerts[0].is_resolved is False
+
+    # Replenish stock so the same sale can now push successfully.
+    batch.quantity = 100
+    batch.remaining_quantity = 100
+    inventory.quantity = 100
+    await db.commit()
+
+    response = await _push_once(db, org, branch, user, push_request)
+    assert response.total_accepted == 1, f"expected success, got: {response.failed}"
+
+    receipt = await db.get(SyncOperationReceipt, op_id)
+    assert receipt.result_kind == "accepted"
+    # The failure count is a historical record of past attempts and is not
+    # reset on eventual success — only the alert is resolved.
+    assert receipt.failure_count == 5
+
+    alerts = await _stuck_sale_alerts(db, sale_id)
+    assert len(alerts) == 1
+    assert alerts[0].is_resolved is True
+    assert alerts[0].resolved_at is not None
+
+
+@pytest.mark.asyncio
+async def test_stuck_sale_alert_not_created_below_threshold(
+    db: AsyncSession,
+    stuck_sale_setup,
+):
+    """Failures 1 through 4 must not create any alert at all."""
+    drug, org, branch, user, inventory, batch = stuck_sale_setup
+
+    op_id = uuid.uuid4()
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id, sale_number="OFF-SALE-STUCK-BELOW",
+        drug_id=drug.id, quantity=10, operation_id=op_id,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    push_request = PushRequest(branch_id=branch.id, records=[record])
+
+    for attempt in range(1, 5):
+        response = await _push_once(db, org, branch, user, push_request)
+        assert response.total_failed == 1
+
+        receipt = await db.get(SyncOperationReceipt, op_id)
+        assert receipt.failure_count == attempt
+
+        alerts = await _stuck_sale_alerts(db, sale_id)
+        assert alerts == [], f"unexpected alert after only {attempt} failure(s)"

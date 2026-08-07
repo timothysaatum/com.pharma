@@ -139,7 +139,23 @@ class SystemAlert(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey('drugs.id', ondelete='CASCADE')
     )
-    
+
+    # Generic entity reference, mirroring AuditLog.entity_type/entity_id.
+    # Lets alert producers (e.g. the stuck-sale-sync alert, P1-8) do precise
+    # dedup lookups (`entity_type='sale' AND entity_id=...`) instead of
+    # string-matching titles/messages.
+    entity_type: Mapped[Optional[str]] = mapped_column(
+        String(100),
+        index=True,
+        comment="Table/domain concept this alert is about, e.g. 'sale'"
+    )
+
+    entity_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        UUID(as_uuid=True),
+        index=True,
+        comment="ID of the entity this alert is about"
+    )
+
     # Resolution tracking
     is_resolved: Mapped[bool] = mapped_column(
         Boolean,
@@ -177,8 +193,9 @@ class SystemAlert(Base, TimestampMixin):
         Index('idx_alert_type', 'alert_type'),
         Index('idx_alert_severity', 'severity'),
         Index('idx_alert_resolved', 'is_resolved'),
-        Index('idx_alert_unresolved', 'organization_id', 'is_resolved', 
+        Index('idx_alert_unresolved', 'organization_id', 'is_resolved',
               postgresql_where=text('is_resolved = false')),
+        Index('idx_alert_entity', 'entity_type', 'entity_id'),
     )
 
 
@@ -308,6 +325,19 @@ class SyncOperationReceipt(Base):
         comment="accepted, conflict, or failed",
     )
     response_data: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    failure_count: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+        comment=(
+            "How many times this operation_id has resolved to result_kind="
+            "'failed'. Incremented in SyncService.push whenever a (re)push "
+            "attempt fails, including retries that reuse this same receipt "
+            "row. Drives the stuck-sale SystemAlert at failure_count == 5 "
+            "(P1-8) -- never reset on retry, only on eventual success."
+        ),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

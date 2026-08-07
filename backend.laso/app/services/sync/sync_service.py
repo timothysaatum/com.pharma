@@ -496,6 +496,17 @@ async def _validate_and_fix_sale_fks(
 
 class SyncService:
 
+    # A sale stuck retrying forever (e.g. real insufficient stock discovered
+    # at sync time) previously had no proactive signal -- only a client-side
+    # UI badge a human had to notice. At exactly this many consecutive push
+    # failures for the same operation_id, SyncService.push raises a
+    # SystemAlert (P1-8). Exact equality (not >=) so retries past the
+    # threshold don't create duplicate alerts; chosen below the client's own
+    # local MAX_PUSH_ATTEMPTS = 10 (ui.laso/src/lib/syncEngine.ts) so a human
+    # gets a chance to intervene before the client gives up retrying.
+    _STUCK_SALE_FAILURE_THRESHOLD = 5
+    _STUCK_SALE_ALERT_TYPE = "system_error"
+
     # =========================================================================
     # PULL
     # =========================================================================
@@ -961,9 +972,36 @@ class SyncService:
                         elif push_result.success:
                             receipt.result_kind = "accepted"
                             receipt.response_data = push_result.model_dump(mode="json")
+                            if record.table_name == "sales":
+                                # The sale eventually pushed successfully --
+                                # whatever condition raised a stuck-sale
+                                # alert for it (if any) no longer applies.
+                                await SyncService._auto_resolve_stuck_sale_alert(
+                                    db, organization_id, record.local_id,
+                                )
                         else:
                             receipt.result_kind = "failed"
                             receipt.response_data = push_result.model_dump(mode="json")
+                            # Counts every push attempt that resolves to
+                            # "failed" for this operation_id, including
+                            # retries that reuse this same receipt row (see
+                            # the reuse branch above) -- never reset on
+                            # retry, only implicitly moot once the operation
+                            # eventually succeeds.
+                            receipt.failure_count += 1
+                            if (
+                                record.table_name == "sales"
+                                and receipt.failure_count
+                                == SyncService._STUCK_SALE_FAILURE_THRESHOLD
+                            ):
+                                await SyncService._raise_stuck_sale_sync_alert(
+                                    db,
+                                    organization_id,
+                                    request.branch_id,
+                                    record,
+                                    receipt.failure_count,
+                                    push_result.error,
+                                )
 
                 if conflict:
                     conflicts.append(conflict)
@@ -1028,6 +1066,110 @@ class SyncService:
             next_pull_timestamp=now,
             acked_cursor=acked_cursor,
         )
+
+    @staticmethod
+    async def _raise_stuck_sale_sync_alert(
+        db: AsyncSession,
+        organization_id: uuid.UUID,
+        branch_id: uuid.UUID,
+        record: PushRecord,
+        failure_count: int,
+        error: Optional[str],
+    ) -> None:
+        """Proactively alert a human that an offline sale is stuck retrying
+        (P1-8). Purely additive side-channel signaling, same "don't block
+        the sale, just make it visible" pattern as the price-reconciliation
+        check above -- this must never affect whether the push itself
+        succeeds or fails, so any error here is swallowed after logging.
+
+        Dedup on (organization_id, alert_type, entity_type='sale',
+        entity_id, is_resolved=False) so a 6th+ consecutive failure of the
+        same operation never creates a duplicate alert -- callers only
+        invoke this once failure_count has just reached the threshold
+        exactly, but the dedup check is kept as a second, independent
+        safety net (e.g. against concurrent pushes of the same operation).
+        """
+        entity_id = _uuid_or_none(record.local_id)
+        if entity_id is None:
+            return
+        try:
+            existing = await db.scalar(
+                select(SystemAlert.id).where(
+                    SystemAlert.organization_id == organization_id,
+                    SystemAlert.alert_type == SyncService._STUCK_SALE_ALERT_TYPE,
+                    SystemAlert.entity_type == "sale",
+                    SystemAlert.entity_id == entity_id,
+                    SystemAlert.is_resolved == False,
+                )
+            )
+            if existing:
+                return
+
+            sale_number = record.data.get("sale_number") or record.local_id
+            now = datetime.now(timezone.utc)
+            db.add(
+                SystemAlert(
+                    id=uuid.uuid4(),
+                    organization_id=organization_id,
+                    branch_id=branch_id,
+                    alert_type=SyncService._STUCK_SALE_ALERT_TYPE,
+                    severity="high",
+                    title=f"Sale sync repeatedly failing: {sale_number}",
+                    message=(
+                        f"Offline sale {sale_number} has failed to sync "
+                        f"{failure_count} times in a row and will keep "
+                        "retrying from the client indefinitely. Latest "
+                        f"error: {error or 'unknown'}. Investigate and "
+                        "resolve the underlying issue (e.g. restock the "
+                        "drug) so the sale can push successfully."
+                    ),
+                    entity_type="sale",
+                    entity_id=entity_id,
+                    is_resolved=False,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        except Exception:
+            # Never let alerting crash the sync push.
+            logger.exception(
+                "Sync: failed to raise stuck-sale alert for sale %s; continuing.",
+                record.local_id,
+            )
+
+    @staticmethod
+    async def _auto_resolve_stuck_sale_alert(
+        db: AsyncSession,
+        organization_id: uuid.UUID,
+        local_id: str,
+    ) -> None:
+        """Companion to ``_raise_stuck_sale_sync_alert``: once a sale with
+        this local_id eventually pushes successfully (result_kind
+        transitions to "accepted"), whatever condition the alert was raised
+        for no longer holds -- auto-resolve it instead of leaving a human to
+        notice and close it by hand.
+        """
+        entity_id = _uuid_or_none(local_id)
+        if entity_id is None:
+            return
+        try:
+            alert = await db.scalar(
+                select(SystemAlert).where(
+                    SystemAlert.organization_id == organization_id,
+                    SystemAlert.alert_type == SyncService._STUCK_SALE_ALERT_TYPE,
+                    SystemAlert.entity_type == "sale",
+                    SystemAlert.entity_id == entity_id,
+                    SystemAlert.is_resolved == False,
+                )
+            )
+            if alert:
+                alert.is_resolved = True
+                alert.resolved_at = datetime.now(timezone.utc)
+        except Exception:
+            logger.exception(
+                "Sync: failed to auto-resolve stuck-sale alert for sale %s; continuing.",
+                local_id,
+            )
 
     # =========================================================================
     # Record router
