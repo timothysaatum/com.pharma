@@ -46,6 +46,45 @@ async def _require_crr_shadow():
     return shadow
 
 
+async def _record_branch_watermark(
+    db: AsyncSession, branch_id, acked_db_version: int
+) -> None:
+    """Upsert crr_branch_sync_watermark to MAX(existing, acked_db_version).
+
+    Read-then-write rather than a single dialect-specific MAX/GREATEST
+    upsert so this works identically on Postgres and the sqlite test DB.
+    A benign race between two concurrent pulls for the same branch can at
+    worst leave the watermark slightly behind where it could be — that
+    only makes compaction more conservative (delays pruning), never
+    unsafe (never advances past what was proven received).
+    """
+    existing = await db.execute(
+        text(
+            "SELECT last_acked_db_version FROM crr_branch_sync_watermark "
+            "WHERE branch_id = :branch_id"
+        ),
+        {"branch_id": str(branch_id)},
+    )
+    row = existing.first()
+    existing_version = int(row[0]) if row is not None else 0
+    new_watermark = max(existing_version, int(acked_db_version))
+    await db.execute(
+        text("""
+            INSERT INTO crr_branch_sync_watermark
+                (branch_id, last_acked_db_version, updated_at)
+            VALUES (:branch_id, :version, :updated_at)
+            ON CONFLICT (branch_id) DO UPDATE SET
+                last_acked_db_version = :version,
+                updated_at = :updated_at
+        """),
+        {
+            "branch_id": str(branch_id),
+            "version": new_watermark,
+            "updated_at": datetime.now(timezone.utc),
+        },
+    )
+
+
 @router.post(
     "/crr-push",
     response_model=CrrPushResponse,
@@ -166,6 +205,17 @@ async def crr_pull(
         (int(row["id"]) for row in directive_rows),
         default=request.customer_merge_since_version,
     )
+
+    # P1-7: record this branch's ack watermark for ack-bounded compaction.
+    # Bounded by request.crr_since_db_version -- what the client PROVED it
+    # already applied on a prior successful round-trip -- not by crr_max
+    # (the changes we are about to send in THIS response), since the
+    # client could crash after receiving this response but before
+    # persisting it, and would then retry with its old (lower)
+    # since_db_version. Advancing the watermark to crr_max here would let
+    # compaction prune changes that client never actually got to keep.
+    await _record_branch_watermark(db, request.branch_id, request.crr_since_db_version)
+    await db.commit()
 
     return PullResponse(
         crr_changes=[

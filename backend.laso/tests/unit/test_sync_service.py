@@ -661,3 +661,265 @@ async def test_prescription_validator_rejects_foreign_organization():
     error = await _validate_prescription(merged, org_id, branch_id, db=None)
     assert error is not None
     assert "organization_id" in error
+
+
+# ─── P1-7 Step 0 SPIKE: ack-bounded __crsql_clock compaction ───────────────
+# Kept permanently as regression coverage (same convention as
+# ui.laso/src-tauri/src/db.rs::spike_sqlcipher_load_extension_after_pragma_key)
+# rather than deleted once the feature shipped. This is the go/no-go check
+# run against the REAL vendored crsqlite.so before any compaction logic was
+# written, and it caught something the original plan got wrong: cr-sqlite's
+# db_version is a single counter shared by every CRR table, derived from
+# whatever rows are still physically present in __crsql_clock -- not an
+# independent counter immune to row deletion. A naive "delete everything
+# below a watermark" implementation would eventually delete every row
+# holding the current global max and cause the next write anywhere in the
+# database to be assigned an ALREADY-HANDED-OUT db_version, silently
+# breaking every future `db_version > since_db_version` pull. See
+# ShadowDB.compact_crr_tables's docstring for the full safety model this
+# test verifies.
+
+async def _make_branch_inventory_row(conn, row_id: str, branch_id: str = "b1") -> None:
+    conn.execute(
+        "INSERT INTO branch_inventory "
+        "(id, branch_id, drug_id, quantity, reserved_quantity, updated_at, created_at) "
+        "VALUES (?, ?, 'drug-1', 5, 0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+        (row_id, branch_id),
+    )
+    conn.commit()
+
+
+@pytest.mark.asyncio
+async def test_crr_clock_compaction_is_safe(tmp_path):
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+
+    # A row edited several times must still collapse to ONE physical clock
+    # row per (pk, cid) -- cr-sqlite upserts in place, it does not append a
+    # history log. There is nothing to "compact" for a live cell.
+    await _make_branch_inventory_row(conn, "live-row")
+    conn.execute("UPDATE branch_inventory SET quantity = 6 WHERE id = 'live-row'")
+    conn.commit()
+    conn.execute("UPDATE branch_inventory SET quantity = 7 WHERE id = 'live-row'")
+    conn.commit()
+
+    # Build-independent assertion: exactly one clock row exists for
+    # the 'quantity' column of this pk, no matter how many times it changed.
+    rows_for_quantity = [
+        r for r in conn.execute("SELECT * FROM [branch_inventory__crsql_clock]").fetchall()
+    ]
+    assert sum(1 for r in rows_for_quantity if r[1] == "quantity") <= 1
+
+    # Create + delete three rows -> three tombstones (col_name sentinel '-1').
+    for i in range(3):
+        row_id = f"dead-{i}"
+        await _make_branch_inventory_row(conn, row_id)
+        conn.execute("DELETE FROM branch_inventory WHERE id = ?", (row_id,))
+        conn.commit()
+
+    tombstones_before = [
+        r for r in conn.execute("SELECT * FROM [branch_inventory__crsql_clock]").fetchall()
+        if r[1] == "-1"
+    ]
+    assert len(tombstones_before) == 3
+
+    max_before = await shadow.max_db_version()
+    watermark = max_before - 1  # "acked" everything except the very latest write
+
+    deleted = await shadow.compact_crr_tables(watermark)
+    assert deleted.get("branch_inventory", 0) == 2, (
+        "exactly the tombstones strictly below the current global max, and "
+        "at/under the watermark, should be pruned"
+    )
+
+    remaining_tombstones = [
+        r for r in conn.execute("SELECT * FROM [branch_inventory__crsql_clock]").fetchall()
+        if r[1] == "-1"
+    ]
+    assert len(remaining_tombstones) == 1, (
+        "the tombstone holding the current global max db_version must survive "
+        "-- deleting it would let the next write reuse an already-issued version"
+    )
+
+    # The live row's current value must be completely untouched.
+    live_row = conn.execute(
+        "SELECT quantity FROM branch_inventory WHERE id = 'live-row'"
+    ).fetchone()
+    assert live_row == (7,)
+
+    # crsql_site_id and a fresh full pull must both still work after compaction.
+    site_id = conn.execute("SELECT crsql_site_id()").fetchone()[0]
+    assert site_id
+
+    full_pull = await shadow.get_changes_since(
+        organization_id="whatever", org_branch_ids=["b1"], since_db_version=0
+    )
+    live_pks = {c["pk"] for c in full_pull if c["cid"] != "-1"}
+    packed_live_pk = conn.execute(
+        "SELECT crsql_pack_columns(id) FROM branch_inventory WHERE id = 'live-row'"
+    ).fetchone()[0]
+    assert packed_live_pk in live_pks, "the live row must still be fully pullable"
+
+    # ── The critical invariant: no db_version reuse after compaction. ──
+    await _make_branch_inventory_row(conn, "new-after-compaction")
+    max_after = await shadow.max_db_version()
+    assert max_after > max_before, (
+        "db_version must keep advancing monotonically after compaction; a "
+        "value <= max_before would mean version reuse and silent data loss "
+        "for any client that already pulled past max_before"
+    )
+
+
+@pytest.mark.asyncio
+async def test_crr_clock_compaction_never_touches_live_cell_even_with_huge_watermark(tmp_path):
+    """A live cell's clock row is never a 'superseded old version' -- it is
+    the ONLY record of that cell's value. Compaction must only ever delete
+    tombstones (col_name == '-1'), regardless of how permissive the
+    watermark is."""
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    await _make_branch_inventory_row(conn, "still-alive")
+
+    huge_watermark = await shadow.max_db_version() + 1_000_000
+    await shadow.compact_crr_tables(huge_watermark)
+
+    row = conn.execute(
+        "SELECT quantity FROM branch_inventory WHERE id = 'still-alive'"
+    ).fetchone()
+    assert row == (5,), "a live row must survive compaction no matter the watermark"
+
+    changes = conn.execute(
+        'SELECT COUNT(*) FROM crsql_changes WHERE "table" = ? AND cid != ?',
+        ("branch_inventory", "-1"),
+    ).fetchone()[0]
+    assert changes > 0, "the live row's columns must still be reported by crsql_changes"
+
+
+@pytest.mark.asyncio
+async def test_crr_clock_compaction_noop_when_watermark_not_positive(tmp_path):
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    await _make_branch_inventory_row(conn, "row-a")
+    conn.execute("DELETE FROM branch_inventory WHERE id = 'row-a'")
+    conn.commit()
+
+    assert await shadow.compact_crr_tables(0) == {}
+    assert await shadow.compact_crr_tables(-5) == {}
+
+    # Nothing was pruned -- tombstone still there.
+    tombstones = [
+        r for r in conn.execute("SELECT * FROM [branch_inventory__crsql_clock]").fetchall()
+        if r[1] == "-1"
+    ]
+    assert len(tombstones) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_prunable_row_ids_fails_closed_for_unpublished_rows(tmp_path):
+    """A row that was never written into the shadow DB at all (never
+    published/pulled) must never be treated as prunable -- there is no
+    proof any branch has received it."""
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+
+    conn.execute(
+        "INSERT INTO audit_logs (id, organization_id, action, created_at, updated_at) "
+        "VALUES ('log-1', 'org-1', 'created_sale', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    high_watermark = await shadow.max_db_version() + 1000
+
+    prunable = await shadow.get_prunable_row_ids("audit_logs", high_watermark)
+    assert "log-1" in prunable
+
+    # A row with db_version above the watermark is not yet safe to prune.
+    conn.execute(
+        "INSERT INTO audit_logs (id, organization_id, action, created_at, updated_at) "
+        "VALUES ('log-2', 'org-1', 'created_sale', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    low_watermark = await shadow.get_row_db_version("audit_logs", "log-1")
+    prunable_low = await shadow.get_prunable_row_ids("audit_logs", low_watermark)
+    assert "log-1" in prunable_low
+    assert "log-2" not in prunable_low
+
+
+@pytest.mark.asyncio
+async def test_get_row_db_version_reflects_latest_write(tmp_path):
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    assert await shadow.get_row_db_version("branch_inventory", "missing") == 0
+
+    await _make_branch_inventory_row(conn, "row-x")
+    v1 = await shadow.get_row_db_version("branch_inventory", "row-x")
+    assert v1 > 0
+
+    conn.execute("UPDATE branch_inventory SET quantity = 99 WHERE id = 'row-x'")
+    conn.commit()
+    v2 = await shadow.get_row_db_version("branch_inventory", "row-x")
+    assert v2 > v1
+
+
+# ─── P1-7: pull endpoint watermark bookkeeping ─────────────────────────────
+
+class _FakeWatermarkResult:
+    def __init__(self, value):
+        self._value = value
+
+    def first(self):
+        return (self._value,) if self._value is not None else None
+
+
+class _WatermarkRecordingSession:
+    """Fake AsyncSession that answers the SELECT with a fixed existing
+    watermark and records every statement it is asked to execute."""
+
+    def __init__(self, existing_version):
+        self._existing_version = existing_version
+        self.executed = []
+
+    async def execute(self, statement, params=None):
+        sql = str(statement)
+        self.executed.append((sql, params))
+        if "SELECT last_acked_db_version" in sql:
+            return _FakeWatermarkResult(self._existing_version)
+        return _FakeWatermarkResult(None)
+
+
+@pytest.mark.asyncio
+async def test_record_branch_watermark_advances_when_client_is_ahead():
+    from app.api.v1.endpoints.crr_sync_endpoints import _record_branch_watermark
+
+    session = _WatermarkRecordingSession(existing_version=5)
+    branch_id = uuid.uuid4()
+    await _record_branch_watermark(session, branch_id, 10)
+
+    insert_sql, insert_params = session.executed[-1]
+    assert "INSERT INTO crr_branch_sync_watermark" in insert_sql
+    assert insert_params["version"] == 10
+    assert insert_params["branch_id"] == str(branch_id)
+
+
+@pytest.mark.asyncio
+async def test_record_branch_watermark_never_regresses():
+    from app.api.v1.endpoints.crr_sync_endpoints import _record_branch_watermark
+
+    session = _WatermarkRecordingSession(existing_version=20)
+    await _record_branch_watermark(session, uuid.uuid4(), 3)
+
+    _, insert_params = session.executed[-1]
+    assert insert_params["version"] == 20, (
+        "the watermark must never regress below what was already acked, "
+        "even if this particular request reports an older client version"
+    )
+
+
+@pytest.mark.asyncio
+async def test_record_branch_watermark_first_pull_has_no_existing_row():
+    from app.api.v1.endpoints.crr_sync_endpoints import _record_branch_watermark
+
+    session = _WatermarkRecordingSession(existing_version=None)
+    await _record_branch_watermark(session, uuid.uuid4(), 42)
+
+    _, insert_params = session.executed[-1]
+    assert insert_params["version"] == 42

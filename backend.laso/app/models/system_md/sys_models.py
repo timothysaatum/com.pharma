@@ -327,3 +327,41 @@ class SyncOperationReceipt(Base):
             "created_at",
         ),
     )
+
+
+class CrrBranchSyncWatermark(Base):
+    """Durable record of the highest shadow-DB ``db_version`` a branch has
+    confirmed receiving (P1-7).
+
+    One row per branch — ``branch_id`` is the primary key, since there is
+    exactly one watermark per branch, not a history of them. Updated on
+    every successful CRR pull to ``MAX(existing, request.crr_since_db_version)``
+    (see ``crr_pull`` in ``app/api/v1/endpoints/crr_sync_endpoints.py``) —
+    intentionally bounded by what the client *proved* it already applied on
+    a prior round-trip, not by what this response is about to send it,
+    since the client could crash before persisting a response it received.
+
+    The shadow DB's ``db_version`` counter (see ``ShadowDB``) is one
+    monotonic counter shared globally across every org/branch, so this
+    watermark is likewise a plain global version number, not scoped to an
+    organization. Ack-bounded compaction (``ShadowDB.compact_crr_tables``,
+    ``main.py::_run_crr_compaction``) uses the MINIMUM of this column
+    across active branches as its safe-to-prune boundary.
+    """
+
+    __tablename__ = "crr_branch_sync_watermark"
+
+    branch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("branches.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    last_acked_db_version: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )

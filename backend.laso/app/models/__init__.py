@@ -44,6 +44,7 @@ from app.models.system_md.sys_models import (
     SystemAlert,
     SyncQueue,
     SyncOperationReceipt,
+    CrrBranchSyncWatermark,
 )
 
 __all__ = [
@@ -90,4 +91,5 @@ __all__ = [
     'SystemAlert',
     'SyncQueue',
     'SyncOperationReceipt',
+    'CrrBranchSyncWatermark',
 ]

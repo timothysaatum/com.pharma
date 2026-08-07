@@ -108,6 +108,15 @@ class Settings(BaseSettings):
                     "shadow DB → Postgres (seconds). Set to 0 to disable.",
         ge=0,
     )
+    CRR_COMPACTION_INTERVAL_SECONDS: int = Field(
+        default=900,
+        description="How often the background compaction task prunes "
+                    "fully-acknowledged __crsql_clock tombstones and "
+                    "audit_logs/crr_renumber_audit rows, bounded by the "
+                    "minimum last_acked_db_version across active branches "
+                    "(never by wall-clock age). Set to 0 to disable.",
+        ge=0,
+    )
     CRR_MERGE_STRATEGY: str = Field(
         default="sum_and_merge",
         description="Fallback merge strategy for tables not listed in "

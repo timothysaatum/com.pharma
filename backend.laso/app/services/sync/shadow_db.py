@@ -522,8 +522,19 @@ _AUDIT_LOG_TABLE_DDL = """
         business_key_col  VARCHAR(100) NOT NULL,
         old_business_key  VARCHAR(255) NOT NULL,
         new_business_key  VARCHAR(255) NOT NULL,
-        renumbered_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+        renumbered_at     TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW(),
+        db_version_at_creation BIGINT
     );
+"""
+
+# P1-7: added after the table may already exist in a deployed database, so a
+# plain column in the CREATE above is not enough — this idempotently backfills
+# it. Kept as a separate statement (not appended into _AUDIT_LOG_TABLE_DDL)
+# because asyncpg only allows multi-statement strings through the simple
+# query protocol, which SQLAlchemy uses only for parameter-less executes;
+# two explicit execute() calls are the safe way to run sequential DDL here.
+_AUDIT_LOG_TABLE_MIGRATE_DDL = """
+    ALTER TABLE crr_renumber_audit ADD COLUMN IF NOT EXISTS db_version_at_creation BIGINT;
 """
 
 _CUSTOMER_MERGE_AUDIT_DDL = """
@@ -543,6 +554,7 @@ _CUSTOMER_MERGE_AUDIT_DDL = """
 async def _ensure_audit_table(db: AsyncSession) -> None:
     """Create the ``crr_renumber_audit`` table if it does not exist."""
     await db.execute(text(_AUDIT_LOG_TABLE_DDL))
+    await db.execute(text(_AUDIT_LOG_TABLE_MIGRATE_DDL))
 
 
 async def _log_renumbering(
@@ -553,16 +565,25 @@ async def _log_renumbering(
     bk_col: str,
     old_bk: str,
     new_bk: str,
+    db_version_at_creation: int = 0,
 ) -> None:
+    """Record a renumbering event.
+
+    ``db_version_at_creation`` is the shadow DB's global db_version at the
+    moment this event was logged (see ``ShadowDB.get_row_db_version``) — it
+    is the ack-bound compaction (P1-7) uses to prune this table, since
+    ``crr_renumber_audit`` itself is never pulled by any client and so has
+    no other natural sync-safe retention signal.
+    """
     event_id = f"{table}:{loser_id}:{old_bk}:{new_bk}"
     await db.execute(
         text("""
             INSERT INTO crr_renumber_audit
                 (event_id, table_name, winner_id, loser_id, business_key_col,
-                 old_business_key, new_business_key)
+                 old_business_key, new_business_key, db_version_at_creation)
             VALUES
                 (:event_id, :table_name, :winner_id, :loser_id, :business_key_col,
-                 :old_business_key, :new_business_key)
+                 :old_business_key, :new_business_key, :db_version_at_creation)
             ON CONFLICT (event_id) DO NOTHING
         """),
         {
@@ -573,6 +594,7 @@ async def _log_renumbering(
             "business_key_col": bk_col,
             "old_business_key": old_bk,
             "new_business_key": new_bk,
+            "db_version_at_creation": db_version_at_creation,
         },
     )
 
@@ -1143,6 +1165,169 @@ class ShadowDB:
 
         return await asyncio.to_thread(_sync)
 
+    async def get_row_db_version(self, table: str, row_id: str) -> int:
+        """Highest db_version currently recorded for a single row's pk.
+
+        Used by P1-7 to stamp ``crr_renumber_audit`` rows with an
+        ack-boundable version at the moment they are written (see
+        ``_log_renumbering``), since that table has no other sync-derived
+        retention signal.
+        """
+        if not self._crr_available:
+            return 0
+
+        def _sync() -> int:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    return 0
+                pk_row = conn.execute(
+                    f"SELECT crsql_pack_columns(id) FROM [{table}] WHERE id = ?",
+                    (row_id,),
+                ).fetchone()
+                if pk_row is None:
+                    return 0
+                cur = conn.execute(
+                    'SELECT COALESCE(MAX(db_version), 0) FROM crsql_changes '
+                    'WHERE "table" = ? AND pk = ?',
+                    (table, pk_row[0]),
+                )
+                return cur.fetchone()[0] or 0
+
+        return await asyncio.to_thread(_sync)
+
+    # ── P1-7: ack-bounded compaction ───────────────────────────────────
+    #
+    # SPIKE-VALIDATED SAFETY MODEL (kept permanently as
+    # tests/unit/test_sync_service.py::test_crr_clock_compaction_is_safe —
+    # see plan P1-7 Step 0). Two facts were confirmed against the real
+    # vendored crsqlite.so v0.16.3 before this was written, and both
+    # surprised the original plan, which assumed __crsql_clock was an
+    # append-only per-edit history log:
+    #
+    #  1. __crsql_clock stores exactly ONE physical row per live
+    #     (pk, col_name) — cr-sqlite UPSERTs it in place on every write.
+    #     There is no "superseded older version" to prune for a live
+    #     cell; that one row *is* the cell's only recorded value, and
+    #     deleting it would permanently and silently lose that column's
+    #     value for any client that has not yet done a full initial pull
+    #     (e.g. a brand-new branch). So compaction never touches rows
+    #     that represent a live cell's current value — only delete-
+    #     tombstones are eligible.
+    #
+    #  2. On DELETE, cr-sqlite consolidates every one of a row's
+    #     per-column clock rows into a SINGLE tombstone row, identified
+    #     by the sentinel ``col_name = '-1'``. That tombstone is the only
+    #     thing this method ever removes.
+    #
+    #  3. (The dangerous one.) db_version is ONE counter shared globally
+    #     across every CRR table in the shadow DB (confirmed by writing
+    #     to two independent tables and observing db_version advance
+    #     monotonically across both), and cr-sqlite derives "what's the
+    #     next db_version" from whatever is still physically present in
+    #     __crsql_clock — it is not an independent counter that survives
+    #     rows being deleted out from under it. Deleting *every* row that
+    #     currently holds the shadow DB's global max db_version causes
+    #     the next write ANYWHERE in the database to be assigned a LOWER
+    #     db_version than one already handed out and pulled by clients —
+    #     which silently breaks `db_version > since_db_version` pulls
+    #     forever after (already-synced clients would never see it,
+    #     because it would look like something they'd already received).
+    #     This method therefore NEVER deletes a row whose db_version is
+    #     >= the shadow DB's global max at the start of the compaction
+    #     pass, on top of the ack-bound watermark check.
+
+    async def compact_crr_tables(self, watermark: int) -> Dict[str, int]:
+        """Prune fully-acknowledged delete-tombstones from every CRR
+        table's physical ``__crsql_clock`` shadow table.
+
+        ``watermark`` is the global minimum ``last_acked_db_version``
+        across active branches (see ``main.py::_compute_active_branch_min_watermark``)
+        — i.e. every active branch has confirmed receiving every change up
+        to and including this version. A tombstone is deleted only when
+        BOTH:
+          - its db_version <= watermark (every active branch already has it), and
+          - its db_version < the shadow DB's current global max db_version
+            (never delete the row(s) holding the live high-water mark —
+            see safety note 3 above).
+
+        Returns ``{table_name: rows_deleted}`` for tables that had
+        anything to prune.
+        """
+        if not self._crr_available or watermark <= 0:
+            return {}
+
+        def _sync() -> Dict[str, int]:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    return {}
+                global_max = (
+                    conn.execute(
+                        "SELECT COALESCE(MAX(db_version), 0) FROM crsql_changes"
+                    ).fetchone()[0]
+                    or 0
+                )
+                deleted: Dict[str, int] = {}
+                for table in _CRR_TABLE_CONFIG:
+                    clock_table = f"{table}__crsql_clock"
+                    try:
+                        cur = conn.execute(
+                            f"""DELETE FROM [{clock_table}]
+                                WHERE col_name = '-1'
+                                  AND db_version <= ?
+                                  AND db_version < ?""",
+                            (watermark, global_max),
+                        )
+                    except sqlite3.Error as exc:
+                        logger.warning(
+                            "CRR compaction: skipping %s (%s)", clock_table, exc
+                        )
+                        continue
+                    if cur.rowcount:
+                        deleted[table] = cur.rowcount
+                conn.commit()
+                return deleted
+
+        return await asyncio.to_thread(_sync)
+
+    async def get_prunable_row_ids(
+        self, table: str, watermark: int, limit: int = 500
+    ) -> List[str]:
+        """Live row ids in a server-authoritative CRR table whose most
+        recent db_version is <= watermark — i.e. every active branch has
+        already pulled this row's current state at least once, so it is
+        safe to delete both from Postgres and (via ``delete_crr_row``)
+        from the shadow DB. Never returns a row that has not yet been
+        published into the shadow DB at all (fail closed: no shadow
+        record means we cannot prove anyone has received it).
+        """
+        if not self._crr_available or watermark <= 0:
+            return []
+
+        def _sync() -> List[str]:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    return []
+                pk_rows = conn.execute(
+                    """SELECT DISTINCT pk FROM crsql_changes
+                       WHERE "table" = ? AND db_version > 0 AND db_version <= ?
+                       LIMIT ?""",
+                    (table, watermark, limit),
+                ).fetchall()
+                ids: List[str] = []
+                for (pk,) in pk_rows:
+                    row = conn.execute(
+                        f"SELECT id FROM [{table}] WHERE crsql_pack_columns(id) = ?",
+                        (pk,),
+                    ).fetchone()
+                    if row is not None:
+                        ids.append(str(row[0]))
+                return ids
+
+        return await asyncio.to_thread(_sync)
+
     # ── Upsert a single merged row from shadow into Postgres ──────────
 
     async def get_merged_row_for_upsert(
@@ -1497,10 +1682,15 @@ class ShadowDB:
         await self.update_crr_row_business_key(table, loser_id, bk_column, new_bk)
 
         # ── 3. Log renumbering event ──────────────────────────────────
+        # Captured *after* the business-key update above so the recorded
+        # version reflects the write that just happened, giving P1-7
+        # compaction a real ack-bound to prune this event by later.
+        loser_db_version = await self.get_row_db_version(table, loser_id)
         await _ensure_audit_table(db)
         await _log_renumbering(
             db, table, winner_id, loser_id,
             bk_column, old_bk, new_bk,
+            db_version_at_creation=loser_db_version,
         )
 
     async def _find_external_duplicates(
