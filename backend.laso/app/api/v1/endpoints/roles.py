@@ -35,7 +35,7 @@ async def create_role(
 async def get_roles(
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission(Permission.MANAGE_ORGANIZATION))
 ):
     """Get all roles for the organization"""
     return await RoleService.get_roles(db, organization_id)
@@ -45,7 +45,7 @@ async def get_role(
     role_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     organization_id: uuid.UUID = Depends(get_organization_id),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(require_permission(Permission.MANAGE_ORGANIZATION))
 ):
     """Get a specific role by ID"""
     return await RoleService.get_role(db, role_id, organization_id)

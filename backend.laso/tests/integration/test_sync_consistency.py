@@ -5,11 +5,12 @@ Integration tests for verifying data parity between "offline" pushed data and se
 import pytest
 import uuid
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
 from app.models.sales.sales_model import Sale, SaleItem
 from app.schemas.sync_schemas import PushRequest, PushRecord
 from app.services.sync.sync_service import SyncService
@@ -22,6 +23,20 @@ class TestSyncConsistency:
     async def test_sale_data_parity(self, db: AsyncSession, setup_test_data):
         """Verify that all relevant fields are correctly persisted after an offline push."""
         org, branch, user, drugs, customer = setup_test_data
+
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="CONSISTENCY-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
 
         sale_id = uuid.uuid4()
 
@@ -43,6 +58,7 @@ class TestSyncConsistency:
             "cashier_id": str(user.id),
             "notes": "Offline transaction test",
             "status": "completed",
+            "sync_protocol_version": 2,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "items": [
                 {

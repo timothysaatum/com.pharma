@@ -36,6 +36,20 @@ class TestSyncSaleItems:
         """Test pushing a sale record that includes nested items."""
         org, branch, user, drugs, customer = setup_test_data
 
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="SYNC-SALE-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         sale_id = uuid.uuid4()
         item_id = uuid.uuid4()
 
@@ -50,6 +64,7 @@ class TestSyncSaleItems:
             "payment_method": "cash",
             "cashier_id": str(user.id),
             "status": "completed",
+            "sync_protocol_version": 2,
             "items": [
                 {
                     "id": str(item_id),
@@ -105,6 +120,20 @@ class TestSyncSaleItems:
         """Offline sales with deleted/stale cashier IDs should not block forever."""
         org, branch, user, drugs, customer = setup_test_data
 
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="SYNC-STALE-CASHIER-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         sale_id = uuid.uuid4()
         stale_cashier_id = uuid.uuid4()
 
@@ -118,6 +147,7 @@ class TestSyncSaleItems:
             "payment_method": "cash",
             "cashier_id": str(stale_cashier_id),
             "status": "completed",
+            "sync_protocol_version": 2,
             "items": [
                 {
                     "id": str(uuid.uuid4()),
@@ -232,6 +262,20 @@ class TestSyncSaleItems:
         db.add(other_branch)
         await db.commit()
 
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="SYNC-PAYLOAD-BRANCH-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         sale_id = uuid.uuid4()
         batch_id = uuid.uuid4()
         response = await SyncService.push(
@@ -257,6 +301,7 @@ class TestSyncSaleItems:
                             "payment_method": "cash",
                             "cashier_id": str(user.id),
                             "status": "completed",
+                            "sync_protocol_version": 2,
                             "items": [
                                 {
                                     "id": str(uuid.uuid4()),
@@ -416,6 +461,7 @@ class TestSyncSaleItems:
                             "payment_method": "cash",
                             "cashier_id": str(user.id),
                             "status": "completed",
+                            "sync_protocol_version": 2,
                             "items": [
                                 {
                                     "id": str(uuid.uuid4()),
@@ -536,6 +582,20 @@ class TestSyncSaleItems:
         """Offline sales should not fail when their optional Rx link is stale."""
         org, branch, user, drugs, customer = setup_test_data
 
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="SYNC-MISSING-RX-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         sale_id = uuid.uuid4()
         missing_prescription_id = uuid.uuid4()
 
@@ -551,6 +611,7 @@ class TestSyncSaleItems:
             "cashier_id": str(user.id),
             "prescription_id": str(missing_prescription_id),
             "status": "completed",
+            "sync_protocol_version": 2,
             "items": [
                 {
                     "id": str(uuid.uuid4()),
@@ -627,6 +688,7 @@ class TestSyncSaleItems:
                             "cashier_id": str(user.id),
                             "prescription_id": str(missing_prescription_id),
                             "status": "completed",
+                            "sync_protocol_version": 2,
                             "items": [
                                 {
                                     "id": str(uuid.uuid4()),
@@ -667,6 +729,21 @@ class TestSyncSaleItems:
     ):
         """A mixed offline batch should resolve dependencies before the sale."""
         org, branch, user, drugs, _customer = setup_test_data
+
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[0].id,
+                batch_number="SYNC-MIXED-BATCH-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         customer_id = uuid.uuid4()
         prescription_id = uuid.uuid4()
         sale_id = uuid.uuid4()
@@ -690,6 +767,7 @@ class TestSyncSaleItems:
                 "cashier_id": str(user.id),
                 "prescription_id": str(prescription_id),
                 "status": "completed",
+                "sync_protocol_version": 2,
                 "items": [
                     {
                         "id": str(uuid.uuid4()),
@@ -1563,6 +1641,20 @@ class TestSyncSaleItems:
         """Test that re-pushing a sale doesn't duplicate items or fail."""
         org, branch, user, drugs, customer = setup_test_data
 
+        db.add_all([
+            BranchInventory(
+                branch_id=branch.id, drug_id=drugs[1].id,
+                quantity=10, reserved_quantity=0,
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drugs[1].id,
+                batch_number="IDEM-001-BATCH",
+                quantity=10, remaining_quantity=10,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
+        await db.commit()
+
         sale_id = uuid.uuid4()
 
         record_data = {
@@ -1572,6 +1664,7 @@ class TestSyncSaleItems:
             "total_amount": 50.0,
             "payment_method": "card",
             "cashier_id": str(user.id),
+            "sync_protocol_version": 2,
             "items": [{
                 "drug_id": str(drugs[1].id),
                 "drug_name": drugs[1].name,
@@ -2170,14 +2263,22 @@ class TestOfflineSalePriceReconciliation:
         org, branch, user, drugs, customer = setup_test_data
         drug = drugs[0]
 
-        db.add(BranchInventory(
-            id=uuid.uuid4(),
-            branch_id=branch.id,
-            drug_id=drug.id,
-            quantity=100,
-            reserved_quantity=0,
-            selling_price=Decimal("10.00"),
-        ))
+        db.add_all([
+            BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch.id,
+                drug_id=drug.id,
+                quantity=100,
+                reserved_quantity=0,
+                selling_price=Decimal("10.00"),
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drug.id,
+                batch_number="SYNC-PRICE-DRIFT-001-BATCH",
+                quantity=100, remaining_quantity=100,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
         await db.commit()
 
         sale_id = uuid.uuid4()
@@ -2200,6 +2301,7 @@ class TestOfflineSalePriceReconciliation:
                     "payment_method": "cash",
                     "cashier_id": str(user.id),
                     "status": "completed",
+                    "sync_protocol_version": 2,
                     "items": [
                         {
                             "id": str(uuid.uuid4()),
@@ -2242,14 +2344,22 @@ class TestOfflineSalePriceReconciliation:
         drug = drugs[0]
         drug.unit_price = Decimal("100.00")
 
-        db.add(BranchInventory(
-            id=uuid.uuid4(),
-            branch_id=branch.id,
-            drug_id=drug.id,
-            quantity=100,
-            reserved_quantity=0,
-            selling_price=Decimal("5.00"),
-        ))
+        db.add_all([
+            BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch.id,
+                drug_id=drug.id,
+                quantity=100,
+                reserved_quantity=0,
+                selling_price=Decimal("5.00"),
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drug.id,
+                batch_number="SYNC-PRICE-MATCH-001-BATCH",
+                quantity=100, remaining_quantity=100,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
         await db.commit()
 
         sale_id = uuid.uuid4()
@@ -2272,6 +2382,7 @@ class TestOfflineSalePriceReconciliation:
                     "payment_method": "cash",
                     "cashier_id": str(user.id),
                     "status": "completed",
+                    "sync_protocol_version": 2,
                     "items": [
                         {
                             "id": str(uuid.uuid4()),
@@ -2305,14 +2416,22 @@ class TestOfflineSalePriceReconciliation:
         org, branch, user, drugs, customer = setup_test_data
         drug = drugs[0]
 
-        db.add(BranchInventory(
-            id=uuid.uuid4(),
-            branch_id=branch.id,
-            drug_id=drug.id,
-            quantity=100,
-            reserved_quantity=0,
-            selling_price=Decimal("10.00"),
-        ))
+        db.add_all([
+            BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch.id,
+                drug_id=drug.id,
+                quantity=100,
+                reserved_quantity=0,
+                selling_price=Decimal("10.00"),
+            ),
+            DrugBatch(
+                branch_id=branch.id, drug_id=drug.id,
+                batch_number="SYNC-PRICE-CONTRACT-001-BATCH",
+                quantity=100, remaining_quantity=100,
+                expiry_date=date.today() + timedelta(days=365),
+            ),
+        ])
         await db.commit()
 
         sale_id = uuid.uuid4()
@@ -2336,6 +2455,7 @@ class TestOfflineSalePriceReconciliation:
                     "payment_method": "cash",
                     "cashier_id": str(user.id),
                     "status": "completed",
+                    "sync_protocol_version": 2,
                     "items": [
                         {
                             "id": str(uuid.uuid4()),

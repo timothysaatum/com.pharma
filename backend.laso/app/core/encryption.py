@@ -7,6 +7,16 @@ from cryptography.fernet import Fernet, InvalidToken
 from app.core.config import get_settings
 
 
+class SecretDecryptionError(RuntimeError):
+    """Raised when a stored value is not a valid Fernet token for the active key.
+
+    Callers that need to support a legacy plaintext-secret migration (e.g.
+    pre-encryption TOTP secrets) must catch this explicitly and handle the
+    fallback themselves — this module no longer does it implicitly for every
+    caller of decrypt_secret().
+    """
+
+
 @lru_cache
 def get_cipher_suite() -> Fernet:
     key = get_settings().ENCRYPTION_KEY
@@ -34,6 +44,4 @@ def decrypt_secret(value: str) -> str:
     try:
         return get_cipher_suite().decrypt(value.encode()).decode()
     except InvalidToken:
-        # Backward-compatible read for pre-encryption rows. Callers rewrite the
-        # value encrypted after successful verification.
-        return value
+        raise SecretDecryptionError("Value is not a valid encrypted secret.") from None

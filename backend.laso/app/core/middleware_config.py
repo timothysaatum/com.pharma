@@ -80,6 +80,21 @@ def register_middleware(app: FastAPI, settings) -> None:
         response.headers["X-Request-ID"] = request_id
         return response
 
+    # ── Security headers ─────────────────────────────────────────────────────
+    # The API sits behind a TLS-terminating proxy and its primary client is a
+    # Tauri desktop shell, but CORS_ORIGINS allows arbitrary origins, so a
+    # browser surface is possible. Only send HSTS when the request is
+    # actually HTTPS-scoped so plain-HTTP dev/local traffic isn't told to
+    # upgrade.
+    @app.middleware("http")
+    async def add_security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
+
     # ── Request logging ───────────────────────────────────────────────────────
     @app.middleware("http")
     async def log_requests_middleware(request: Request, call_next):

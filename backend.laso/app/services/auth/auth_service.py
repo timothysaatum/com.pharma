@@ -17,7 +17,7 @@ from app.core.security import (
     verify_totp,
 )
 from app.core.config import get_settings
-from app.core.encryption import decrypt_secret, encrypt_secret
+from app.core.encryption import decrypt_secret, encrypt_secret, SecretDecryptionError
 from app.services.audit_service import AuditService
 settings = get_settings()
 
@@ -202,7 +202,10 @@ class AuthService:
                     detail="MFA_REQUIRED",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
-            totp_secret = decrypt_secret(user.two_factor_secret)
+            try:
+                totp_secret = decrypt_secret(user.two_factor_secret)
+            except SecretDecryptionError:
+                totp_secret = user.two_factor_secret  # legacy plaintext TOTP secret, re-encrypted below after verification
             if not verify_totp(totp_secret, login_data.totp_code):
                 now = datetime.now(timezone.utc)
                 window = timedelta(minutes=settings.LOGIN_ATTEMPT_WINDOW_MINUTES)
@@ -696,7 +699,10 @@ class AuthService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="MFA has not been set up. Call setup first.",
             )
-        secret = decrypt_secret(user.two_factor_secret)
+        try:
+            secret = decrypt_secret(user.two_factor_secret)
+        except SecretDecryptionError:
+            secret = user.two_factor_secret  # legacy plaintext TOTP secret, re-encrypted below after verification
         if not verify_totp(secret, totp_code):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

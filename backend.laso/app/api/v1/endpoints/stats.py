@@ -6,9 +6,9 @@ import uuid
 from fastapi import Depends, HTTPException, Query, status, APIRouter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import get_current_active_user, get_organization_id
+from app.core.deps import get_current_active_user, get_organization_id, require_any_permission
 from app.db.dependencies import get_db
-from app.models.user.user_model import User
+from app.models.user.user_model import User, Permission
 from app.schemas.branch_schemas import BranchResponse, BranchWithStats
 from app.services.branch.branch_service import BranchService
 
@@ -76,7 +76,8 @@ async def get_sales_summary(
     end_date: Optional[datetime] = Query(None),
     branch_id: Optional[uuid.UUID] = Query(None),
     db: AsyncSession = Depends(get_db),
-    organization_id: uuid.UUID = Depends(get_organization_id)
+    organization_id: uuid.UUID = Depends(get_organization_id),
+    current_user: User = Depends(require_any_permission(Permission.PROCESS_SALES, Permission.VIEW_REPORTS)),
 ):
     """
     Get sales summary report for a date range
@@ -184,7 +185,8 @@ async def get_top_selling_drugs(
     branch_id: Optional[uuid.UUID] = Query(None),
     limit: int = Query(10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
-    organization_id: uuid.UUID = Depends(get_organization_id)
+    organization_id: uuid.UUID = Depends(get_organization_id),
+    current_user: User = Depends(require_any_permission(Permission.PROCESS_SALES, Permission.VIEW_REPORTS)),
 ):
     """
     Get top selling drugs for a date range

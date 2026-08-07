@@ -1406,6 +1406,96 @@ async def test_sale_backdating_guard_rejected(
 
 
 @pytest.mark.asyncio
+async def test_missing_sync_protocol_version_sale_rejected(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """
+    A sale push that omits ``sync_protocol_version`` entirely must be
+    hard-rejected rather than silently inserted with zero stock deduction.
+    """
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    batch = _make_batch(drug.id, branch.id, "BATCH-NOVER", 10, date.today() + timedelta(days=365))
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-NOVER-001",
+        drug_id=drug.id,
+        quantity=1,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    del record.data["sync_protocol_version"]
+
+    result, conflict = await SyncService._push_sale(
+        db=db,
+        record=record,
+        organization_id=org.id,
+        branch_id=branch.id,
+        pushed_by=user.id,
+    )
+
+    assert not result.success
+    assert "sync_protocol_version=2" in (result.error or "")
+    # No sale must have been created, and stock must be untouched.
+    assert await db.get(Sale, sale_id) is None
+    await db.refresh(inventory)
+    assert inventory.quantity == 10
+    await db.refresh(batch)
+    assert batch.remaining_quantity == 10
+
+
+@pytest.mark.asyncio
+async def test_legacy_v1_sale_rejected(
+    db: AsyncSession,
+    sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],
+):
+    """
+    A sale push explicitly declaring ``sync_protocol_version: 1`` (the
+    legacy/pre-inventory-deduction protocol) must be rejected — accepting it
+    would insert Sale/SaleItem rows without decrementing stock.
+    """
+    drug, org, branch, user = sync_drug
+    inventory = _make_inventory(drug.id, branch.id, 10)
+    batch = _make_batch(drug.id, branch.id, "BATCH-V1", 10, date.today() + timedelta(days=365))
+    db.add_all([inventory, batch])
+    await db.commit()
+
+    sale_id = uuid.uuid4()
+    record = _make_push_record(
+        sale_id=sale_id,
+        sale_number="QA-V1-001",
+        drug_id=drug.id,
+        quantity=1,
+    )
+    record.data["branch_id"] = str(branch.id)
+    record.data["organization_id"] = str(org.id)
+    record.data["cashier_id"] = str(user.id)
+    record.data["sync_protocol_version"] = 1
+
+    result, conflict = await SyncService._push_sale(
+        db=db,
+        record=record,
+        organization_id=org.id,
+        branch_id=branch.id,
+        pushed_by=user.id,
+    )
+
+    assert not result.success
+    assert "sync_protocol_version=2" in (result.error or "")
+    assert await db.get(Sale, sale_id) is None
+    await db.refresh(inventory)
+    assert inventory.quantity == 10
+    await db.refresh(batch)
+    assert batch.remaining_quantity == 10
+
+
+@pytest.mark.asyncio
 async def test_push_response_returns_acked_cursor(
     db: AsyncSession,
     sync_drug: tuple[Drug, uuid.UUID, uuid.UUID, uuid.UUID],

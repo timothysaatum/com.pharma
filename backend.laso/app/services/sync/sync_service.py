@@ -1216,6 +1216,24 @@ class SyncService:
             ), None
 
         # ------------------------------------------------------------------
+        # Protocol-version guard: reject legacy/unversioned sale pushes. Only
+        # sync_protocol_version == 2 clients are guaranteed to run the
+        # inventory-deduction pipeline below; a record missing this field
+        # (or sending version 1) would otherwise insert Sale/SaleItem rows
+        # with zero stock decrement, silently corrupting inventory.
+        # ------------------------------------------------------------------
+        if record.data.get("sync_protocol_version") != 2:
+            return PushResult(
+                local_id=record.local_id,
+                table_name="sales",
+                success=False,
+                error=(
+                    "Sales must be pushed with sync_protocol_version=2; legacy/unversioned "
+                    "sale pushes are rejected to prevent unbacked inventory deduction."
+                ),
+            ), None
+
+        # ------------------------------------------------------------------
         # Backdating guard: reject offline sales created more than 7 days
         # ago to prevent fraudulent antedating attacks.  A legitimate device
         # that was offline for >7 days is an operational anomaly that must
