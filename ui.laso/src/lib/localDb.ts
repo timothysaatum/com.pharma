@@ -2835,6 +2835,15 @@ export async function getCrrPushChangesFromDb(
   sinceDbVersion = 0,
 ): Promise<CrrChangeRow[]> {
   await ensureSuppressedCrrChangesSchema(db as Database);
+  // `seq` resets to 0 at the start of every transaction in cr-sqlite — it
+  // orders rows WITHIN one commit, not across commits. Sorting by `seq`
+  // alone leaves rows from different transactions that happen to share a
+  // `seq` value in an undefined relative order, which can send a
+  // dependent row (e.g. a prescription) to the server before the row it
+  // references (its customer), permanently failing FK validation and
+  // wedging the push cursor forever (see the bug report this fixes: an
+  // offline customer + prescription created moments apart never synced).
+  // `db_version` is the true chronological ordering across transactions.
   return db.select<CrrChangeRow[]>(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
@@ -2844,7 +2853,7 @@ export async function getCrrPushChangesFromDb(
          WHERE suppressed.table_name = crsql_changes."table"
            AND suppressed.db_version = crsql_changes.db_version
        )
-     ORDER BY seq`,
+     ORDER BY db_version, seq`,
     [siteId, sinceDbVersion]
   );
 }

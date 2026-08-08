@@ -21,4 +21,28 @@ describe("offline sale CRR projection routing", () => {
     expect(sql).toContain("suppressed.db_version = crsql_changes.db_version");
     expect(values).toEqual(["site-1", 41]);
   });
+
+  it("orders by db_version before seq, not seq alone", async () => {
+    // Regression coverage for a real bug report: a customer created offline,
+    // then a prescription for that customer moments later, never synced.
+    // cr-sqlite's `seq` resets to 0 at the start of every transaction — it
+    // only orders rows WITHIN one commit. `ORDER BY seq` alone leaves rows
+    // from different transactions that happen to share a `seq` value in an
+    // undefined relative order, confirmed against the real vendored
+    // extension: a customer (db_version=1) and an unrelated prescription
+    // (db_version=2) both start their own column changes at seq=0. If the
+    // dependent row (prescription) is sent to the server before the row it
+    // references (its customer), the server's FK validation rejects it and
+    // the push cursor never advances — the record is stuck forever, not
+    // just delayed. `db_version` is the only column that reflects true
+    // chronological order across transactions.
+    const execute: Database["execute"] = vi.fn(async () => ({ rowsAffected: 0 }));
+    const select = vi.fn(async (_query: string, _values?: unknown[]) => [] as unknown) as unknown as Database["select"];
+
+    await getCrrPushChangesFromDb({ execute, select }, "site-1", 0);
+
+    const [sql] = vi.mocked(select).mock.calls[0];
+    expect(sql).toContain("ORDER BY db_version, seq");
+    expect(sql).not.toMatch(/ORDER BY seq(?!,)/);
+  });
 });

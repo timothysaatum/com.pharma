@@ -272,6 +272,74 @@ describe("CRR migration audit sync", () => {
     );
   });
 
+  it("marks pushed prescriptions and customers synced via crsql_pack_columns, not raw pk", async () => {
+    // Regression coverage for a real bug: a prior version of this fixup
+    // compared `id = String(pk)` directly. `pk` is cr-sqlite's
+    // packed-columns encoding, transported as a "b64:..." string by the
+    // Tauri IPC layer — never equal to any real row id — so that UPDATE
+    // silently matched zero rows every time, and prescription/customer
+    // sync_status stayed 'pending' forever despite the push succeeding.
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const getCrrPushChanges = vi.fn().mockResolvedValue([
+      { table: "prescriptions", pk: "b64:AQsGcngtTkVX", cid: "status", val: "active", col_version: 1, db_version: 13, site_id: "local-site", cl: 1, seq: 1 },
+      { table: "customers", pk: "b64:AQsEY3VzdA==", cid: "first_name", val: "New", col_version: 1, db_version: 14, site_id: "local-site", cl: 1, seq: 2 },
+    ]);
+    const crrPush = vi.fn().mockResolvedValue({
+      results: [
+        { table: "prescriptions", row_id: "rx-1", success: true },
+        { table: "customers", row_id: "cust-1", success: true },
+      ],
+      total_received: 2,
+      total_accepted: 2,
+      total_failed: 0,
+      sync_timestamp: "2026-07-12T00:00:00Z",
+      merged_row_ids: ["rx-1", "cust-1"],
+      accepted_audit_event_ids: [],
+      audit_errors: {},
+    });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPush, crrPull: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({
+        select: async () => [{ key: "crr_push_db_version", value: "7" }],
+        execute,
+      }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
+      CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+    await (syncEngine as any).pushCrr();
+
+    const rxCall = execute.mock.calls.find(
+      ([sql]: any[]) => typeof sql === "string" && sql.includes("UPDATE prescriptions"),
+    );
+    expect(rxCall).toBeDefined();
+    expect(rxCall![0]).toContain("crsql_pack_columns(prescriptions.id)");
+    expect(rxCall![0]).not.toMatch(/WHERE id = \$/);
+    expect(rxCall![1]).toEqual([expect.any(String), "prescriptions", 7, 14]);
+
+    const custCall = execute.mock.calls.find(
+      ([sql]: any[]) => typeof sql === "string" && sql.includes("UPDATE customers"),
+    );
+    expect(custCall).toBeDefined();
+    expect(custCall![0]).toContain("crsql_pack_columns(customers.id)");
+    expect(custCall![1]).toEqual([expect.any(String), "customers", 7, 14]);
+  });
+
   it("does not advance the CRR push cursor when any row fails", async () => {
     const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
     const noop = vi.fn().mockResolvedValue(undefined);

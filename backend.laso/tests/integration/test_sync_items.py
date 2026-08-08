@@ -3,6 +3,7 @@ Integration tests for syncing Sale and SaleItem records.
 """
 
 import pytest
+import sqlite3
 import uuid
 from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
@@ -23,9 +24,11 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.sales.sales_model import PurchaseOrder, Supplier
 from app.models.system_md.sys_models import SyncOperationReceipt, SystemAlert
 from app.models.user.user_model import User
-from app.schemas.sync_schemas import PushRequest, PushRecord, PullRequest
+from app.schemas.sync_schemas import PushRequest, PushRecord, PullRequest, CrrPushRecord
 from app.schemas import sync_error_codes
 from app.services.sync.sync_service import SyncService
+from app.services.sync.crr_sync_service import CrrSyncService
+from app.services.sync.shadow_db import _CRR_TABLE_CONFIG, _resolve_extension_path
 
 
 @pytest.mark.asyncio
@@ -2589,4 +2592,108 @@ class TestPullPagination:
                 break
 
         assert sorted(seen_numbers) == [f"TIE-SALE-{i}" for i in range(4)]
-        assert len(seen_numbers) == len(set(seen_numbers))
+
+
+def _real_client_crsql_changes(table_ddls: dict) -> list[tuple]:
+    """Open a throwaway SQLite db with the real vendored cr-sqlite extension
+    loaded, apply each table's DDL, call crsql_as_crr, run the given INSERT,
+    and return the genuine crsql_changes rows cr-sqlite captured.
+
+    This mirrors what an actual client does (writeLocal.customer /
+    writeLocal.prescription -> a plain INSERT on a CRR-enabled table) instead
+    of hand-constructing CrrPushRecord payloads, which would risk testing a
+    shape the real client-side cr-sqlite extension never actually produces
+    (e.g. pk encoding).
+    """
+    ext_path = _resolve_extension_path()
+    assert ext_path, "test requires the vendored crsqlite extension"
+    conn = sqlite3.connect(":memory:")
+    conn.enable_load_extension(True)
+    conn.load_extension(ext_path)
+    conn.enable_load_extension(False)
+
+    for table, (ddl, insert_sql, insert_params) in table_ddls.items():
+        conn.executescript(ddl)
+        conn.execute(f"SELECT crsql_as_crr('{table}')")
+        conn.execute(insert_sql, insert_params)
+    conn.commit()
+
+    rows = conn.execute(
+        'SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq '
+        'FROM crsql_changes ORDER BY db_version ASC, seq ASC'
+    ).fetchall()
+    conn.close()
+    return rows
+
+
+@pytest.mark.asyncio
+class TestCrrPushCustomerPrescriptionDependency:
+    """Regression coverage for a real bug report: a customer created
+    offline, then a prescription created offline for that same new
+    customer (the ordinary cashier workflow — add a walk-in customer, then
+    take their prescription, all before reconnecting) never showed up
+    server-side once the app reconnected, despite being visible locally the
+    whole time. `writeLocal.customer`/`writeLocal.prescription` write
+    directly to CRR-enabled tables (ui.laso/src/lib/localWrite.ts) and rely
+    entirely on cr-sqlite's own change capture + SyncEngine.pushCrr() —
+    unlike sales, they never touch the legacy sync_queue, so
+    SyncService.push()-based tests (see test_push_prescription_* above)
+    exercise a path the real client no longer uses for these two tables.
+    """
+
+    async def test_offline_customer_and_dependent_prescription_both_reach_postgres(
+        self, db: AsyncSession, setup_test_data
+    ):
+        org, branch, _user, _drugs, _existing_customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+
+        new_customer_id = str(uuid.uuid4())
+        prescription_id = str(uuid.uuid4())
+
+        rows = _real_client_crsql_changes({
+            "customers": (
+                _CRR_TABLE_CONFIG["customers"]["ddl"],
+                """INSERT INTO customers
+                   (id, organization_id, customer_type, first_name, last_name, phone,
+                    is_active, is_deleted, sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, 'walk_in', ?, ?, ?, 1, 0, 'pending', 1, ?, ?)""",
+                (new_customer_id, str(org.id), "New", "Walkin", "0559999999", now, now),
+            ),
+            "prescriptions": (
+                _CRR_TABLE_CONFIG["prescriptions"]["ddl"],
+                """INSERT INTO prescriptions
+                   (id, organization_id, branch_id, prescription_number, customer_id,
+                    prescriber_name, prescriber_license, issue_date, expiry_date,
+                    medications, refills_allowed, refills_remaining, status,
+                    sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, ?, 'OFFLINE-RX-1', ?, 'Dr. Test', 'LIC-1', ?, ?,
+                           '[]', 0, 0, 'active', 'pending', 1, ?, ?)""",
+                (
+                    prescription_id, str(org.id), str(branch.id), new_customer_id,
+                    now, now, now, now,
+                ),
+            ),
+        })
+        assert rows, "expected real crsql_changes rows from the fake client db"
+
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        response = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+
+        failures = [r for r in response.results if not r.success]
+        assert not failures, f"expected both rows to be accepted, got failures: {failures}"
+
+        customer = await db.get(Customer, uuid.UUID(new_customer_id))
+        assert customer is not None, "offline-created customer never reached Postgres"
+
+        prescription = await db.get(Prescription, uuid.UUID(prescription_id))
+        assert prescription is not None, "offline-created prescription never reached Postgres"
+        assert prescription.customer_id == uuid.UUID(new_customer_id)

@@ -626,36 +626,48 @@ class SyncEngine {
                     );
 
                     // Bug fix: CRR push has no per-row accepted[] list, so markSynced is
-                    // never called for CRR-pushed prescriptions. Without this, their
-                    // sync_status stays 'pending' forever, and the upsertMany guard on
-                    // pull skips them, making prescriptions created offline invisible
-                    // once the app reconnects.
-                    // In cr-sqlite, pk holds the record UUID for every column change row.
-                    const pushedRxPks = [
-                        ...new Set(
-                            changes
-                                .filter((c) => c.table === "prescriptions" && c.pk)
-                                .map((c) => String(c.pk))
-                                .filter(Boolean)
-                        ),
-                    ];
-                    if (pushedRxPks.length > 0) {
+                    // never called for CRR-pushed prescriptions/customers. Without this,
+                    // their sync_status stays 'pending' forever, and the upsertMany guard
+                    // on pull skips them, making them look perpetually un-synced locally
+                    // even after the server has accepted them.
+                    //
+                    // `pk` here is cr-sqlite's packed-columns encoding, transported as a
+                    // "b64:..." string by the Tauri IPC layer (db.rs::row_to_json) — NOT
+                    // the plain row id. A prior version of this fix compared
+                    // `id = String(pk)` directly, which never matched any real row (the
+                    // UPDATE silently affected zero rows every time) and left prescription
+                    // sync_status stuck at 'pending' forever despite successful pushes.
+                    // Matching via crsql_pack_columns(id) = pk keeps the comparison at the
+                    // SQL/blob level, sidestepping the need to unpack pk in JS at all.
+                    const pushedTables = new Set(
+                        changes
+                            .filter((c) => c.table === "prescriptions" || c.table === "customers")
+                            .map((c) => c.table)
+                    );
+                    if (pushedTables.size > 0) {
                         const crrNow = new Date().toISOString();
-                        for (const rxId of pushedRxPks) {
+                        for (const table of pushedTables) {
                             try {
-                                await db.execute(
-                                    `UPDATE prescriptions
+                                const result = await db.execute(
+                                    `UPDATE ${table}
                                      SET sync_status = 'synced', synced_at = $1
-                                     WHERE id = $2 AND sync_status = 'pending'`,
-                                    [crrNow, rxId]
+                                     WHERE sync_status = 'pending'
+                                       AND EXISTS (
+                                         SELECT 1 FROM crsql_changes
+                                         WHERE "table" = $2
+                                           AND pk = crsql_pack_columns(${table}.id)
+                                           AND db_version > $3 AND db_version <= $4
+                                       )`,
+                                    [crrNow, table, sinceDbVersion, maxDbVersion]
                                 );
-                            } catch {
+                                console.log(
+                                    `[SyncEngine] CRR push: marked ${result.rowsAffected} ${table} row(s) as synced`
+                                );
+                            } catch (err) {
                                 // Non-fatal: best effort; will be retried on the next sync cycle
+                                console.warn(`[SyncEngine] CRR push: failed to mark ${table} rows synced`, err);
                             }
                         }
-                        console.log(
-                            `[SyncEngine] CRR push: marked ${pushedRxPks.length} prescription(s) as synced`
-                        );
                     }
                 } else if (hadFailures) {
                     console.warn(
