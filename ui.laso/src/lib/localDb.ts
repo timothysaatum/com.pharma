@@ -41,11 +41,42 @@ const MockDb: Database = {
 };
 
 let _db: Database | null = null;
+// Caches the IN-FLIGHT initialization, not just the resolved connection.
+// getDb() can be called concurrently — e.g. SyncEngine.start() fires
+// loadPersistedQueueState() without awaiting it, then immediately calls
+// sync(), which calls getDb() again while the first call's runMigrations()
+// may still be running (a schema migration on a fresh/older device can take
+// long enough to make this race easy to hit, not just theoretical). Every
+// individual db.execute()/db.execute_batch() call is its own separate Tauri
+// IPC round-trip, and the Rust-side connection Mutex is only held for one
+// statement at a time — NOT for a whole logical "BEGIN ... COMMIT" spanning
+// several awaited calls. Two concurrent callers, each stepping through their
+// own multi-statement transaction one IPC call at a time, can interleave on
+// the shared connection, and whichever side's statement lands while the
+// other's transaction is still open fails with the raw SQLite error "cannot
+// start a transaction within a transaction". Caching the in-flight promise
+// (not just the eventual value) makes every concurrent caller await the
+// SAME single initialization instead of racing a second one in underneath
+// it — this is the actual fix; there was previously nothing serializing
+// concurrent getDb() calls during startup.
+let _dbPromise: Promise<Database> | null = null;
 
 /** Get (or lazily open) the local database connection. */
-export async function getDb(): Promise<Database> {
-  if (_db) return _db;
+export function getDb(): Promise<Database> {
+  if (_db) return Promise.resolve(_db);
+  if (_dbPromise) return _dbPromise;
 
+  _dbPromise = initDb().catch((err) => {
+    // Allow a later call to retry a fresh initialization instead of every
+    // subsequent getDb() call for the rest of the session repeating the
+    // same failure forever.
+    _dbPromise = null;
+    throw err;
+  });
+  return _dbPromise;
+}
+
+async function initDb(): Promise<Database> {
   if (!IS_TAURI) {
     console.warn("[localDb] Not running in Tauri environment, using MockDb.");
     _db = MockDb;
@@ -53,7 +84,7 @@ export async function getDb(): Promise<Database> {
   }
 
   // Use rusqlite-backed Tauri commands instead of tauri-plugin-sql
-  _db = {
+  const db: Database = {
     execute: async (sql: string, values?: unknown[]): Promise<ExecResult> => {
       const result = await invoke<ExecResult>("db_execute", { sql, values: values ?? [] });
       return result;
@@ -77,19 +108,20 @@ export async function getDb(): Promise<Database> {
     }),
     load: async (_path: string): Promise<Database> => {
       // Connection is already opened by Rust setup; the path arg is ignored.
-      await runMigrations(_db!);
-      await ensureCrrTablesEnabled(_db!);
-      return _db!;
+      await runMigrations(db);
+      await ensureCrrTablesEnabled(db);
+      return db;
     },
   };
 
   try {
-    await (_db as any).load("");
+    await db.load("");
   } catch (err) {
     console.error("[localDb] Migration error:", err);
     throw err;
   }
 
+  _db = db;
   return _db;
 }
 
