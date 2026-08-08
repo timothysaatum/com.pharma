@@ -547,8 +547,9 @@ mod startup_tests {
     use super::{
         build_encrypted_copy, crsqlite_platform_dir, ensure_db_ready, execute_transaction,
         extension_load_path, generate_sqlcipher_raw_key, init_db, is_plaintext_sqlite,
-        json_to_rusqlite, migration_bak_path, migration_tmp_path, rename_with_sidecars,
-        resolve_extension_path, TransactionStatement, PLAINTEXT_SQLITE_MAGIC,
+        json_to_rusqlite, migration_bak_path, migration_tmp_path, open_and_key,
+        rename_with_sidecars, resolve_extension_path, TransactionStatement,
+        PLAINTEXT_SQLITE_MAGIC,
     };
     use rusqlite::{types::Value, Connection};
     use std::path::Path;
@@ -941,6 +942,116 @@ mod startup_tests {
             "backup should be cleaned up after a later successful launch"
         );
         drop(state2);
+
+        let _ = std::fs::remove_dir_all(&temp);
+    }
+
+    /// Not a real test on its own — spawned as a genuine OS subprocess by
+    /// `real_process_kill_during_encrypted_copy_leaves_state_ensure_db_ready_can_repair`
+    /// so that test can send it a real SIGKILL mid-copy, rather than only
+    /// hand-constructing the crash-window file state (as the test above
+    /// does). `#[ignore]` keeps a normal `cargo test` run from executing it
+    /// directly; it only runs via the explicit `--exact --ignored` spawn.
+    #[test]
+    #[ignore]
+    fn _migration_worker_build_encrypted_copy() {
+        let db_path = std::path::PathBuf::from(
+            std::env::var("MIGRATION_WORKER_DB_PATH").expect("MIGRATION_WORKER_DB_PATH not set"),
+        );
+        let marker_path = std::path::PathBuf::from(
+            std::env::var("MIGRATION_WORKER_MARKER_PATH")
+                .expect("MIGRATION_WORKER_MARKER_PATH not set"),
+        );
+        let tmp_path = migration_tmp_path(&db_path);
+        // Signal "about to start the copy" before doing any real work, so
+        // the parent knows exactly when it's safe to kill us.
+        std::fs::write(&marker_path, b"started").unwrap();
+        let _ = build_encrypted_copy(&db_path, &tmp_path, TEST_KEY);
+    }
+
+    #[test]
+    fn real_process_kill_during_encrypted_copy_leaves_state_ensure_db_ready_can_repair() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = fresh_temp_dir("real-kill-mid-copy");
+        let db_path = temp.join("laso.db");
+
+        // Seed enough rows that sqlcipher_export takes long enough to
+        // reliably interrupt with a real signal, not just a hand-built
+        // intermediate file state.
+        {
+            let seed = Connection::open(&db_path).unwrap();
+            seed.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT);",
+            )
+            .unwrap();
+            seed.execute_batch("BEGIN;").unwrap();
+            {
+                let mut stmt = seed
+                    .prepare("INSERT INTO customers (id, name) VALUES (?1, ?2)")
+                    .unwrap();
+                for i in 0..300_000i64 {
+                    stmt.execute(rusqlite::params![i, format!("Patient {i}")])
+                        .unwrap();
+                }
+            }
+            seed.execute_batch("COMMIT;").unwrap();
+        }
+        assert!(is_plaintext_sqlite(&db_path));
+
+        let marker_path = temp.join("worker-started.marker");
+        let test_exe = std::env::current_exe().expect("current_exe");
+        let mut child = Command::new(&test_exe)
+            .arg("db::startup_tests::_migration_worker_build_encrypted_copy")
+            .arg("--exact")
+            .arg("--ignored")
+            .arg("--test-threads=1")
+            .env("MIGRATION_WORKER_DB_PATH", &db_path)
+            .env("MIGRATION_WORKER_MARKER_PATH", &marker_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn migration worker subprocess");
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker_path.exists() {
+            assert!(Instant::now() < deadline, "worker never signaled it started");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Let the worker get genuinely into the export before killing it.
+        std::thread::sleep(Duration::from_millis(40));
+
+        let pid = child.id();
+        let status = Command::new("kill")
+            .arg("-9")
+            .arg(pid.to_string())
+            .status()
+            .expect("send SIGKILL");
+        assert!(status.success(), "kill -9 must succeed against the worker pid");
+        let _ = child.wait();
+
+        // build_encrypted_copy never writes to plain_path — regardless of
+        // exactly when the kill landed, the original must be untouched.
+        assert!(
+            is_plaintext_sqlite(&db_path),
+            "a killed copy must never have touched the original plaintext DB"
+        );
+
+        // Next launch: ensure_db_ready must produce a directly openable,
+        // correctly encrypted DB with no data loss, from a real interrupted
+        // process, not a simulated state.
+        let warning = ensure_db_ready(&db_path, TEST_KEY).expect("recovery must not error");
+        assert!(!is_plaintext_sqlite(&db_path), "should now be encrypted");
+        let _ = warning;
+
+        let conn = open_and_key(&db_path, TEST_KEY).unwrap();
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM customers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 300_000, "no data loss after a real process kill mid-copy + recovery");
+        drop(conn);
 
         let _ = std::fs::remove_dir_all(&temp);
     }
