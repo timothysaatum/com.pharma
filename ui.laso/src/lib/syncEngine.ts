@@ -31,6 +31,8 @@ import {
     getPendingCrrRenumberAudits, markCrrRenumberAuditsUploaded,
     isCrrTable, enqueue,
     ensureSuppressedCrrChangesSchema,
+    suppressPermanentlyRejectedCrrRow,
+    getPermanentlyRejectedCrrRows,
     SYNC_QUEUE_CHANGED_EVENT,
 } from "@/lib/localDb";
 import {
@@ -39,7 +41,7 @@ import {
     isOfflineError,
 } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
-import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED } from "@/lib/syncErrorCodes";
+import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED, SYNC_ERROR_PERMANENTLY_REJECTED } from "@/lib/syncErrorCodes";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import type {
     PullRequest,
@@ -48,7 +50,7 @@ import type {
     PushResponse,
     SyncStatus,
 } from "@/types";
-import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
+import type { QueueScope, QueuedConflict, QueuedFailure, PermanentlyRejectedCrrRow } from "@/lib/localDb";
 
 export const LEGACY_SYNC_TABLES = [
     "sales",
@@ -138,6 +140,10 @@ class SyncEngine {
     // Pending conflict records that need manual resolution
     pendingConflicts: QueuedConflict[] = [];
     pendingFailures: QueuedFailure[] = [];
+    // Rows the server has permanently rejected (see SYNC_ERROR_PERMANENTLY_REJECTED)
+    // — unlike pendingFailures, these are never retried; they're suppressed
+    // from all future push batches and need a human to look at them.
+    pendingPermanentlyRejected: PermanentlyRejectedCrrRow[] = [];
 
     // ── Lifecycle ────────────────────────────────────────────────────
 
@@ -223,6 +229,7 @@ class SyncEngine {
         this.organizationId = null;
         this.pendingConflicts = [];
         this.pendingFailures = [];
+        this.pendingPermanentlyRejected = [];
         this._status = "idle";
         this.notify(0, null);
     }
@@ -621,6 +628,44 @@ class SyncEngine {
                     }
 
                     if (response.total_failed > 0) {
+                        // PERMANENTLY_REJECTED rows can never succeed by
+                        // resending the identical bytes (the server already
+                        // confirmed this — see syncErrorCodes.ts). Suppress
+                        // them from all future push batches so they stop
+                        // blocking every other row's cursor advancement
+                        // forever; they still count as failures for this
+                        // cycle's own cursor-advance decision below (the
+                        // suppression only takes effect for the *next*
+                        // getCrrPushChanges call), but not for future ones.
+                        let permanentlyRejected = 0;
+                        for (const result of response.results) {
+                            if (
+                                !result.success &&
+                                result.error_code === SYNC_ERROR_PERMANENTLY_REJECTED &&
+                                result.pk_b64
+                            ) {
+                                permanentlyRejected++;
+                                try {
+                                    await suppressPermanentlyRejectedCrrRow(
+                                        db, result.table, result.pk_b64,
+                                    );
+                                } catch (err) {
+                                    console.warn(
+                                        "[SyncEngine] CRR push: failed to suppress " +
+                                        "permanently-rejected row, will keep retrying it",
+                                        result.table, err,
+                                    );
+                                }
+                            }
+                        }
+                        if (permanentlyRejected > 0) {
+                            console.warn(
+                                "[SyncEngine] CRR push: %d row(s) permanently rejected " +
+                                "by the server and suppressed from future pushes; " +
+                                "needs manual review",
+                                permanentlyRejected,
+                            );
+                        }
                         hadFailures = true;
                         console.warn(
                             "[SyncEngine] CRR push: %d accepted, %d failed",
@@ -1187,6 +1232,7 @@ class SyncEngine {
         if (!this.hasActiveQueueScope()) {
             this.pendingConflicts = [];
             this.pendingFailures = [];
+            this.pendingPermanentlyRejected = [];
             this.notify(0, null);
             return;
         }
@@ -1194,6 +1240,7 @@ class SyncEngine {
             const scope = this.queueScope();
             this.pendingConflicts = await getPendingConflicts(scope);
             this.pendingFailures = await getPendingFailures(MAX_PUSH_ATTEMPTS, scope);
+            this.pendingPermanentlyRejected = await getPermanentlyRejectedCrrRows();
             this.notify(
                 await getPendingCount(scope),
                 await getLastSyncAt(undefined, this.branchId ?? undefined)
@@ -1203,6 +1250,7 @@ class SyncEngine {
             this._dbInitError = msg;
             this.pendingConflicts = [];
             this.pendingFailures = [];
+            this.pendingPermanentlyRejected = [];
             this.notify(0, null);
             throw err;
         }

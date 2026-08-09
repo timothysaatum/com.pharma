@@ -23,7 +23,7 @@ import os
 import platform
 import re
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import Lock
@@ -1557,11 +1557,30 @@ class ShadowDB:
             column_type = column.type
 
             if isinstance(column_type, DateTime) and isinstance(value, str):
-                coerced[column.name] = (
-                    datetime.fromisoformat(value.replace("Z", "+00:00"))
-                    if value
-                    else None
-                )
+                if value:
+                    coerced[column.name] = datetime.fromisoformat(
+                        value.replace("Z", "+00:00")
+                    )
+                elif column.nullable:
+                    coerced[column.name] = None
+                else:
+                    # Shadow DDL declares columns like updated_at/created_at as
+                    # `TEXT NOT NULL DEFAULT ''` (cr-sqlite requires a DEFAULT on
+                    # NOT NULL columns). A client write that never explicitly
+                    # sets one of these leaves the literal SQL default '' here
+                    # instead of a real timestamp. That can't become NULL for a
+                    # column Postgres itself declares NOT NULL (TimestampMixin) —
+                    # fall back to created_at (already required not-null too) as
+                    # the best available "last modified" value, or now().
+                    fallback = coerced.get("created_at")
+                    if isinstance(fallback, str) and fallback:
+                        coerced[column.name] = datetime.fromisoformat(
+                            fallback.replace("Z", "+00:00")
+                        )
+                    elif isinstance(fallback, datetime):
+                        coerced[column.name] = fallback
+                    else:
+                        coerced[column.name] = datetime.now(timezone.utc)
             elif isinstance(column_type, Date) and isinstance(value, str):
                 coerced[column.name] = date.fromisoformat(value[:10]) if value else None
             elif isinstance(column_type, Boolean) and not isinstance(value, bool):

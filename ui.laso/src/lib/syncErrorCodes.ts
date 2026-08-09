@@ -26,3 +26,13 @@
  * yet. The client should retry without incrementing its attempt counter.
  */
 export const SYNC_ERROR_DEPENDENCY_NOT_SYNCED = "dependency_not_synced";
+
+/**
+ * This row's CRR merge was rejected by validation on an earlier push, with
+ * no authoritative Postgres row to restore in its place. Resending the
+ * identical local crsql_changes bytes can never resolve differently — the
+ * client must stop resending this specific row (suppress it from all
+ * future push batches) rather than let it block every other row forever,
+ * and should surface it to the user as needing manual review.
+ */
+export const SYNC_ERROR_PERMANENTLY_REJECTED = "permanently_rejected";

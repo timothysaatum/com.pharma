@@ -3052,3 +3052,166 @@ class TestCrrPushTransactionIsolation:
             "the valid customer must actually be persisted, not silently "
             "discarded by a poisoned transaction's failed final commit"
         )
+
+
+@pytest.mark.asyncio
+class TestCrrPushNotNullUpdatedAtFallback:
+    """Regression coverage for a real bug confirmed via production backend
+    logs: two live prescriptions permanently failed every push/reconcile
+    retry with `NotNullViolationError: null value in column "updated_at"`.
+
+    Root cause: the shadow SQLite DDL declares updated_at/created_at as
+    `TEXT NOT NULL DEFAULT ''` (cr-sqlite requires a DEFAULT on any NOT NULL
+    column). A client INSERT that never explicitly sets updated_at (relying
+    on that SQL default) leaves the literal empty string in cr-sqlite's
+    captured change, which _coerce_pg_types used to convert unconditionally
+    to Python None for any Date/DateTime column -- correct for nullable
+    columns, but Postgres's own TimestampMixin declares updated_at NOT NULL,
+    so this crashed the merge every single retry with no way to recover
+    (shadow_db.py::_coerce_pg_types).
+    """
+
+    async def test_prescription_pushed_without_updated_at_lands_using_created_at(
+        self, db: AsyncSession, setup_test_data
+    ):
+        if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+            pytest.skip("requires a real Postgres backend (set TEST_DATABASE_URL)")
+
+        org, branch, _user, _drugs, customer = setup_test_data
+        created = "2026-07-21T09:02:17.265000+00:00"
+        prescription_id = str(uuid.uuid4())
+
+        # Deliberately omit updated_at from the column list, mirroring a
+        # real client write path that relies on the shadow DDL's own
+        # `DEFAULT ''` instead of setting it explicitly.
+        rows = _real_client_crsql_changes({
+            "prescriptions": (
+                _CRR_TABLE_CONFIG["prescriptions"]["ddl"],
+                """INSERT INTO prescriptions
+                   (id, organization_id, branch_id, prescription_number, customer_id,
+                    prescriber_name, prescriber_license, issue_date, expiry_date,
+                    medications, refills_allowed, refills_remaining, status,
+                    sync_status, sync_version, created_at)
+                   VALUES (?, ?, ?, 'OFFLINE-RX-NO-UPDATED-AT', ?, 'Dr. Test', 'LIC-1', ?, ?,
+                           '[]', 0, 0, 'active', 'pending', 1, ?)""",
+                (
+                    prescription_id, str(org.id), str(branch.id), str(customer.id),
+                    created, created, created,
+                ),
+            ),
+        })
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        response = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+
+        result = next(r for r in response.results if r.table == "prescriptions")
+        assert result.success is True, (
+            f"a prescription missing updated_at must still land using a "
+            f"real fallback timestamp, not fail forever: {response.results}"
+        )
+
+        persisted = await db.get(Prescription, uuid.UUID(prescription_id))
+        assert persisted is not None
+        assert persisted.updated_at is not None
+        assert persisted.updated_at.isoformat().startswith("2026-07-21T09:02:17")
+
+
+@pytest.mark.asyncio
+class TestCrrPushPermanentlyRejectedTombstone:
+    """Regression coverage for a real, confirmed production issue: 6
+    prescriptions + 1 purchase_order permanently failed every push retry
+    with 'Unable to resolve encoded primary key', silently blocking the
+    entire push cursor forever.
+
+    Root cause (confirmed via full codebase search — see
+    _STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES's docstring): prescriptions
+    and purchase_orders (keep_both_renumber) have NO legitimate delete path
+    anywhere in the app. The only way one of these tables' shadow rows is
+    ever deleted is restore_rejected_row, run when a push's validation
+    rejects a row that has no authoritative Postgres row to restore (i.e. a
+    brand-new record, never yet synced). That leaves a permanent tombstone:
+    the client resends the identical unpushed local change every cycle
+    (same id/site_id/version), and it can never resolve differently.
+
+    Previously this surfaced as a generic, retryable-looking ValueError
+    forever. It's now classified distinctly (PERMANENTLY_REJECTED) so the
+    client can stop resending this one row instead of it blocking every
+    other row in every future batch.
+    """
+
+    async def test_second_push_of_a_validation_rejected_new_prescription_is_permanently_rejected(
+        self, db: AsyncSession, setup_test_data
+    ):
+        if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+            pytest.skip("requires a real Postgres backend (set TEST_DATABASE_URL)")
+
+        org, branch, _user, _drugs, _customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+        prescription_id = str(uuid.uuid4())
+
+        # A brand-new prescription referencing a customer_id that doesn't
+        # exist in this organization -- _validate_prescription rejects it,
+        # and because it never reached Postgres, restore_rejected_row has
+        # no authoritative row to restore: the shadow copy is just deleted.
+        rows = _real_client_crsql_changes({
+            "prescriptions": (
+                _CRR_TABLE_CONFIG["prescriptions"]["ddl"],
+                """INSERT INTO prescriptions
+                   (id, organization_id, branch_id, prescription_number, customer_id,
+                    prescriber_name, prescriber_license, issue_date, expiry_date,
+                    medications, refills_allowed, refills_remaining, status,
+                    sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, ?, 'OFFLINE-RX-BAD-CUSTOMER', ?, 'Dr. Test', 'LIC-1', ?, ?,
+                           '[]', 0, 0, 'active', 'pending', 1, ?, ?)""",
+                (
+                    prescription_id, str(org.id), str(branch.id), str(uuid.uuid4()),
+                    now, now, now, now,
+                ),
+            ),
+        })
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        first = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+        first_result = next(r for r in first.results if r.table == "prescriptions")
+        assert first_result.success is False
+        assert first_result.error_code != sync_error_codes.PERMANENTLY_REJECTED, (
+            "the FIRST rejection is an ordinary validation failure, not yet "
+            "a permanent one"
+        )
+        assert await db.get(Prescription, uuid.UUID(prescription_id)) is None
+
+        # The client has no way to know the push failed differently from a
+        # transient error, so on the next sync cycle it resends the exact
+        # same unpushed crsql_changes rows.
+        second = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+        second_result = next(r for r in second.results if r.table == "prescriptions")
+
+        assert second_result.success is False
+        assert second_result.error_code == sync_error_codes.PERMANENTLY_REJECTED, (
+            f"a resend of an already-tombstoned keep_both_renumber row must "
+            f"be classified as permanently rejected, not a generic retryable "
+            f"failure: {second_result}"
+        )
+        assert second_result.pk_b64 is not None and second_result.pk_b64.startswith("b64:"), (
+            "the client needs pk_b64 to identify exactly which local "
+            f"crsql_changes rows to stop resending: {second_result}"
+        )
+        assert await db.get(Prescription, uuid.UUID(prescription_id)) is None

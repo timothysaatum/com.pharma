@@ -1549,6 +1549,9 @@ export interface CrrPushResult {
     row_id: string;
     success: boolean;
     error?: string;
+    error_code?: string;
+    /** Base64 "b64:..." transport encoding of this group's raw crsql_changes.pk bytes. */
+    pk_b64?: string;
 }
 
 export interface CrrPushResponse {

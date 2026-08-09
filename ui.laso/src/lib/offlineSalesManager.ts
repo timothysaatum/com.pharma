@@ -267,7 +267,7 @@ class OfflineSalesManager {
     // transaction's checkpoint so protocol v2 remains the sole server writer.
     statements.push({
       sql: `INSERT OR IGNORE INTO suppressed_crr_changes
-              (table_name, db_version, sale_id, reason, created_at)
+              (table_name, db_version, record_id, reason, created_at)
             SELECT DISTINCT "table", db_version, $1, 'offline_sale_projection', $2
             FROM crsql_changes
             WHERE db_version > (

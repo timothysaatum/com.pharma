@@ -132,7 +132,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 22;
+const MAX_KNOWN_SCHEMA_VERSION = 23;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -210,6 +210,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 20) await migrate_v20(db);
       if (user_version < 21) await migrate_v21(db);
       if (user_version < 22) await migrate_v22(db);
+      if (user_version < 23) await migrate_v23(db);
       await ensureSuppressedCrrChangesSchema(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
@@ -1390,10 +1391,10 @@ export async function ensureSuppressedCrrChangesSchema(db: Database): Promise<vo
     CREATE TABLE IF NOT EXISTS suppressed_crr_changes (
       table_name  TEXT NOT NULL,
       db_version  INTEGER NOT NULL,
-      sale_id     TEXT NOT NULL,
+      record_id   TEXT NOT NULL,
       reason      TEXT NOT NULL,
       created_at  TEXT NOT NULL,
-      PRIMARY KEY (table_name, db_version, sale_id)
+      PRIMARY KEY (table_name, db_version, record_id)
     )
   `);
   await db.execute(
@@ -1810,6 +1811,27 @@ async function migrate_v22(db: Database): Promise<void> {
     console.error("[localDb] Migration v22 failed:", error);
     throw error;
   }
+}
+
+/// Migration v23: generalize suppressed_crr_changes beyond just sales.
+/// `sale_id` was the only producer when this table was created
+/// (offlineSalesManager.ts, suppressing local sale-projection writes from
+/// re-reaching the server). It's now also used to suppress permanently-
+/// rejected prescriptions/purchase_orders (see suppressPermanentlyRejectedCrrRow)
+/// -- neither is a sale, so the old name was actively misleading. The
+/// filter query (getCrrPushChangesFromDb) only ever matched on
+/// (table_name, db_version), never on this column's value, so the rename
+/// changes nothing about existing suppression behavior.
+export async function migrate_v23(db: Database): Promise<void> {
+  await ensureSuppressedCrrChangesSchema(db);
+  try {
+    await db.execute(
+      "ALTER TABLE suppressed_crr_changes RENAME COLUMN sale_id TO record_id",
+    );
+  } catch {
+    // Already renamed by a prior interrupted attempt at this migration.
+  }
+  await db.execute("PRAGMA user_version = 23");
 }
 
 async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
@@ -2898,6 +2920,91 @@ function decodeCrrValue(v: unknown): unknown {
     return blobTransportValue(v);
   }
   return v;
+}
+
+const PERMANENTLY_REJECTED_REASON = "permanently_rejected";
+
+export interface SuppressedPermanentlyRejectedRow {
+  table: string;
+  recordId: string | null;
+  reason: string;
+}
+
+/**
+ * Permanently stop resending a CRR row's local changes after the server
+ * classifies it PERMANENTLY_REJECTED (see syncErrorCodes.ts) -- the server
+ * already confirmed resending the identical local bytes can never resolve
+ * differently (see crr_sync_service.py's
+ * _STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES). Suppresses every local
+ * crsql_changes row for this (table, pk) group so
+ * getCrrPushChangesFromDb never re-selects it -- otherwise this one row
+ * would keep failing every cycle forever and block every other row in
+ * the same push batch from ever advancing the cursor.
+ */
+export async function suppressPermanentlyRejectedCrrRow(
+  db: Database,
+  table: string,
+  pkB64: string,
+): Promise<SuppressedPermanentlyRejectedRow> {
+  if (!KNOWN_CRR_TABLES.includes(table)) {
+    throw new Error(`suppressPermanentlyRejectedCrrRow: unknown CRR table ${table}`);
+  }
+  await ensureSuppressedCrrChangesSchema(db);
+  const pkValue = decodeCrrValue(pkB64);
+
+  // The server can't resolve this row's id (that's exactly why it's
+  // permanently rejected), but the client authored it locally, so it's
+  // still readable from the client's own table by packed-pk lookup --
+  // the same match technique pushCrr() already uses to mark rows synced.
+  const idRows = await db.select<{ id: string }[]>(
+    `SELECT id FROM ${table} WHERE crsql_pack_columns(id) = ?`,
+    [pkValue],
+  );
+  const recordId = idRows[0]?.id ?? null;
+
+  const versionRows = await db.select<{ db_version: number }[]>(
+    'SELECT DISTINCT db_version FROM crsql_changes WHERE "table" = ? AND pk = ?',
+    [table, pkValue],
+  );
+
+  const now = new Date().toISOString();
+  for (const { db_version } of versionRows) {
+    await db.execute(
+      `INSERT OR IGNORE INTO suppressed_crr_changes
+         (table_name, db_version, record_id, reason, created_at)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [table, db_version, recordId ?? pkB64, PERMANENTLY_REJECTED_REASON, now],
+    );
+  }
+
+  return { table, recordId, reason: PERMANENTLY_REJECTED_REASON };
+}
+
+export interface PermanentlyRejectedCrrRow {
+  table: string;
+  recordId: string;
+  createdAt: string;
+}
+
+/** Distinct rows the user needs to manually review (see SyncIndicator.tsx). */
+export async function getPermanentlyRejectedCrrRows(): Promise<PermanentlyRejectedCrrRow[]> {
+  const db = await getDb();
+  await ensureSuppressedCrrChangesSchema(db);
+  const rows = await db.select<
+    { table_name: string; record_id: string; created_at: string }[]
+  >(
+    `SELECT table_name, record_id, MIN(created_at) AS created_at
+     FROM suppressed_crr_changes
+     WHERE reason = $1
+     GROUP BY table_name, record_id
+     ORDER BY created_at DESC`,
+    [PERMANENTLY_REJECTED_REASON],
+  );
+  return rows.map((r) => ({
+    table: r.table_name,
+    recordId: r.record_id,
+    createdAt: r.created_at,
+  }));
 }
 
 export async function applyCrrPullChanges(

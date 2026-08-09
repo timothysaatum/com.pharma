@@ -520,6 +520,25 @@ class CrrPushResult(BaseSchema):
     row_id: str
     success: bool
     error: Optional[str] = None
+    error_code: Optional[str] = Field(
+        default=None,
+        description=(
+            "Structured classification of `error` for retry logic (see "
+            "app/schemas/sync_error_codes.py). `error` itself is prose for "
+            "logging/display only and must not be pattern-matched by clients."
+        ),
+    )
+    pk_b64: Optional[str] = Field(
+        default=None,
+        description=(
+            "Base64-encoded raw crsql_changes.pk bytes for this row's group "
+            "(same encoding the client sends as pk over the wire). Lets the "
+            "client match a failure back to its own local crsql_changes rows "
+            "when row_id can't be resolved to a real id (e.g. "
+            "PERMANENTLY_REJECTED), so it knows exactly which rows to stop "
+            "resending."
+        ),
+    )
 
 
 class CrrPushResponse(BaseSchema):

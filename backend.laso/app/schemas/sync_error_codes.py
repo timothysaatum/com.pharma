@@ -23,3 +23,20 @@ finding S4.
 # or the customer a prescription references) hasn't reached the server yet.
 # The client should retry without incrementing its attempt counter.
 DEPENDENCY_NOT_SYNCED = "dependency_not_synced"
+
+# This row's CRR merge was rejected by application-level validation on an
+# earlier push, and it has no authoritative Postgres row to restore in its
+# place (i.e. it never reached Postgres in the first place — see
+# restore_rejected_row in shadow_db.py). For a keep_both_renumber table
+# (prescriptions, purchase_orders — which never legitimately delete a row
+# outside that one corrective path; confirmed no other delete path exists
+# anywhere in the app, since these entities must not be hard-deleted for
+# audit-trail reasons), that leaves a permanent tombstone: the client keeps
+# resending the exact same unpushed local change (same id/site_id/version —
+# it has no way to resend differently) and the server can never resolve it.
+# This is not retryable — resending the identical bytes will never succeed.
+# The client should stop resending this specific row (so it stops blocking
+# every other row in the same push batch forever) and surface it to the
+# user as needing manual review, rather than silently dropping it or
+# retrying it indefinitely.
+PERMANENTLY_REJECTED = "permanently_rejected"

@@ -1,6 +1,6 @@
 import uuid
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -216,6 +216,39 @@ def test_shadow_row_coerces_empty_string_date_and_datetime_to_null():
 
     assert coerced["last_refill_date"] is None
     assert coerced["verified_at"] is None
+
+
+def test_shadow_row_falls_back_to_created_at_for_empty_not_null_updated_at():
+    # Regression coverage for a real bug found via production backend logs:
+    # prescriptions.updated_at (like created_at) is declared NOT NULL in
+    # Postgres (TimestampMixin), but the shadow SQLite DDL declares it
+    # `TEXT NOT NULL DEFAULT ''` (cr-sqlite requires a DEFAULT on NOT NULL
+    # columns). A client write that never explicitly sets updated_at leaves
+    # the literal SQL default '' here. The empty-string-to-None coercion
+    # above is correct for nullable columns but is exactly wrong here: it
+    # turned a crash (`Invalid isoformat string: ''`) into a *different*
+    # permanent failure — `NotNullViolationError: null value in column
+    # "updated_at"` — on every push/reconcile retry. Falling back to
+    # created_at (itself required not-null) is the best available
+    # "last modified" value.
+    coerced = ShadowDB._coerce_pg_types("prescriptions", {
+        "created_at": "2026-07-21T09:02:17.265000+00:00",
+        "updated_at": "",
+    })
+
+    assert coerced["updated_at"] == datetime.fromisoformat(
+        "2026-07-21T09:02:17.265000+00:00"
+    )
+
+
+def test_shadow_row_falls_back_to_now_when_not_null_datetime_has_no_created_at_either():
+    before = datetime.now(timezone.utc)
+    coerced = ShadowDB._coerce_pg_types("prescriptions", {
+        "updated_at": "",
+    })
+    after = datetime.now(timezone.utc)
+
+    assert before <= coerced["updated_at"] <= after
 
 
 def test_shadow_pg_row_replaces_client_queue_state_for_raw_insert():

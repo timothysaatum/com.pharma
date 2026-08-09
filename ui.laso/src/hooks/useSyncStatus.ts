@@ -9,7 +9,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { syncEngine } from "@/lib/syncEngine";
 import type { SyncStatus } from "@/types";
-import type { QueuedConflict, QueuedFailure } from "@/lib/localDb";
+import type { QueuedConflict, QueuedFailure, PermanentlyRejectedCrrRow } from "@/lib/localDb";
 
 export interface SyncState {
     status: SyncStatus;
@@ -17,6 +17,8 @@ export interface SyncState {
     lastSyncAt: string | null;
     conflicts: QueuedConflict[];
     failures: QueuedFailure[];
+    /** Rows the server permanently rejected — never retried, needs manual review. */
+    permanentlyRejected: PermanentlyRejectedCrrRow[];
     /** Manually trigger a sync (e.g. from a button) */
     syncNow: () => Promise<void>;
     /** Resolve a manual conflict with server or local preference */
@@ -36,6 +38,9 @@ export function useSyncStatus(): SyncState {
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
     const [conflicts, setConflicts] = useState<QueuedConflict[]>(syncEngine.pendingConflicts);
     const [failures, setFailures] = useState<QueuedFailure[]>(syncEngine.pendingFailures);
+    const [permanentlyRejected, setPermanentlyRejected] = useState<PermanentlyRejectedCrrRow[]>(
+        syncEngine.pendingPermanentlyRejected
+    );
 
     useEffect(() => {
         const unsub = syncEngine.subscribe((s, count, last) => {
@@ -44,6 +49,7 @@ export function useSyncStatus(): SyncState {
             setLastSyncAt(last);
             setConflicts([...syncEngine.pendingConflicts]);
             setFailures([...syncEngine.pendingFailures]);
+            setPermanentlyRejected([...syncEngine.pendingPermanentlyRejected]);
         });
         return unsub;
     }, []);
@@ -68,5 +74,5 @@ export function useSyncStatus(): SyncState {
         []
     );
 
-    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict, discardFailure, voidFailedSale };
+    return { status, pendingCount, lastSyncAt, conflicts, failures, permanentlyRejected, syncNow, resolveConflict, discardFailure, voidFailedSale };
 }

@@ -16,6 +16,7 @@ Per ADR 0002: single Mutex<Connection> on the shadow DB.
 
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.customer.customer_model import Customer
 from app.models.inventory.inventory_model import Drug
+from app.schemas import sync_error_codes
 from app.schemas.sync_schemas import (
     CrrPushRecord,
     CrrRenumberAuditEvent,
@@ -232,6 +234,22 @@ _CRR_VALIDATORS["purchase_orders"] = _validate_purchase_order
 # restore_rejected_row's validation-rejection path and must keep failing.
 _STRATEGIES_WITH_LEGITIMATE_TOMBSTONES = {"sum_and_merge", "lww_with_external_dedup"}
 
+# keep_both_renumber tables (prescriptions, purchase_orders) never delete a
+# row as part of normal merge logic, and neither table has ANY other delete
+# path anywhere in the app — cancel/reject/void are always a status-flag
+# UPDATE, never a Postgres DELETE, because these entities must not be
+# hard-deleted (regulatory audit-trail requirement; confirmed by direct
+# code search of every endpoint/service touching either table). That means
+# a tombstone on one of these tables can ONLY have come from
+# restore_rejected_row's validation-rejection path — there is no ambiguity
+# to resolve here the way there is for _STRATEGIES_WITH_LEGITIMATE_TOMBSTONES
+# above. Unlike that set, though, "already handled" here means the row's
+# data was thrown away and never reached Postgres, not that it succeeded —
+# so it must still be reported as a failure, just a distinctly
+# non-retryable one (PERMANENTLY_REJECTED) instead of the generic,
+# retry-forever ValueError.
+_STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES = {"keep_both_renumber"}
+
 
 # ── Main service ──────────────────────────────────────────────────────
 
@@ -404,6 +422,37 @@ class CrrSyncService:
                             table=table,
                             row_id=pk_str,
                             success=True,
+                        ))
+                        continue
+                    if (
+                        strategy in _STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES
+                        and await shadow.pk_is_tombstoned(table, group_changes[0].pk)
+                    ):
+                        # Confirmed non-ambiguous for these tables (see the
+                        # constant's docstring): this pk was rejected by a
+                        # prior push's validation and had no authoritative
+                        # Postgres row to restore. Resending the identical
+                        # bytes can never resolve differently — report a
+                        # distinctly non-retryable failure so the client can
+                        # stop resending this one row (instead of blocking
+                        # every other row in every future batch forever) and
+                        # surface it to the user for manual review.
+                        pk_bytes = group_changes[0].pk
+                        results.append(CrrPushResult(
+                            table=table,
+                            row_id=pk_str,
+                            success=False,
+                            error=(
+                                f"{table} row was previously rejected during sync "
+                                "and cannot be recovered automatically; it never "
+                                "reached the server. Manual review required."
+                            ),
+                            error_code=sync_error_codes.PERMANENTLY_REJECTED,
+                            pk_b64=(
+                                "b64:" + base64.b64encode(pk_bytes).decode("ascii")
+                                if isinstance(pk_bytes, (bytes, bytearray))
+                                else None
+                            ),
                         ))
                         continue
                     error = f"Unable to resolve encoded primary key for {table}"
