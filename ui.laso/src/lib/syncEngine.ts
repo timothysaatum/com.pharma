@@ -559,6 +559,17 @@ class SyncEngine {
 
     private async pushCrr(): Promise<{ hadFailures: boolean }> {
         if (!this.branchId) return { hadFailures: false };
+        // Capture once. `this.branchId` can change mid-call: authStore's
+        // setActiveBranch() runs synchronously (stop() then start()) and
+        // this function has many await points below. getCrrPushChangesFromDb
+        // scopes rows by site_id/db_version only, never by branch, so a
+        // stale re-read of `this.branchId` for the request envelope (further
+        // down) could label a batch containing rows written under the OLD
+        // branch with the NEW branch's id. The server's per-row branch scope
+        // check (_validate_scope) then rejects those rows for a mismatch —
+        // and if it's a row's first-ever push, that rejection is permanent
+        // (restore_rejected_row has no prior Postgres state to fall back to).
+        const pushBranchId = this.branchId;
         const MAX_RETRIES = 3;
         for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
             try {
@@ -598,7 +609,7 @@ class SyncEngine {
                     const i = batchIndex * batchSize;
                     const batch = changes.slice(i, i + batchSize);
                     const response = await promiseWithTimeout(syncApi.crrPush({
-                        branch_id: this.branchId,
+                        branch_id: pushBranchId,
                         changes: batch as any[],
                         audit_events: batchIndex === 0 ? auditEvents : [],
                     }), 15000);
