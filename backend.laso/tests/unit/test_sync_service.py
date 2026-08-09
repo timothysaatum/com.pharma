@@ -557,6 +557,41 @@ async def test_get_changes_since_requires_org_branch_ids_for_branch_only_tables(
 
 
 @pytest.mark.asyncio
+async def test_pk_is_tombstoned_true_after_delete_crr_row(tmp_path):
+    # Regression coverage for a real bug: resolve_row_id returning None is
+    # ambiguous between "never materialized" (a real problem) and "already
+    # legitimately deleted/retired" (sum_and_merge and the customer-merge
+    # strategy both call delete_crr_row after folding a losing duplicate
+    # into its winner). pk_is_tombstoned must distinguish the two so
+    # handle_crr_push can treat the latter as a no-op success instead of a
+    # permanent, endlessly-retried error.
+    shadow = await _init_real_shadow(tmp_path)
+    conn = shadow._conn
+    _insert_branch_inventory_row(conn, "row-a", "branch-a1")
+    encoded_pk = _packed_pk(conn, "branch_inventory", "row-a")
+
+    assert await shadow.pk_is_tombstoned("branch_inventory", encoded_pk) is False
+
+    await shadow.delete_crr_row("branch_inventory", "row-a")
+
+    assert await shadow.pk_is_tombstoned("branch_inventory", encoded_pk) is True
+
+
+@pytest.mark.asyncio
+async def test_pk_is_tombstoned_false_for_a_pk_that_never_existed(tmp_path):
+    # A pk with no crsql_changes history at all (never inserted, not just
+    # deleted) must NOT be reported as tombstoned -- that would silently
+    # swallow genuinely broken/malformed pushes as false successes.
+    shadow = await _init_real_shadow(tmp_path)
+
+    result = await shadow.pk_is_tombstoned(
+        "branch_inventory", b"definitely-does-not-exist"
+    )
+
+    assert result is False
+
+
+@pytest.mark.asyncio
 async def test_get_changes_since_still_scopes_delete_tombstones(tmp_path):
     """A hard-deleted row (delete_crr_row) no longer exists in the shadow
     table, so ownership must be resolved from the crr_row_owners index

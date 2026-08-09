@@ -1025,6 +1025,46 @@ class ShadowDB:
 
         return await asyncio.to_thread(_sync)
 
+    async def pk_is_tombstoned(self, table: str, encoded_pk: Any) -> bool:
+        """True if this encoded pk's current clock state is a delete.
+
+        `resolve_row_id` returning None is ambiguous: it means either the
+        pk was never materialized (a real problem) or the row legitimately
+        no longer exists. The latter is common and expected — `sum_and_merge`
+        and the customer-merge strategy both call `delete_crr_row` to retire
+        a losing duplicate's id after folding it into the winner (see that
+        method's docstring), and a genuine client-authored delete looks
+        identical. Because a client only advances its push cursor once a
+        *whole* batch succeeds (pushCrr()'s all-or-nothing gating), an
+        already-processed row like this gets resent verbatim on every retry
+        as long as anything else in the same batch keeps failing — cr-sqlite
+        correctly refuses to resurrect it (the replayed create loses the
+        causality race against the already-applied delete), so without this
+        check `resolve_row_id` would report the same permanent, unrecoverable
+        "error" for it forever. `crsql_changes` reflects current clock state,
+        not a full history, so a pk whose changes collapsed into cr-sqlite's
+        single tombstone row (`cid = '-1'`, the same sentinel already relied
+        on by `compact_crr_tables`) reads back as tombstoned even after this
+        push's stale create-columns were just re-inserted alongside it.
+        """
+        if table not in _CRR_TABLE_CONFIG:
+            raise ValueError(f"Unknown CRR table: {table}")
+
+        def _sync() -> bool:
+            with self._lock:
+                conn = self._conn
+                if conn is None:
+                    raise RuntimeError("Shadow DB not initialised")
+                row = conn.execute(
+                    """SELECT cid FROM crsql_changes
+                       WHERE "table" = ? AND pk = ?
+                       ORDER BY db_version DESC, seq DESC LIMIT 1""",
+                    (table, encoded_pk),
+                ).fetchone()
+                return row is not None and row[0] == "-1"
+
+        return await asyncio.to_thread(_sync)
+
     async def restore_rejected_row(
         self,
         table: str,

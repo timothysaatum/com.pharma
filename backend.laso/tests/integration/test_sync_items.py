@@ -28,7 +28,7 @@ from app.schemas.sync_schemas import PushRequest, PushRecord, PullRequest, CrrPu
 from app.schemas import sync_error_codes
 from app.services.sync.sync_service import SyncService
 from app.services.sync.crr_sync_service import CrrSyncService
-from app.services.sync.shadow_db import _CRR_TABLE_CONFIG, _resolve_extension_path
+from app.services.sync.shadow_db import _CRR_TABLE_CONFIG, _resolve_extension_path, get_shadow_db
 
 
 @pytest.mark.asyncio
@@ -2796,3 +2796,72 @@ class TestCrrPushCustomerPrescriptionDependency:
 
         prescription = await db.get(Prescription, uuid.UUID(prescription_id))
         assert prescription is not None, "offline-created prescription never reached Postgres"
+
+    async def test_pk_resend_after_shadow_row_already_tombstoned_is_not_an_error(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """Regression coverage for a real bug found live in a user's backend
+        log: `_handle_sum_and_merge` (branch_inventory/drug_batches) and the
+        customer-merge strategy both call `shadow.delete_crr_row` to retire
+        a losing duplicate's shadow row after folding it into the winner --
+        exactly the same shadow state a genuine client-authored delete
+        leaves behind. Because pushCrr() only advances the client's cursor
+        once a *whole* batch succeeds, an already-processed row like this
+        gets resent verbatim on every retry for as long as anything else in
+        the same batch keeps failing (which was itself happening for an
+        unrelated reason at the time -- see the isoformat regression test
+        above). cr-sqlite correctly refuses to resurrect it (the replayed
+        create loses the causality race against the already-applied
+        delete), so `resolve_row_id` finds nothing -- but the old code
+        treated that as an unconditional, permanently-repeating hard error
+        ("Unable to resolve encoded primary key for customers") instead of
+        recognizing it as a no-op success.
+        """
+        org, branch, _user, _drugs, _existing_customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+        customer_id = str(uuid.uuid4())
+
+        rows = _real_client_crsql_changes({
+            "customers": (
+                _CRR_TABLE_CONFIG["customers"]["ddl"],
+                """INSERT INTO customers
+                   (id, organization_id, customer_type, first_name, last_name, phone,
+                    is_active, is_deleted, sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, 'walk_in', ?, ?, ?, 1, 0, 'pending', 1, ?, ?)""",
+                (customer_id, str(org.id), "Retry", "Echo", "0551234567", now, now),
+            ),
+        })
+        assert rows, "expected real crsql_changes rows from the fake client db"
+
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        first = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+        assert not [r for r in first.results if not r.success], first.results
+        assert await db.get(Customer, uuid.UUID(customer_id)) is not None
+
+        # Retire the shadow row exactly the way sum_and_merge / the
+        # customer-merge strategy do after folding a losing duplicate into
+        # its winner (a genuine client-authored delete leaves the same
+        # shadow state).
+        shadow = await get_shadow_db()
+        await shadow.delete_crr_row("customers", customer_id)
+
+        # The client's cursor never advanced, so it resends the exact same
+        # already-processed create-changes for this pk.
+        retry = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+
+        failures = [r for r in retry.results if not r.success]
+        assert not failures, (
+            "resending an already-tombstoned pk must be a no-op success, "
+            f"not a permanent error: {failures}"
+        )

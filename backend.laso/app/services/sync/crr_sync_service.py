@@ -373,6 +373,20 @@ class CrrSyncService:
                     table, group_changes[0].pk
                 )
                 if resolved_row_id is None:
+                    if await shadow.pk_is_tombstoned(table, group_changes[0].pk):
+                        # Already deleted/retired (e.g. sum_and_merge or the
+                        # customer-merge strategy folded this row into a
+                        # winner and tombstoned it, or it's a genuine client
+                        # delete). Nothing to upsert — report success so this
+                        # pk stops being treated as a permanent, unrecoverable
+                        # error on every retry. See pk_is_tombstoned's
+                        # docstring for why this is common, not exceptional.
+                        results.append(CrrPushResult(
+                            table=table,
+                            row_id=pk_str,
+                            success=True,
+                        ))
+                        continue
                     error = f"Unable to resolve encoded primary key for {table}"
                     raise ValueError(error)
                 row_id = resolved_row_id
