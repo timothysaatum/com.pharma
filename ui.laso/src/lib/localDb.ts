@@ -2855,10 +2855,24 @@ export async function getCrrPushChangesFromDb(
   // the raw string silently matched zero rows, forever — the push query
   // returned empty even with a correct db_version cursor. Re-wrap through
   // blobTransportValue() so it binds as the blob the column actually is.
+  // `sales` and the org-level catalog tables (drugs, drug_categories,
+  // price_contracts, audit_logs) are all `server_authoritative: True` on
+  // the backend (_CRR_TABLE_CONFIG) — the server unconditionally rejects
+  // any client push touching them (sales has its own command-based push
+  // path; the catalog tables are pull-only). A device that ever had local
+  // rows for one of these (e.g. locally-seeded demo data predating the
+  // pull-only convention) keeps regenerating crsql_changes for them
+  // forever. Because pushCrr() only advances the cursor and marks rows
+  // synced when the *whole* batch succeeds, even one such permanently-
+  // rejected row blocks every other table in the same batch — including
+  // genuinely pushable customers/prescriptions — from ever completing.
+  // Excluding these tables here, the same way `sales` already is, stops
+  // the local device from ever re-selecting a change it can't win.
   return db.select<CrrChangeRow[]>(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
-     WHERE site_id = ? AND db_version > ? AND "table" <> 'sales'
+     WHERE site_id = ? AND db_version > ?
+       AND "table" NOT IN ('sales', 'drugs', 'drug_categories', 'price_contracts', 'audit_logs')
        AND NOT EXISTS (
          SELECT 1 FROM suppressed_crr_changes suppressed
          WHERE suppressed.table_name = crsql_changes."table"

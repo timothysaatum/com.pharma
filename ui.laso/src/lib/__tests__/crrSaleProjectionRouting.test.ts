@@ -15,11 +15,33 @@ describe("offline sale CRR projection routing", () => {
 
     expect(vi.mocked(execute).mock.calls[0][0]).toContain("CREATE TABLE IF NOT EXISTS suppressed_crr_changes");
     const [sql, values] = vi.mocked(select).mock.calls[0];
-    expect(sql).toContain(`"table" <> 'sales'`);
+    expect(sql).toContain(`"table" NOT IN (`);
+    expect(sql).toContain(`'sales'`);
     expect(sql).toContain("NOT EXISTS");
     expect(sql).toContain("suppressed_crr_changes");
     expect(sql).toContain("suppressed.db_version = crsql_changes.db_version");
     expect(values).toEqual(["site-1", 41]);
+  });
+
+  it("also excludes the server-authoritative catalog tables, not just sales", async () => {
+    // Regression coverage for a real bug: the backend rejects any client
+    // push touching drugs/drug_categories/price_contracts/audit_logs
+    // (_CRR_TABLE_CONFIG marks them server_authoritative — pull-only from
+    // the client's perspective). A device with legacy local rows for one
+    // of these (e.g. locally-seeded demo data) regenerates a change for it
+    // forever. Because pushCrr() only advances the cursor and marks rows
+    // synced when the whole batch succeeds, one such permanently-rejected
+    // row blocked every other table in the same batch — including
+    // genuinely pushable customers/prescriptions — from ever completing.
+    const execute: Database["execute"] = vi.fn(async () => ({ rowsAffected: 0 }));
+    const select = vi.fn(async (_query: string, _values?: unknown[]) => [] as unknown) as unknown as Database["select"];
+
+    await getCrrPushChangesFromDb({ execute, select }, "site-1", 0);
+
+    const [sql] = vi.mocked(select).mock.calls[0];
+    for (const table of ["drugs", "drug_categories", "price_contracts", "audit_logs"]) {
+      expect(sql).toContain(`'${table}'`);
+    }
   });
 
   it("orders by db_version before seq, not seq alone", async () => {
