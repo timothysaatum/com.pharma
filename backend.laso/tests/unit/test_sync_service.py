@@ -200,6 +200,24 @@ def test_shadow_row_values_are_coerced_for_asyncpg():
     assert isinstance(coerced["updated_at"], datetime)
 
 
+def test_shadow_row_coerces_empty_string_date_and_datetime_to_null():
+    # Regression coverage for a real bug: a client-populated but unset
+    # nullable Date/DateTime column (e.g. a prescription's last_refill_date
+    # or verified_at) can arrive here as "" rather than None. The old code
+    # only guarded against None and called date.fromisoformat("")/
+    # datetime.fromisoformat("") unconditionally, raising
+    # `ValueError: Invalid isoformat string: ''` and permanently failing
+    # both the live CRR push and the periodic reconciliation loop for that
+    # row on every retry.
+    coerced = ShadowDB._coerce_pg_types("prescriptions", {
+        "last_refill_date": "",
+        "verified_at": "",
+    })
+
+    assert coerced["last_refill_date"] is None
+    assert coerced["verified_at"] is None
+
+
 def test_shadow_pg_row_replaces_client_queue_state_for_raw_insert():
     prepared = ShadowDB._prepare_pg_row("branch_inventory", {
         "id": str(uuid.uuid4()),

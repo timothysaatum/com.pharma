@@ -1517,11 +1517,13 @@ class ShadowDB:
             column_type = column.type
 
             if isinstance(column_type, DateTime) and isinstance(value, str):
-                coerced[column.name] = datetime.fromisoformat(
-                    value.replace("Z", "+00:00")
+                coerced[column.name] = (
+                    datetime.fromisoformat(value.replace("Z", "+00:00"))
+                    if value
+                    else None
                 )
             elif isinstance(column_type, Date) and isinstance(value, str):
-                coerced[column.name] = date.fromisoformat(value[:10])
+                coerced[column.name] = date.fromisoformat(value[:10]) if value else None
             elif isinstance(column_type, Boolean) and not isinstance(value, bool):
                 if isinstance(value, str):
                     coerced[column.name] = value.strip().lower() in {
