@@ -223,6 +223,16 @@ _CRR_VALIDATORS["prescriptions"] = _validate_prescription
 _CRR_VALIDATORS["purchase_orders"] = _validate_purchase_order
 
 
+# Merge strategies (see shadow_db.py's _CRR_TABLE_CONFIG["strategy"]) that
+# call delete_crr_row to retire a losing duplicate's shadow row as part of
+# NORMAL, successful operation. Only these strategies make "this pk is
+# tombstoned" a safe signal for "already handled, nothing to upsert" —
+# keep_both_renumber (prescriptions, purchase_orders, sales) never deletes
+# on collision, so a tombstone there can only come from
+# restore_rejected_row's validation-rejection path and must keep failing.
+_STRATEGIES_WITH_LEGITIMATE_TOMBSTONES = {"sum_and_merge", "lww_with_external_dedup"}
+
+
 # ── Main service ──────────────────────────────────────────────────────
 
 class CrrSyncService:
@@ -373,14 +383,23 @@ class CrrSyncService:
                     table, group_changes[0].pk
                 )
                 if resolved_row_id is None:
-                    if await shadow.pk_is_tombstoned(table, group_changes[0].pk):
-                        # Already deleted/retired (e.g. sum_and_merge or the
-                        # customer-merge strategy folded this row into a
-                        # winner and tombstoned it, or it's a genuine client
-                        # delete). Nothing to upsert — report success so this
-                        # pk stops being treated as a permanent, unrecoverable
-                        # error on every retry. See pk_is_tombstoned's
-                        # docstring for why this is common, not exceptional.
+                    # A tombstoned pk is ambiguous — it can mean either
+                    # "already legitimately retired" or "rejected by
+                    # validation, with nothing to restore" (restore_rejected_row
+                    # below deletes a brand-new row's shadow copy on its very
+                    # first rejection, leaving an identical tombstone). Only
+                    # sum_and_merge/lww_with_external_dedup ever retire a row
+                    # as part of normal, successful operation — a
+                    # keep_both_renumber table (prescriptions, purchase_orders)
+                    # NEVER deletes on collision, so a tombstone there can only
+                    # be a prior rejection, and must keep failing, not be
+                    # silently reported as success. See pk_is_tombstoned's
+                    # docstring for the general mechanism.
+                    strategy = (cfg or {}).get("strategy")
+                    if (
+                        strategy in _STRATEGIES_WITH_LEGITIMATE_TOMBSTONES
+                        and await shadow.pk_is_tombstoned(table, group_changes[0].pk)
+                    ):
                         results.append(CrrPushResult(
                             table=table,
                             row_id=pk_str,

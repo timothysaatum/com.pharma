@@ -2865,3 +2865,76 @@ class TestCrrPushCustomerPrescriptionDependency:
             "resending an already-tombstoned pk must be a no-op success, "
             f"not a permanent error: {failures}"
         )
+
+    async def test_prescription_rejected_by_validator_is_not_reported_as_success_on_retry(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """A brand-new prescription that fails validation (here: its
+        customer_id doesn't resolve in this organization -- e.g. the
+        customer was never synced, or was later merged away as a losing
+        duplicate) never had ANY prior Postgres state. handle_crr_push's
+        `if error:` branch calls `shadow.restore_rejected_row(table, row_id,
+        None)`, which deletes the shadow row with nothing to restore --
+        this leaves the exact same shadow tombstone state that a legitimate
+        sum_and_merge/customer-merge retirement leaves. Unlike that case,
+        this row's data was NEVER accepted anywhere. Because prescriptions
+        use the `keep_both_renumber` strategy, which never calls
+        `delete_crr_row` as part of normal operation, a tombstone found on
+        a prescriptions/purchase_orders pk can only mean "rejected", never
+        "safely retired" -- pk_is_tombstoned must not be trusted for these
+        tables, or a resend of a permanently-invalid row would be silently
+        reported as a success and the client would mark it synced despite
+        it never having reached Postgres.
+        """
+        org, branch, _user, _drugs, _existing_customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+        prescription_id = str(uuid.uuid4())
+        nonexistent_customer_id = str(uuid.uuid4())
+
+        rows = _real_client_crsql_changes({
+            "prescriptions": (
+                _CRR_TABLE_CONFIG["prescriptions"]["ddl"],
+                """INSERT INTO prescriptions
+                   (id, organization_id, branch_id, prescription_number, customer_id,
+                    prescriber_name, prescriber_license, issue_date, expiry_date,
+                    medications, refills_allowed, refills_remaining, status,
+                    sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, ?, 'OFFLINE-RX-ORPHAN', ?, 'Dr. Test', 'LIC-1', ?, ?,
+                           '[]', 0, 0, 'active', 'pending', 1, ?, ?)""",
+                (
+                    prescription_id, str(org.id), str(branch.id),
+                    nonexistent_customer_id, now, now, now, now,
+                ),
+            ),
+        })
+        assert rows, "expected real crsql_changes rows from the fake client db"
+
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        first = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+        first_failures = [r for r in first.results if not r.success]
+        assert first_failures, "expected the orphaned customer_id to be rejected"
+        assert "Customer" in first_failures[0].error
+        assert await db.get(Prescription, uuid.UUID(prescription_id)) is None
+
+        # The client's cursor never advanced (this row failed), so it
+        # resends the exact same unrecoverable create-changes.
+        retry = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+
+        retry_failures = [r for r in retry.results if not r.success]
+        assert retry_failures, (
+            "a prescription permanently rejected by validation must keep "
+            "failing on retry, not silently flip to success -- the client "
+            "would mark it synced despite it never reaching Postgres"
+        )
+        assert await db.get(Prescription, uuid.UUID(prescription_id)) is None
