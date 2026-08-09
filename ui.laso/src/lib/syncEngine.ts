@@ -564,16 +564,25 @@ class SyncEngine {
             try {
                 const db = await getDb();
                 const rows = await db.select<{ key: string; value: string }[]>(
-                    "SELECT key, value FROM sync_meta WHERE key IN ($1, $2)",
-                    [CRR_PUSH_DB_VERSION_KEY, LEGACY_CRR_DB_VERSION_KEY]
+                    "SELECT key, value FROM sync_meta WHERE key = $1",
+                    [CRR_PUSH_DB_VERSION_KEY]
                 );
                 const byKey = new Map(rows.map((row) => [row.key, row.value]));
-                const sinceDbVersion = parseInt(
-                    byKey.get(CRR_PUSH_DB_VERSION_KEY)
-                    ?? byKey.get(LEGACY_CRR_DB_VERSION_KEY)
-                    ?? "0",
-                    10,
-                );
+                // Do NOT fall back to LEGACY_CRR_DB_VERSION_KEY here. Under the
+                // pre-split single-cursor code, that key was last written by
+                // pullCrr() with a SERVER-scoped db_version watermark, not a
+                // LOCAL crsql_changes.db_version — pushCrr() wrote it too, but
+                // pull ran after push in the old sync() order, so pull's value
+                // (the larger, server-axis one) always won. On any device
+                // upgrading from that code, comparing local db_versions against
+                // that legacy server-scale number makes `db_version > since`
+                // false for every local row, forever — push silently never
+                // fires again, with no error. A missing push-specific cursor
+                // means "never pushed under the new key": start at 0. Resending
+                // already-accepted local changes is safe — cr-sqlite's merge is
+                // idempotent for identical values, and collision checks exclude
+                // the row's own id.
+                const sinceDbVersion = parseInt(byKey.get(CRR_PUSH_DB_VERSION_KEY) ?? "0", 10);
 
                 const changes = await getCrrPushChanges(sinceDbVersion);
                 const auditEvents = await getPendingCrrRenumberAudits();

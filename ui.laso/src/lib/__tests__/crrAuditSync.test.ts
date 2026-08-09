@@ -272,6 +272,64 @@ describe("CRR migration audit sync", () => {
     );
   });
 
+  it("ignores the legacy shared cursor when no push-specific cursor exists yet", async () => {
+    // Regression coverage for a real bug: on a device that ran the old
+    // pre-split code, `crr_db_version` was last written by pullCrr() with a
+    // SERVER-scoped db_version watermark (pull ran after push in the old
+    // sync() order, so pull's value always won). Falling back to that value
+    // here compares LOCAL crsql_changes.db_version against a server-scale
+    // number, which is almost always larger — `db_version > since` is false
+    // for every local row, forever, and push silently never fires again.
+    // A missing push-specific cursor must mean "start at 0", not "inherit
+    // whatever pull last wrote".
+    const execute = vi.fn().mockResolvedValue({ rowsAffected: 1 });
+    const noop = vi.fn().mockResolvedValue(undefined);
+    const empty = vi.fn().mockResolvedValue([]);
+    const getCrrPushChanges = vi.fn().mockResolvedValue([
+      { table: "customers", pk: "b64:AQID", cid: "first_name", val: "New", col_version: 1, db_version: 5, site_id: "local-site", cl: 1, seq: 1 },
+    ]);
+    const crrPush = vi.fn().mockResolvedValue({
+      results: [{ table: "customers", row_id: "cust-1", success: true }],
+      total_received: 1,
+      total_accepted: 1,
+      total_failed: 0,
+      sync_timestamp: "2026-07-12T00:00:00Z",
+      merged_row_ids: ["cust-1"],
+      accepted_audit_event_ids: [],
+      audit_errors: {},
+    });
+
+    vi.doMock("@/api/sync", () => ({
+      syncApi: { crrPush, crrPull: noop, push: noop, pull: noop },
+    }));
+    vi.doMock("@/lib/localDb", () => ({
+      getDb: async () => ({
+        // No "crr_push_db_version" row — only the huge legacy value that a
+        // pre-split pull left behind.
+        select: async () => [
+          { key: "crr_db_version", value: "999" },
+        ],
+        execute,
+      }),
+      getLastSyncAt: vi.fn(), setLastSyncAt: noop,
+      getPendingQueue: empty, getPendingConflicts: empty, getPendingFailures: empty,
+      resetPendingFailures: noop, dequeue: noop, markQueueError: noop,
+      markQueueConflict: noop, getPendingCount: vi.fn().mockResolvedValue(0),
+      getNextRetryAt: vi.fn().mockResolvedValue(null), requeueConflictForLocalWin: noop,
+      getCrrPushChanges, applyCrrPullChanges: noop, getCrrSiteId: vi.fn(),
+      getPendingCrrRenumberAudits: empty, markCrrRenumberAuditsUploaded: noop,
+      ensureSuppressedCrrChangesSchema: noop,
+      CRR_TABLES: new Set(), SYNC_QUEUE_CHANGED_EVENT: "test:queue",
+    }));
+    vi.doMock("@/api/client", () => ({ isOfflineError: () => false }));
+
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = "branch-1";
+    await (syncEngine as any).pushCrr();
+
+    expect(getCrrPushChanges).toHaveBeenCalledWith(0);
+  });
+
   it("marks pushed prescriptions and customers synced via crsql_pack_columns, not raw pk", async () => {
     // Regression coverage for a real bug: a prior version of this fixup
     // compared `id = String(pk)` directly. `pk` is cr-sqlite's
