@@ -2844,6 +2844,17 @@ export async function getCrrPushChangesFromDb(
   // wedging the push cursor forever (see the bug report this fixes: an
   // offline customer + prescription created moments apart never synced).
   // `db_version` is the true chronological ordering across transactions.
+  // `siteId` comes from getCrrSiteId(), which reads it via `SELECT
+  // crsql_site_id()` — a real BLOB column. The Tauri IPC read path
+  // (db.rs::row_to_json) serializes any BLOB as a "b64:..." STRING, so
+  // `siteId` here is that string, not raw bytes. Binding it directly as a
+  // query parameter sends it to Rust as JSON string -> Value::Text (see
+  // json_to_rusqlite): only the `{"__laso_blob_b64": ...}` object shape
+  // binds as Value::Blob. A TEXT parameter can never equal a real BLOB
+  // `crsql_changes.site_id` value in SQLite, so `WHERE site_id = ?` with
+  // the raw string silently matched zero rows, forever — the push query
+  // returned empty even with a correct db_version cursor. Re-wrap through
+  // blobTransportValue() so it binds as the blob the column actually is.
   return db.select<CrrChangeRow[]>(
     `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
      FROM crsql_changes
@@ -2854,7 +2865,7 @@ export async function getCrrPushChangesFromDb(
            AND suppressed.db_version = crsql_changes.db_version
        )
      ORDER BY db_version, seq`,
-    [siteId, sinceDbVersion]
+    [decodeCrrValue(siteId), sinceDbVersion]
   );
 }
 

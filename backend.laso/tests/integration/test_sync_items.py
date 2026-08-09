@@ -2697,3 +2697,102 @@ class TestCrrPushCustomerPrescriptionDependency:
         prescription = await db.get(Prescription, uuid.UUID(prescription_id))
         assert prescription is not None, "offline-created prescription never reached Postgres"
         assert prescription.customer_id == uuid.UUID(new_customer_id)
+
+    async def test_offline_prescription_with_real_client_schema_reaches_postgres(
+        self, db: AsyncSession, setup_test_data
+    ):
+        """Regression coverage for a real, independent bug found alongside the
+        one above: the real CLIENT-side `prescriptions` table
+        (ui.laso/src/lib/localDb.ts) has a `created_offline_at TEXT` column
+        added by a later migration (`ALTER TABLE prescriptions ADD COLUMN
+        created_offline_at TEXT`) that the server's shadow DB DDL
+        (`_CRR_TABLE_CONFIG["prescriptions"]["ddl"]`) never gained. cr-sqlite
+        tracks every column of a row on INSERT — including untouched/NULL
+        ones — so every real offline-created prescription generates a
+        crsql_changes row referencing `cid='created_offline_at'`, a column
+        the shadow DB's `prescriptions` table doesn't have. Inserting that
+        change into the shadow DB always failed with a generic "SQL logic
+        error", permanently blocking every prescription push regardless of
+        the site_id/db_version cursor fixes.
+
+        The test above reuses the shadow DB's own DDL as a stand-in for the
+        client, which can never catch this — both sides are the same
+        string, so they can never drift. This test hardcodes the real
+        client schema instead, to actually exercise the drift.
+        """
+        org, branch, _user, _drugs, existing_customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+        prescription_id = str(uuid.uuid4())
+
+        real_client_prescriptions_ddl = """
+            CREATE TABLE prescriptions (
+              id                    TEXT PRIMARY KEY NOT NULL,
+              organization_id       TEXT NOT NULL DEFAULT '',
+              branch_id             TEXT NOT NULL DEFAULT '',
+              prescription_number   TEXT NOT NULL DEFAULT '',
+              customer_id           TEXT NOT NULL DEFAULT '',
+              prescriber_name       TEXT NOT NULL DEFAULT '',
+              prescriber_license    TEXT NOT NULL DEFAULT '',
+              prescriber_phone      TEXT,
+              prescriber_address    TEXT,
+              issue_date            TEXT NOT NULL DEFAULT '',
+              expiry_date           TEXT NOT NULL DEFAULT '',
+              medications           TEXT NOT NULL DEFAULT '[]',
+              diagnosis             TEXT,
+              notes                 TEXT,
+              special_instructions  TEXT,
+              refills_allowed       INTEGER NOT NULL DEFAULT 0,
+              refills_remaining     INTEGER NOT NULL DEFAULT 0,
+              last_refill_date      TEXT,
+              status                TEXT NOT NULL DEFAULT 'active',
+              verified_by           TEXT,
+              verified_at           TEXT,
+              created_offline_at    TEXT,
+              sync_status           TEXT NOT NULL DEFAULT 'synced',
+              sync_version          INTEGER NOT NULL DEFAULT 1,
+              synced_at             TEXT,
+              updated_at            TEXT NOT NULL DEFAULT '',
+              created_at            TEXT NOT NULL DEFAULT ''
+            );
+        """
+
+        rows = _real_client_crsql_changes({
+            "prescriptions": (
+                real_client_prescriptions_ddl,
+                """INSERT INTO prescriptions
+                   (id, organization_id, branch_id, prescription_number, customer_id,
+                    prescriber_name, prescriber_license, issue_date, expiry_date,
+                    medications, refills_allowed, refills_remaining, status,
+                    sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, ?, 'OFFLINE-RX-SCHEMA-DRIFT', ?, 'Dr. Test', 'LIC-1', ?, ?,
+                           '[]', 0, 0, 'active', 'pending', 1, ?, ?)""",
+                (
+                    prescription_id, str(org.id), str(branch.id), str(existing_customer.id),
+                    now, now, now, now,
+                ),
+            ),
+        })
+        assert any(r[2] == "created_offline_at" for r in rows), (
+            "expected the real client schema to generate a change for "
+            "created_offline_at — if this fails, the client schema no "
+            "longer has that column and this test is no longer testing "
+            "the drift it was written for"
+        )
+
+        changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in rows
+        ]
+
+        response = await CrrSyncService.handle_crr_push(
+            db, changes, organization_id=org.id, branch_id=branch.id,
+        )
+
+        failures = [r for r in response.results if not r.success]
+        assert not failures, f"expected the prescription to be accepted, got failures: {failures}"
+
+        prescription = await db.get(Prescription, uuid.UUID(prescription_id))
+        assert prescription is not None, "offline-created prescription never reached Postgres"

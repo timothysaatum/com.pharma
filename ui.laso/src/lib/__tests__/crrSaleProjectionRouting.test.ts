@@ -45,4 +45,25 @@ describe("offline sale CRR projection routing", () => {
     expect(sql).toContain("ORDER BY db_version, seq");
     expect(sql).not.toMatch(/ORDER BY seq(?!,)/);
   });
+
+  it("re-wraps a b64-transport site_id into a blob bind parameter, not a text one", async () => {
+    // Regression coverage for a real bug: getCrrSiteId() reads
+    // `crsql_site_id()`, a genuine BLOB column. The Tauri IPC read path
+    // (db.rs::row_to_json) serializes any BLOB as a "b64:..." STRING, so
+    // the siteId this function receives is that string, not raw bytes.
+    // Passing it straight through as a query parameter binds it as
+    // Value::Text on the Rust side (json_to_rusqlite only produces
+    // Value::Blob for the `{"__laso_blob_b64": ...}` object shape) — a
+    // TEXT parameter can never equal a real BLOB crsql_changes.site_id
+    // value, so `WHERE site_id = ?` silently matched zero rows forever,
+    // even with a correct db_version cursor. This is why push never fired
+    // for ANY table, not just customers/prescriptions.
+    const execute: Database["execute"] = vi.fn(async () => ({ rowsAffected: 0 }));
+    const select = vi.fn(async (_query: string, _values?: unknown[]) => [] as unknown) as unknown as Database["select"];
+
+    await getCrrPushChangesFromDb({ execute, select }, "b64:qORLyNegRtumTMCx4pB5Sg==", 0);
+
+    const [, values] = vi.mocked(select).mock.calls[0];
+    expect(values).toEqual([{ __laso_blob_b64: "qORLyNegRtumTMCx4pB5Sg==" }, 0]);
+  });
 });

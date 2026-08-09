@@ -299,6 +299,7 @@ _CRR_TABLE_CONFIG: Dict[str, Dict[str, Any]] = {
                 status                TEXT NOT NULL DEFAULT 'active',
                 verified_by           TEXT,
                 verified_at           TEXT,
+                created_offline_at    TEXT,
                 sync_status           TEXT NOT NULL DEFAULT 'synced',
                 sync_version          INTEGER NOT NULL DEFAULT 1,
                 synced_at             TEXT,
