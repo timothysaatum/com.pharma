@@ -449,8 +449,32 @@ class CrrSyncService:
                 else:
                     # Upsert the merged row into Postgres
                     # (delegates to shadow.upsert_merged_row which handles
-                    # duplicate business-key detection and configurable merge)
-                    await shadow.upsert_merged_row(db, table, merged)
+                    # duplicate business-key detection and configurable merge).
+                    #
+                    # Isolated in its own savepoint, matching the "savepoint
+                    # per record" convention already used by the sibling
+                    # legacy push path (SyncService.push in sync_service.py)
+                    # and elsewhere in this codebase (sales_service.
+                    # process_sale, drug_service.bulk_update_drugs). Without
+                    # it, a genuine Postgres-level error from this call —
+                    # e.g. a CHECK violation from _handle_sum_and_merge
+                    # merging a corrupted local quantity/reserved_quantity
+                    # pair (the shadow SQLite schema has no CHECK
+                    # constraints, so a bad value isn't caught until it
+                    # hits Postgres), or a UniqueViolationError from
+                    # _handle_keep_both_renumber's TOCTOU window on the
+                    # business-key unique index (two concurrent pushes can
+                    # compute the same disambiguated suffix; the INSERT's
+                    # ON CONFLICT target is (id) only, so it doesn't guard
+                    # against that constraint) — would leave this whole
+                    # AsyncSession's transaction aborted for the rest of
+                    # this batch: every subsequent group's db.execute()
+                    # would then fail too (masking the real cause), and the
+                    # single db.commit() at the end of this function would
+                    # silently discard every row that DID succeed earlier
+                    # in the same batch.
+                    async with db.begin_nested():
+                        await shadow.upsert_merged_row(db, table, merged)
                     merged_ids.append(row_id)
                     results.append(CrrPushResult(
                         table=table,

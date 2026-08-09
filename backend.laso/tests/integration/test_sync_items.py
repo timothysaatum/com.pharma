@@ -2,6 +2,7 @@
 Integration tests for syncing Sale and SaleItem records.
 """
 
+import os
 import pytest
 import sqlite3
 import uuid
@@ -2938,3 +2939,116 @@ class TestCrrPushCustomerPrescriptionDependency:
             "would mark it synced despite it never reaching Postgres"
         )
         assert await db.get(Prescription, uuid.UUID(prescription_id)) is None
+
+
+@pytest.mark.asyncio
+class TestCrrPushTransactionIsolation:
+    """Regression coverage for a real, confirmed risk: `_handle_sum_and_merge`
+    and `_handle_keep_both_renumber` (shadow_db.py) do raw Postgres writes
+    with no per-group savepoint isolation inside handle_crr_push's loop.
+    A genuine Postgres-level error from one group leaves the whole
+    AsyncSession's transaction aborted: every subsequent group's
+    db.execute() fails too, and the single db.commit() at the end of
+    handle_crr_push silently discards every row that DID succeed earlier
+    in the same batch. This only reproduces against a real Postgres backend
+    -- SQLite does not poison the whole transaction on a failed statement
+    the same way, so these tests require TEST_DATABASE_URL to point at a
+    real Postgres database and skip otherwise.
+    """
+
+    async def test_one_bad_merge_does_not_poison_the_rest_of_the_push_batch(
+        self, db: AsyncSession, setup_test_data
+    ):
+        if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+            pytest.skip("requires a real Postgres backend (set TEST_DATABASE_URL)")
+
+        org, branch, _user, drugs, _existing_customer = setup_test_data
+        earlier = "2026-01-01T00:00:00+00:00"
+        later = "2026-01-02T00:00:00+00:00"
+
+        # Seed an existing, valid branch_inventory row -- the "winner"
+        # _handle_sum_and_merge will find and merge the next push into.
+        winner_id = str(uuid.uuid4())
+        winner_rows = _real_client_crsql_changes({
+            "branch_inventory": (
+                _CRR_TABLE_CONFIG["branch_inventory"]["ddl"],
+                """INSERT INTO branch_inventory
+                   (id, branch_id, drug_id, quantity, reserved_quantity, selling_price, updated_at, created_at)
+                   VALUES (?, ?, ?, 10, 5, 15.0, ?, ?)""",
+                (winner_id, str(branch.id), str(drugs[0].id), earlier, earlier),
+            ),
+        })
+        winner_changes = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in winner_rows
+        ]
+        seed = await CrrSyncService.handle_crr_push(
+            db, winner_changes, organization_id=org.id, branch_id=branch.id,
+        )
+        assert not [r for r in seed.results if not r.success], seed.results
+
+        # A "loser" row for the SAME (branch_id, drug_id) business key, with
+        # quantity/reserved_quantity individually valid (so it passes
+        # _validate_branch_inventory's own sanity check -- and mathematically,
+        # summing two individually-valid reserved<=quantity pairs can never
+        # itself violate that inequality, so that specific column can't be
+        # used to reach Postgres's CHECK). selling_price is NOT validated by
+        # _validate_branch_inventory at all, and it isn't a summed column --
+        # _handle_sum_and_merge's LWW-wins logic carries the loser's negative
+        # value straight through to the raw UPDATE (this row is newer, so it
+        # wins), tripping Postgres's real CHECK(selling_price >= 0).
+        loser_id = str(uuid.uuid4())
+        loser_rows = _real_client_crsql_changes({
+            "branch_inventory": (
+                _CRR_TABLE_CONFIG["branch_inventory"]["ddl"],
+                """INSERT INTO branch_inventory
+                   (id, branch_id, drug_id, quantity, reserved_quantity, selling_price, updated_at, created_at)
+                   VALUES (?, ?, ?, 1, 1, -5.0, ?, ?)""",
+                (loser_id, str(branch.id), str(drugs[0].id), later, later),
+            ),
+        })
+
+        # An unrelated, entirely valid customer in the SAME batch, grouped
+        # and processed AFTER the corrupted merge (group iteration order
+        # follows first-seen order in the combined `changes` list).
+        valid_customer_id = str(uuid.uuid4())
+        valid_rows = _real_client_crsql_changes({
+            "customers": (
+                _CRR_TABLE_CONFIG["customers"]["ddl"],
+                """INSERT INTO customers
+                   (id, organization_id, customer_type, first_name, last_name, phone,
+                    is_active, is_deleted, sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, 'walk_in', ?, ?, ?, 1, 0, 'pending', 1, ?, ?)""",
+                (valid_customer_id, str(org.id), "Isolated", "Success", "0559911234", later, later),
+            ),
+        })
+
+        combined = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in (loser_rows + valid_rows)
+        ]
+
+        response = await CrrSyncService.handle_crr_push(
+            db, combined, organization_id=org.id, branch_id=branch.id,
+        )
+
+        loser_result = next(r for r in response.results if r.table == "branch_inventory")
+        customer_result = next(r for r in response.results if r.table == "customers")
+
+        assert loser_result.success is False, (
+            "the corrupted merge must be rejected, not silently accepted"
+        )
+        assert customer_result.success is True, (
+            "an unrelated valid row in the same batch must not become "
+            f"collateral damage from the corrupted row's Postgres error: {response.results}"
+        )
+        assert await db.get(Customer, uuid.UUID(valid_customer_id)) is not None, (
+            "the valid customer must actually be persisted, not silently "
+            "discarded by a poisoned transaction's failed final commit"
+        )

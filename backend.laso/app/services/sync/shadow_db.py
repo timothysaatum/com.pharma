@@ -1976,11 +1976,36 @@ class ShadowDB:
         updated = 0
         for row in rows:
             row_id = row.get("id")
-            if row_id:
-                merged = await self.get_merged_row(table, row_id)
-                if merged is not None:
+            if not row_id:
+                continue
+            merged = await self.get_merged_row(table, row_id)
+            if merged is None:
+                continue
+            try:
+                # Isolated in its own savepoint, matching the "savepoint
+                # per record" convention used elsewhere in this codebase
+                # (see the identical fix and rationale on the CRR push
+                # path, handle_crr_push in crr_sync_service.py). Without
+                # it, a genuine Postgres-level error upserting one bad row
+                # (e.g. a stale/corrupted shadow value that trips a
+                # Postgres CHECK constraint the shadow SQLite schema
+                # doesn't itself enforce) leaves this whole AsyncSession's
+                # transaction aborted — not just for the rest of this
+                # table's rows, but for every OTHER table reconciled in
+                # the same cycle too, since main.py's
+                # _reconcile_all_tables reuses one shared session across
+                # the entire for-table loop. Previously, an error here had
+                # no local handling at all and propagated out of this
+                # function, aborting reconciliation for every remaining
+                # table until the next periodic cycle.
+                async with db.begin_nested():
                     await self.upsert_merged_row(db, table, merged)
-                    updated += 1
+                updated += 1
+            except Exception as exc:
+                logger.warning(
+                    "CRR reconcile: failed to upsert %s row=%s: %s",
+                    table, row_id, exc,
+                )
         return checked, updated
 
 
