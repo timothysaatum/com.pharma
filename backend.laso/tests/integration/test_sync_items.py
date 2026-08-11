@@ -29,7 +29,8 @@ from app.schemas.sync_schemas import PushRequest, PushRecord, PullRequest, CrrPu
 from app.schemas import sync_error_codes
 from app.services.sync.sync_service import SyncService
 from app.services.sync.crr_sync_service import CrrSyncService
-from app.services.sync.shadow_db import _CRR_TABLE_CONFIG, _resolve_extension_path, get_shadow_db
+from app.services.sync.shadow_db import _CRR_TABLE_CONFIG, _resolve_extension_path, get_shadow_db, ShadowDB
+from unittest.mock import patch
 
 
 @pytest.mark.asyncio
@@ -3215,3 +3216,99 @@ class TestCrrPushPermanentlyRejectedTombstone:
             f"crsql_changes rows to stop resending: {second_result}"
         )
         assert await db.get(Prescription, uuid.UUID(prescription_id)) is None
+
+
+@pytest.mark.asyncio
+class TestCrrPushRawChangeConstraintViolation:
+    """Regression coverage for a real, confirmed production issue: 3
+    `__crr_probe_`-prefixed branch_inventory rows (stale artifacts from an
+    old, since-replaced version of the client's hasCrrChangeTracking() that
+    briefly inserted-then-rolled-back throwaway probe rows into real CRR
+    tables) fail every push cycle with `sqlite3.IntegrityError: constraint
+    failed` inside insert_crr_changes itself -- BEFORE resolve_row_id is
+    ever reachable, a different and earlier failure point than the
+    tombstoned-pk case covered by TestCrrPushPermanentlyRejectedTombstone.
+
+    Exactly which cr-sqlite invariant these specific stale rows violate
+    isn't reproducible from first principles (their causal history depends
+    on the exact old buggy client build that produced them, long gone) --
+    but the general property that matters IS provable without knowing that:
+    sqlite3.IntegrityError is deterministic. Resending byte-identical
+    crsql_changes rows to the same schema will violate the exact same
+    constraint every single time, so it's exactly as permanent and
+    non-retryable as a tombstoned keep_both_renumber pk, just caught one
+    step earlier in the pipeline. This test forces that exact exception at
+    that exact call site (rather than trying to reverse-engineer the old
+    client bug) to verify handle_crr_push's handling of it: classified
+    PERMANENTLY_REJECTED with a usable pk_b64, and — critically — isolated,
+    so it doesn't poison an unrelated valid row in the same push batch.
+    """
+
+    async def test_constraint_violation_on_raw_insert_is_permanently_rejected_and_isolated(
+        self, db: AsyncSession, setup_test_data
+    ):
+        if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
+            pytest.skip("requires a real Postgres backend (set TEST_DATABASE_URL)")
+
+        org, branch, _user, drugs, _customer = setup_test_data
+        now = datetime.now(timezone.utc).isoformat()
+
+        probe_id = f"__crr_probe_{uuid.uuid4()}"
+        probe_rows = _real_client_crsql_changes({
+            "branch_inventory": (
+                _CRR_TABLE_CONFIG["branch_inventory"]["ddl"],
+                """INSERT INTO branch_inventory
+                   (id, branch_id, drug_id, quantity, reserved_quantity, selling_price, updated_at, created_at)
+                   VALUES (?, ?, ?, 1, 0, 10.0, ?, ?)""",
+                (probe_id, str(branch.id), str(drugs[0].id), now, now),
+            ),
+        })
+
+        valid_customer_id = str(uuid.uuid4())
+        valid_rows = _real_client_crsql_changes({
+            "customers": (
+                _CRR_TABLE_CONFIG["customers"]["ddl"],
+                """INSERT INTO customers
+                   (id, organization_id, customer_type, first_name, last_name, phone,
+                    is_active, is_deleted, sync_status, sync_version, updated_at, created_at)
+                   VALUES (?, ?, 'walk_in', ?, ?, ?, 1, 0, 'pending', 1, ?, ?)""",
+                (valid_customer_id, str(org.id), "Probe", "Isolated", "0559911235", now, now),
+            ),
+        })
+
+        combined = [
+            CrrPushRecord(
+                table=r[0], pk=r[1], cid=r[2], val=r[3],
+                col_version=r[4], db_version=r[5], site_id=r[6], cl=r[7], seq=r[8],
+            )
+            for r in (probe_rows + valid_rows)
+        ]
+
+        real_insert = ShadowDB.insert_crr_changes
+
+        async def raise_for_probe_row(self, changes):
+            if any(isinstance(row[1], (bytes, bytearray)) and b"__crr_probe_" in row[1] for row in changes):
+                raise sqlite3.IntegrityError("constraint failed")
+            return await real_insert(self, changes)
+
+        with patch.object(ShadowDB, "insert_crr_changes", raise_for_probe_row):
+            response = await CrrSyncService.handle_crr_push(
+                db, combined, organization_id=org.id, branch_id=branch.id,
+            )
+
+        probe_result = next(r for r in response.results if r.table == "branch_inventory")
+        customer_result = next(r for r in response.results if r.table == "customers")
+
+        assert probe_result.success is False
+        assert probe_result.error_code == sync_error_codes.PERMANENTLY_REJECTED, (
+            f"a raw crsql_changes constraint violation must be classified as "
+            f"permanently rejected, not left to fail forever as a generic "
+            f"retryable error: {probe_result}"
+        )
+        assert probe_result.pk_b64 is not None and probe_result.pk_b64.startswith("b64:")
+
+        assert customer_result.success is True, (
+            "an unrelated valid row in the same batch must not become "
+            f"collateral damage from the probe row's constraint failure: {response.results}"
+        )
+        assert await db.get(Customer, uuid.UUID(valid_customer_id)) is not None

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
@@ -395,7 +396,54 @@ class CrrSyncService:
                     ))
 
                 # Insert into shadow crsql_changes (auto-merge via triggers)
-                await shadow.insert_crr_changes(rows_to_insert)
+                try:
+                    await shadow.insert_crr_changes(rows_to_insert)
+                except sqlite3.IntegrityError:
+                    # A constraint violation inserting the RAW change rows
+                    # into crsql_changes itself -- an earlier, different
+                    # failure point than a tombstoned-pk rejection (this
+                    # happens before pk resolution is even reachable).
+                    # Confirmed cause for known real occurrences: stale
+                    # `__crr_probe_`-prefixed rows left behind by an old,
+                    # since-replaced version of the client's
+                    # hasCrrChangeTracking() (localDb.ts), which used to
+                    # insert-then-rollback throwaway probe rows into real
+                    # CRR tables -- current client code no longer does
+                    # this, but affected devices keep resending the exact
+                    # same stale local crsql_changes bytes every cycle.
+                    # Unlike a generic exception, IntegrityError is
+                    # deterministic: SQLite raises it because the given
+                    # bytes themselves violate a constraint, so resending
+                    # the identical bytes will violate the exact same
+                    # constraint every single time -- exactly as
+                    # unrecoverable as a tombstoned keep_both_renumber pk
+                    # (_STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES above),
+                    # just caught one step earlier in the pipeline.
+                    logger.warning(
+                        "CRR push: table=%s row=%s raw change insert "
+                        "violated a shadow DB constraint; classifying as "
+                        "permanently rejected (not retryable)",
+                        table, pk_str,
+                    )
+                    pk_bytes = group_changes[0].pk
+                    results.append(CrrPushResult(
+                        table=table,
+                        row_id=pk_str,
+                        success=False,
+                        error=(
+                            f"{table} row's raw change data violates a "
+                            "database constraint and can never be recorded; "
+                            "it never reached the server. Manual review "
+                            "required."
+                        ),
+                        error_code=sync_error_codes.PERMANENTLY_REJECTED,
+                        pk_b64=(
+                            "b64:" + base64.b64encode(pk_bytes).decode("ascii")
+                            if isinstance(pk_bytes, (bytes, bytearray))
+                            else None
+                        ),
+                    ))
+                    continue
 
                 resolved_row_id = await shadow.resolve_row_id(
                     table, group_changes[0].pk
