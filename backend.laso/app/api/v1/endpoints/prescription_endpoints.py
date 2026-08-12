@@ -848,12 +848,11 @@ async def update_prescription(
         medications_list = [m.model_dump() for m in update_data.medications]
         prescription.medications = medications_list
     
-    # Update refills — only change the allowed limit, never inflate remaining
+    # Update refills — adjust remaining proportionally (used = allowed - remaining stays constant)
     if update_data.refills_allowed is not None:
+        used = prescription.refills_allowed - prescription.refills_remaining
         prescription.refills_allowed = update_data.refills_allowed
-        # Clamp remaining to the new ceiling if it somehow exceeds it
-        if prescription.refills_remaining > prescription.refills_allowed:
-            prescription.refills_remaining = prescription.refills_allowed
+        prescription.refills_remaining = max(0, update_data.refills_allowed - used)
     
     # Update clinical info
     if update_data.diagnosis is not None:

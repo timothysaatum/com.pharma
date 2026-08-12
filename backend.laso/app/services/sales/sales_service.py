@@ -829,7 +829,7 @@ class SalesService:
                 amount_paid=float(amount_paid),
                 change_amount=float(change_amount),
                 payment_reference=getattr(sale_data, "payment_reference", None),
-                split_payment_details=getattr(sale_data, "split_payment_details", None),
+                split_payment_details={k: float(v) for k, v in sale_data.split_payment_details.items()} if getattr(sale_data, "split_payment_details", None) else None,
                 # Insurance
                 insurance_claim_number=getattr(sale_data, "insurance_claim_number", None),
                 insurance_preauth_number=getattr(sale_data, "insurance_preauth_number", None),

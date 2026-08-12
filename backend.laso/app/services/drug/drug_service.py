@@ -389,27 +389,36 @@ class DrugService:
             rolled back to prevent partial writes.
         """
         errors: List[Dict] = []
+        update_data = bulk_update.updates.model_dump(exclude_unset=True)
 
-        async with db.begin_nested():  # savepoint — rolls back everything on error
-            for drug_id in bulk_update.drug_ids:
-                try:
-                    await DrugService.update_drug(
-                        db=db,
-                        drug_id=drug_id,
-                        drug_data=bulk_update.updates,
-                        organization_id=organization_id,
-                        updated_by_user_id=updated_by_user_id,
+        for drug_id in bulk_update.drug_ids:
+            try:
+                drug = await DrugService.get_drug_by_id(db, drug_id, organization_id)
+                if not drug:
+                    errors.append({"drug_id": str(drug_id), "error": "Drug not found."})
+                    continue
+
+                # Recalculate markup if price changed
+                row_update = dict(update_data)
+                new_cost = row_update.get("cost_price", drug.cost_price)
+                new_price = row_update.get("unit_price", drug.unit_price)
+                if new_cost and new_price and new_cost > 0:
+                    row_update["markup_percentage"] = round(
+                        ((new_price - new_cost) / new_cost) * 100, 2
                     )
-                except HTTPException as exc:
-                    errors.append({"drug_id": str(drug_id), "error": exc.detail})
-                    raise  # re-raise to trigger savepoint rollback
-                except Exception as exc:
-                    logger.exception("Unexpected error updating drug %s", drug_id)
-                    errors.append({"drug_id": str(drug_id), "error": str(exc)})
-                    raise
+
+                for field, value in row_update.items():
+                    setattr(drug, field, value)
+
+                drug.updated_at = datetime.now(timezone.utc)
+                drug.mark_as_pending_sync()
+            except Exception as exc:
+                logger.exception("Unexpected error updating drug %s", drug_id)
+                errors.append({"drug_id": str(drug_id), "error": str(exc)})
 
         await db.commit()
-        return len(bulk_update.drug_ids), errors
+        successful = len(bulk_update.drug_ids) - len(errors)
+        return successful, errors
 
     # =========================================================================
     # DELETE

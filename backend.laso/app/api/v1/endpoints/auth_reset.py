@@ -50,13 +50,16 @@ async def forgot_password(
         )
 
     if settings.SMTP_HOST and settings.SMTP_USER and raw_token:
-        from app.utils.notifications import get_notifier
-        notifier = get_notifier()
-        if notifier and notifier.email:
+        from app.utils.notifications import get_notification_manager
+        try:
+            notifier = get_notification_manager()
+        except RuntimeError:
+            notifier = None
+        if notifier and notifier.email_notifier:
             reset_link = f"{settings.FRONTEND_URL or 'http://localhost:5173'}/reset-password?token={raw_token}"
             try:
-                await notifier.email.send_email(
-                    to_email=request_data.email,
+                await notifier.email_notifier.send_email(
+                    to=request_data.email,
                     subject="Password Reset Request",
                     html_body=f"""
                     <p>You requested a password reset.</p>

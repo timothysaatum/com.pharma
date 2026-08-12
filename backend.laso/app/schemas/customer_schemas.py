@@ -59,7 +59,12 @@ class CustomerBase(BaseSchema):
         None,
         description="Customer address: {street, city, state, zip, country}"
     )
-    
+
+    allergies: List[str] = Field(
+        default_factory=list,
+        description="Known drug allergies (checked at point of sale)"
+    )
+
     # ============================================
     # INSURANCE FIELDS
     # ============================================
@@ -207,14 +212,20 @@ class CustomerUpdate(BaseSchema):
     
     # Contract preference updates
     preferred_contract_id: Optional[uuid.UUID] = None
-    
+
+    allergies: Optional[List[str]] = Field(
+        None,
+        description="Known drug allergies"
+    )
+
     # Contact preferences
     preferred_contact_method: Optional[str] = Field(
         None,
         pattern="^(email|phone|sms)$"
     )
     marketing_consent: Optional[bool] = None
-    
+    is_active: Optional[bool] = None
+
     @field_validator('date_of_birth')
     @classmethod
     def validate_dob(cls, v: Optional[date]) -> Optional[date]:

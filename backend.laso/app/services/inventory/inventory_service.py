@@ -1256,6 +1256,10 @@ class InventoryService:
                 drug_id=batch_data.drug_id,
             )
 
+            inventory.quantity = new_quantity
+            inventory.updated_at = datetime.now(timezone.utc)
+            inventory.mark_as_pending_sync()
+
             if inventory.selling_price is None and batch_data.selling_price is not None:
                 inventory.selling_price = batch_data.selling_price
 
@@ -1672,6 +1676,26 @@ class InventoryService:
         or below its ``Drug.reorder_level``.
         """
         from app.models.pharmacy.pharmacy_model import Branch
+        from datetime import date as _date
+
+        # Use batch-sum subquery (same approach as get_branch_inventory) so the
+        # low-stock report always reflects the real dispatchable stock rather than
+        # the potentially-stale BranchInventory.quantity column.
+        valid_batch_sum = (
+            select(func.coalesce(func.sum(DrugBatch.remaining_quantity), 0))
+            .where(
+                DrugBatch.drug_id   == BranchInventory.drug_id,
+                DrugBatch.branch_id == BranchInventory.branch_id,
+                DrugBatch.remaining_quantity > 0,
+                or_(
+                    DrugBatch.expiry_date.is_(None),
+                    DrugBatch.expiry_date >= _date.today(),
+                ),
+            )
+            .scalar_subquery()
+        )
+
+        available_expr = valid_batch_sum - BranchInventory.reserved_quantity
 
         query = (
             select(
@@ -1682,7 +1706,7 @@ class InventoryService:
                 Drug.reorder_quantity,
                 BranchInventory.branch_id,
                 Branch.name.label("branch_name"),
-                BranchInventory.quantity,
+                valid_batch_sum.label("batch_qty"),
                 BranchInventory.reserved_quantity,
             )
             .join(BranchInventory, Drug.id == BranchInventory.drug_id)
@@ -1691,7 +1715,7 @@ class InventoryService:
                 Drug.organization_id == organization_id,
                 Drug.is_active       == True,
                 Drug.is_deleted      == False,
-                (BranchInventory.quantity - BranchInventory.reserved_quantity) <= Drug.reorder_level,
+                available_expr <= Drug.reorder_level,
             )
         )
 
@@ -1708,7 +1732,7 @@ class InventoryService:
         low_stock_count    = 0
 
         for row in rows:
-            available = row.quantity - (row.reserved_quantity or 0)
+            available = int(row.batch_qty or 0) - (row.reserved_quantity or 0)
             item_status = "out_of_stock" if available == 0 else "low_stock"
             if item_status == "out_of_stock":
                 out_of_stock_count += 1

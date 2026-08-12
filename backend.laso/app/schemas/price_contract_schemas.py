@@ -519,7 +519,7 @@ class PriceContractWithDetails(PriceContractResponse):
     
     # Creator details
     created_by_name: str = Field(..., description="Name of user who created")
-    created_by_role: str = Field(..., description="Role of creator")
+    created_by_role: Optional[str] = Field(None, description="Role of creator")
     
     approved_by_name: Optional[str] = Field(None, description="Name of approver")
     last_modified_by_name: Optional[str] = Field(None, description="Name of last modifier")
