@@ -628,23 +628,21 @@ class SyncEngine {
                     }
 
                     if (response.total_failed > 0) {
-                        // PERMANENTLY_REJECTED rows can never succeed by
-                        // resending the identical bytes (the server already
-                        // confirmed this — see syncErrorCodes.ts). Suppress
-                        // them from all future push batches so they stop
-                        // blocking every other row's cursor advancement
-                        // forever; they still count as failures for this
-                        // cycle's own cursor-advance decision below (the
-                        // suppression only takes effect for the *next*
-                        // getCrrPushChanges call), but not for future ones.
-                        let permanentlyRejected = 0;
+                        // Suppress any failed row that isn't a dependency-timing
+                        // issue. DEPENDENCY_NOT_SYNCED rows should keep retrying
+                        // (the blocker will eventually be accepted). Every other
+                        // failure — including the explicit PERMANENTLY_REJECTED
+                        // code and any unclassified server rejection — can never
+                        // succeed by resending the same bytes, so suppressing them
+                        // lets the cursor advance past them on the next cycle.
+                        let suppressedCount = 0;
                         for (const result of response.results) {
                             if (
                                 !result.success &&
-                                result.error_code === SYNC_ERROR_PERMANENTLY_REJECTED &&
+                                result.error_code !== SYNC_ERROR_DEPENDENCY_NOT_SYNCED &&
                                 result.pk_b64
                             ) {
-                                permanentlyRejected++;
+                                suppressedCount++;
                                 try {
                                     await suppressPermanentlyRejectedCrrRow(
                                         db, result.table, result.pk_b64,
@@ -652,18 +650,17 @@ class SyncEngine {
                                 } catch (err) {
                                     console.warn(
                                         "[SyncEngine] CRR push: failed to suppress " +
-                                        "permanently-rejected row, will keep retrying it",
+                                        "stuck row, will keep retrying it",
                                         result.table, err,
                                     );
                                 }
                             }
                         }
-                        if (permanentlyRejected > 0) {
+                        if (suppressedCount > 0) {
                             console.warn(
-                                "[SyncEngine] CRR push: %d row(s) permanently rejected " +
-                                "by the server and suppressed from future pushes; " +
-                                "needs manual review",
-                                permanentlyRejected,
+                                "[SyncEngine] CRR push: %d row(s) suppressed from " +
+                                "future pushes (server rejected, needs manual review)",
+                                suppressedCount,
                             );
                         }
                         hadFailures = true;
