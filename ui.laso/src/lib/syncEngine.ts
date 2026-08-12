@@ -41,7 +41,7 @@ import {
     isOfflineError,
 } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
-import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED, SYNC_ERROR_PERMANENTLY_REJECTED } from "@/lib/syncErrorCodes";
+import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED } from "@/lib/syncErrorCodes";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import type {
     PullRequest,
