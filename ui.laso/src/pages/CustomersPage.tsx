@@ -478,6 +478,36 @@ export default function CustomersPage() {
                                     )}
                                 </div>
 
+                                {/* Allergies */}
+                                {detailCustomer.allergies?.length > 0 && (
+                                    <div className="rounded-xl bg-red-50 border border-red-200 p-3">
+                                        <p className="text-xs font-semibold text-red-700 mb-2 flex items-center gap-1">
+                                            <AlertTriangle className="w-3.5 h-3.5" />Allergies
+                                        </p>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {detailCustomer.allergies.map((a) => (
+                                                <span key={a} className="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-800">
+                                                    {a}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* Chronic conditions */}
+                                {detailCustomer.chronic_conditions?.length > 0 && (
+                                    <div className="rounded-xl bg-orange-50 border border-orange-100 p-3">
+                                        <p className="text-xs font-semibold text-orange-700 mb-2">Chronic Conditions</p>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {detailCustomer.chronic_conditions.map((c) => (
+                                                <span key={c} className="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-800">
+                                                    {c}
+                                                </span>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
+
                                 {/* Insurance */}
                                 {detailCustomer.insurance_provider_id && (
                                     <div className="rounded-xl bg-blue-50 border border-blue-100 p-3">
