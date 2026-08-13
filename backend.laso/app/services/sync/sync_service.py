@@ -1804,11 +1804,6 @@ class SyncService:
 
         if prescription_required_drug_ids and not safe_data.get("prescription_id"):
             if original_prescription_id is not None:
-                # The sale had a prescription_id when created offline, but the
-                # prescription hasn't arrived on the server yet.  Return a
-                # retryable error so the sync engine backs off and tries again
-                # after the prescription (which has a lower queue id and was
-                # pushed first in the same batch) has been committed.
                 logger.warning(
                     "Sync: Sale %s references offline-created prescription %s which "
                     "has not yet synced; deferring sale sync.",

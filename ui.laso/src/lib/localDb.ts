@@ -211,6 +211,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 21) await migrate_v21(db);
       if (user_version < 22) await migrate_v22(db);
       if (user_version < 23) await migrate_v23(db);
+      if (user_version < 24) await migrate_v24(db);
       await ensureSuppressedCrrChangesSchema(db);
       await ensureCrrAuditUploadSchema(db);
       await ensureCustomerMergeDirectiveSchema(db);
@@ -2447,7 +2448,8 @@ export async function markQueueError(
   tableName: string,
   recordId: string,
   error: string,
-  skipIncrement = false
+  skipIncrement = false,
+  forceAttempts?: number,
 ): Promise<number> {
   const db = await getDb();
   const currentRows = await db.select<{ attempts: number }[]>(
@@ -2459,7 +2461,17 @@ export async function markQueueError(
     Date.now() + new RetryBackoff().getDelay(currentAttempts)
   ).toISOString();
 
-  if (skipIncrement) {
+  if (forceAttempts !== undefined) {
+    await db.execute(
+      `UPDATE sync_queue
+       SET attempts = $1,
+           last_attempt_at = $2,
+           next_attempt_at = $3,
+           error = $4
+       WHERE table_name = $5 AND record_id = $6`,
+      [forceAttempts, new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
+    );
+  } else if (skipIncrement) {
     await db.execute(
       `UPDATE sync_queue
        SET last_attempt_at = $1,
@@ -3295,4 +3307,201 @@ export async function cacheSales(items: Sale[]): Promise<void> {
       ]
     );
   }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION V24 — event_outbox (Phase 2 event-sourced sync spine)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Stores locally-authored events waiting to be pushed to the server. The
+// hash chain (hash_prev / hash_self) is computed in eventEnvelope.ts before
+// appendToOutbox() is called. `status` tracks push progress:
+//   pending            → not yet pushed
+//   accepted           → server confirmed, projector ran
+//   accepted_deferred  → server accepted but deps still unresolved
+//   rejected_permanent → server will never accept; requires operator action
+//   failed             → transient error; will be retried next cycle
+//
+// event_pull_seq in sync_meta tracks the highest event_log.seq successfully
+// pulled from the server and applied locally.
+
+async function migrate_v24(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS event_outbox (
+      event_id          TEXT NOT NULL PRIMARY KEY,
+      aggregate_type    TEXT NOT NULL,
+      event_type        TEXT NOT NULL,
+      aggregate_id      TEXT NOT NULL,
+      org_id            TEXT NOT NULL,
+      branch_id         TEXT NOT NULL,
+      authored_by       TEXT NOT NULL,
+      authored_at       TEXT NOT NULL,
+      schema_version    INTEGER NOT NULL DEFAULT 1,
+      payload           TEXT NOT NULL,
+      dependencies      TEXT NOT NULL DEFAULT '[]',
+      hash_prev         TEXT NOT NULL,
+      hash_self         TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'pending',
+      attempts          INTEGER NOT NULL DEFAULT 0,
+      error_code        TEXT,
+      error_message     TEXT,
+      created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS ix_event_outbox_status ON event_outbox (status, created_at)"
+  );
+  await db.execute("PRAGMA user_version = 24");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT OUTBOX HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface OutboxEvent {
+  event_id: string;
+  aggregate_type: string;
+  event_type: string;
+  aggregate_id: string;
+  org_id: string;
+  branch_id: string;
+  authored_by: string;
+  authored_at: string;
+  schema_version: number;
+  payload: Record<string, unknown>;
+  dependencies: string[];
+  hash_prev: string;
+  hash_self: string;
+  status: string;
+  attempts: number;
+  error_code: string | null;
+  error_message: string | null;
+}
+
+/** Return the hash_self of the last event written to the outbox, or GENESIS_HASH. */
+export async function getOutboxTailHash(): Promise<string> {
+  const db = await getDb();
+  const rows = await db.select<{ hash_self: string }[]>(
+    "SELECT hash_self FROM event_outbox ORDER BY created_at DESC, event_id DESC LIMIT 1"
+  );
+  return rows?.[0]?.hash_self ?? "0".repeat(64);
+}
+
+/** Append a fully-formed event envelope to the outbox. */
+export async function appendToOutbox(event: OutboxEvent): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `INSERT INTO event_outbox
+      (event_id, aggregate_type, event_type, aggregate_id,
+       org_id, branch_id, authored_by, authored_at, schema_version,
+       payload, dependencies, hash_prev, hash_self, status)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'pending')
+     ON CONFLICT(event_id) DO NOTHING`,
+    [
+      event.event_id,
+      event.aggregate_type,
+      event.event_type,
+      event.aggregate_id,
+      event.org_id,
+      event.branch_id,
+      event.authored_by,
+      event.authored_at,
+      event.schema_version,
+      JSON.stringify(event.payload),
+      JSON.stringify(event.dependencies),
+      event.hash_prev,
+      event.hash_self,
+    ]
+  );
+}
+
+/** Return up to `limit` events that need to be pushed (ordered oldest-first). */
+export async function getPendingOutboxEvents(limit = 500): Promise<OutboxEvent[]> {
+  const db = await getDb();
+  const rows = await db.select<Array<Record<string, unknown>>>(
+    `SELECT event_id, aggregate_type, event_type, aggregate_id,
+            org_id, branch_id, authored_by, authored_at, schema_version,
+            payload, dependencies, hash_prev, hash_self,
+            status, attempts, error_code, error_message
+       FROM event_outbox
+      WHERE status IN ('pending', 'failed', 'accepted_deferred')
+      ORDER BY created_at ASC, event_id ASC
+      LIMIT $1`,
+    [limit]
+  );
+  return rows.map((r) => ({
+    event_id: r.event_id as string,
+    aggregate_type: r.aggregate_type as string,
+    event_type: r.event_type as string,
+    aggregate_id: r.aggregate_id as string,
+    org_id: r.org_id as string,
+    branch_id: r.branch_id as string,
+    authored_by: r.authored_by as string,
+    authored_at: r.authored_at as string,
+    schema_version: r.schema_version as number,
+    payload: JSON.parse(r.payload as string),
+    dependencies: JSON.parse(r.dependencies as string),
+    hash_prev: r.hash_prev as string,
+    hash_self: r.hash_self as string,
+    status: r.status as string,
+    attempts: r.attempts as number,
+    error_code: (r.error_code ?? null) as string | null,
+    error_message: (r.error_message ?? null) as string | null,
+  }));
+}
+
+/** Update the push result for an outbox event. */
+export async function markOutboxResult(
+  eventId: string,
+  status: string,
+  error?: { code: string; message: string },
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `UPDATE event_outbox
+        SET status = $1,
+            attempts = attempts + 1,
+            error_code = $2,
+            error_message = $3
+      WHERE event_id = $4`,
+    [status, error?.code ?? null, error?.message ?? null, eventId]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EVENT PULL CURSOR
+// ─────────────────────────────────────────────────────────────────────────────
+
+const EVENT_PULL_SEQ_KEY = "event_pull_seq";
+
+/** Last event_log.seq successfully pulled and applied from the server. */
+export async function getEventPullSeq(): Promise<number> {
+  const db = await getDb();
+  const rows = await db.select<{ value: string }[]>(
+    "SELECT value FROM sync_meta WHERE key = $1",
+    [EVENT_PULL_SEQ_KEY]
+  );
+  return rows?.[0]?.value ? Number(rows[0].value) : 0;
+}
+
+export async function setEventPullSeq(seq: number): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+    [EVENT_PULL_SEQ_KEY, String(seq)]
+  );
+}
+
+/**
+ * Returns true when the given event_id is present in the local outbox,
+ * meaning this client authored the event and already applied it locally.
+ * Used by pullEvents() to skip re-applying own events.
+ */
+export async function isLocallyAuthored(eventId: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ event_id: string }[]>(
+    "SELECT event_id FROM event_outbox WHERE event_id = $1 LIMIT 1",
+    [eventId]
+  );
+  return rows.length > 0;
 }

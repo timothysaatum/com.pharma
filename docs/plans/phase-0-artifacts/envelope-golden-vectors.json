@@ -1,0 +1,85 @@
+{
+  "$comment": "Auto-emitted by backend.laso/tests/unit/test_event_envelope_golden_vectors.py. Do not hand-edit \u2014 run the test to regenerate.",
+  "vectors": [
+    {
+      "name": "customer_created",
+      "input": {
+        "event_id": "01HNXCVBNM1234567890ABCDEF",
+        "aggregate_id": "22222222-2222-2222-2222-222222222222",
+        "aggregate_type": "customer",
+        "event_type": "customer_created",
+        "schema_version": 1,
+        "payload": {
+          "organization_id": "11111111-1111-1111-1111-111111111111",
+          "customer_type": "registered",
+          "first_name": "Ada",
+          "last_name": "Lovelace",
+          "phone": "0501234567",
+          "email": "ada@example.com",
+          "loyalty_points": 0,
+          "loyalty_tier": "bronze"
+        },
+        "dependencies": [],
+        "authored_at": "2026-01-15T12:34:56.789Z",
+        "authored_by": "33333333-3333-3333-3333-333333333333",
+        "branch_id": "44444444-4444-4444-4444-444444444444",
+        "org_id": "11111111-1111-1111-1111-111111111111",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_hash_self": "640af4fd5e2b1bf7ab90c74eabbbd9c89cdd6911482ae0990e9cd46a85e2e16d"
+    },
+    {
+      "name": "customer_updated_with_dep",
+      "input": {
+        "event_id": "01HNXCVBNM1234567890ABCDEG",
+        "aggregate_id": "22222222-2222-2222-2222-222222222222",
+        "aggregate_type": "customer",
+        "event_type": "customer_updated",
+        "schema_version": 1,
+        "payload": {
+          "first_name": "Augusta",
+          "allergies": [
+            "penicillin"
+          ]
+        },
+        "dependencies": [
+          "01HNXCVBNM1234567890ABCDEF"
+        ],
+        "authored_at": "2026-01-15T12:34:56.789Z",
+        "authored_by": "33333333-3333-3333-3333-333333333333",
+        "branch_id": "44444444-4444-4444-4444-444444444444",
+        "org_id": "11111111-1111-1111-1111-111111111111",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_hash_self": "b28917c321bfe21c3037094a72d2620e6b0aa272d4ae3e5edc3eed85c0500e6b"
+    },
+    {
+      "name": "unicode_payload",
+      "input": {
+        "event_id": "01HNXCVBNM1234567890ABCDEH",
+        "aggregate_id": "22222222-2222-2222-2222-222222222222",
+        "aggregate_type": "customer",
+        "event_type": "customer_created",
+        "schema_version": 1,
+        "payload": {
+          "organization_id": "11111111-1111-1111-1111-111111111111",
+          "customer_type": "registered",
+          "first_name": "Kofi",
+          "last_name": "Amankwah",
+          "address": {
+            "city": "Kumasi",
+            "country": "Ghana"
+          },
+          "notes": "caf\u00e9 \u2014 Ghanaian Cedi \u20b5"
+        },
+        "dependencies": [],
+        "authored_at": "2026-01-15T12:34:56.789Z",
+        "authored_by": "33333333-3333-3333-3333-333333333333",
+        "branch_id": "44444444-4444-4444-4444-444444444444",
+        "org_id": "11111111-1111-1111-1111-111111111111",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "expected_hash_self": "e6389ff0db6069e59063ab859cbd0a04068b3997a71f7a1d3eb40fb6c6d1fb4b"
+    }
+  ]
+}

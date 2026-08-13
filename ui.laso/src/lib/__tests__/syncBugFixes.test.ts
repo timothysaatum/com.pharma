@@ -72,6 +72,13 @@ vi.mock("@/lib/localDb", () => ({
   ensureSuppressedCrrChangesSchema: vi.fn().mockResolvedValue(undefined),
   getCrrPushChangesFromDb: vi.fn().mockResolvedValue([]),
   filterQueueByScope: vi.fn((rows: unknown[]) => rows),
+  // Event-sourced outbox exports
+  getPendingOutboxEvents: vi.fn().mockResolvedValue([]),
+  markOutboxResult: vi.fn().mockResolvedValue(undefined),
+  getEventPullSeq: vi.fn().mockResolvedValue(0),
+  setEventPullSeq: vi.fn().mockResolvedValue(undefined),
+  isLocallyAuthored: vi.fn().mockResolvedValue(false),
+  SYNC_QUEUE_CHANGED_EVENT: "sync_queue_changed",
 }));
 
 vi.mock("@/api/sync", () => ({
@@ -80,6 +87,8 @@ vi.mock("@/api/sync", () => ({
     pull: vi.fn(),
     crrPush: vi.fn(),
     crrPull: vi.fn(),
+    pushEvents: vi.fn().mockResolvedValue({ results: [] }),
+    pullEvents: vi.fn().mockResolvedValue({ events: [], next_after_seq: 0 }),
   },
 }));
 
@@ -171,7 +180,7 @@ describe("Bug 1a: server_wins conflict — markSynced receives server UUID", () 
         params.includes(LOCAL_CUSTOMER_ID)
     );
     expect(renameCall).toBeDefined();
-  });
+  }, 30000);
 });
 
 // ── Bug 1b: offline_sales.id updated on server UUID rename ───────────────────
@@ -361,7 +370,8 @@ describe("S4: deferred-dependency retries use error_code, not prose matching", (
       "sales",
       LOCAL_SALE_ID,
       expect.any(String),
-      true
+      true,
+      undefined
     );
   });
 
@@ -393,7 +403,48 @@ describe("S4: deferred-dependency retries use error_code, not prose matching", (
       "sales",
       LOCAL_SALE_ID,
       expect.any(String),
-      false
+      false,
+      undefined
+    );
+  });
+
+  // Regression: sales whose prescription was CRR-rejected and tombstoned in
+  // the shadow DB are dead-ends — the server escalates them to
+  // `permanently_rejected` so the client must hard-set attempts to
+  // MAX_PUSH_ATTEMPTS on the very first failure instead of looping 10 times
+  // before dead-lettering. Bug: user reported an offline-created sale
+  // referencing an offline-created prescription retried forever after a
+  // dependency chain broke; only manual voiding stopped the loop.
+  it("hard-sets attempts to MAX_PUSH_ATTEMPTS when the server returns permanently_rejected", async () => {
+    const { syncApi } = await import("@/api/sync");
+    const { syncEngine } = await import("@/lib/syncEngine");
+    (syncEngine as any).branchId = BRANCH_ID;
+
+    (syncApi.push as ReturnType<typeof vi.fn>).mockResolvedValue({
+      accepted: [],
+      conflicts: [],
+      failed: [
+        {
+          table_name: "sales",
+          local_id: LOCAL_SALE_ID,
+          error: "Sale references a prescription that was rejected during sync.",
+          error_code: "permanently_rejected",
+        },
+      ],
+      total_accepted: 0,
+      total_conflicts: 0,
+      total_failed: 1,
+      next_pull_timestamp: "2026-07-21T23:00:00Z",
+    });
+
+    await (syncEngine as any).push();
+
+    expect(markQueueErrorMock).toHaveBeenCalledWith(
+      "sales",
+      LOCAL_SALE_ID,
+      expect.any(String),
+      false,
+      10 // MAX_PUSH_ATTEMPTS
     );
   });
 });

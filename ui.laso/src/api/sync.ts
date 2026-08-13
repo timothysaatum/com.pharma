@@ -14,6 +14,11 @@ import type {
     CrrPushRequest, CrrPushResponse,
     VoidFailedSaleRequest, VoidFailedSaleResponse,
 } from "@/types";
+import type {
+    EventPushRequest,
+    EventPushResponse,
+    EventPullResponse,
+} from "@/lib/eventEnvelope";
 
 export interface SyncStatusResponse {
     server_time: string;
@@ -63,4 +68,12 @@ export const syncApi = {
      */
     voidFailedSale: (req: VoidFailedSaleRequest): Promise<VoidFailedSaleResponse> =>
         post<VoidFailedSaleResponse>("/sync/void-failed-sale", req),
+
+    /** POST /sync/events — push a batch of client-authored event envelopes */
+    pushEvents: (req: EventPushRequest): Promise<EventPushResponse> =>
+        post<EventPushResponse>("/sync/events", req),
+
+    /** GET /sync/events?after_seq=N&limit=N — pull events since a seq cursor */
+    pullEvents: (afterSeq: number, limit = 200): Promise<EventPullResponse> =>
+        get<EventPullResponse>(`/sync/events?after_seq=${afterSeq}&limit=${limit}`),
 };

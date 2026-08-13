@@ -34,14 +34,21 @@ import {
     suppressPermanentlyRejectedCrrRow,
     getPermanentlyRejectedCrrRows,
     SYNC_QUEUE_CHANGED_EVENT,
+    getPendingOutboxEvents, markOutboxResult,
+    getEventPullSeq, setEventPullSeq,
+    isLocallyAuthored,
 } from "@/lib/localDb";
+import { applyEventLocally } from "@/lib/localProjectors";
 import {
     BACKEND_CONNECTIVITY_EVENT,
     isBackendReachable,
     isOfflineError,
 } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
-import { SYNC_ERROR_DEPENDENCY_NOT_SYNCED } from "@/lib/syncErrorCodes";
+import {
+    SYNC_ERROR_DEPENDENCY_NOT_SYNCED,
+    SYNC_ERROR_PERMANENTLY_REJECTED,
+} from "@/lib/syncErrorCodes";
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 import type {
     PullRequest,
@@ -278,14 +285,18 @@ class SyncEngine {
         this.setStatus("syncing");
 
         try {
-            // CRR push first: prescriptions, branch_inventory, etc. must
-            // land on the server before the legacy sync_queue push sends any
-            // sale that references them (e.g. prescription_id FK).
+            // Push event-sourced outbox events first so the server's log
+            // is up-to-date before CRR changes arrive that depend on them.
+            const eventPushResult = await this.pushEvents();
+            // CRR push: prescriptions, branch_inventory, etc. must land on
+            // the server before the legacy sync_queue push sends any sale
+            // that references them (e.g. prescription_id FK).
             const crrPushResult = await this.pushCrr();
-            // Repair a missing queue envelope before the push. This covers an
-            // app restart without delaying recovery until a second sync cycle.
+            // Repair a missing queue envelope before the push.
             await this.reconcileOfflineSales();
             const pushResult = await this.push();
+            // Pull new server events and apply local projectors.
+            await this.pullEvents();
             await this.pullCrr();
             if (LEGACY_SYNC_TABLES.length > 0) {
                 await this.pull(pushResult.nextPullTimestamp ?? undefined);
@@ -304,6 +315,7 @@ class SyncEngine {
             this.setStatus(
                 pushResult.hadFailures
                     || crrPushResult?.hadFailures
+                    || eventPushResult?.hadFailures
                     || activeFailures.length > 0
                     ? "error"
                     : "idle"
@@ -341,6 +353,124 @@ class SyncEngine {
         await resetPendingFailures(this.queueScope());
         await this.loadPersistedQueueState();
         await this.sync();
+    }
+
+    // ── EVENT-SOURCED PUSH ───────────────────────────────────────────
+
+    private async pushEvents(): Promise<{ hadFailures: boolean }> {
+        if (!this.branchId || !this.organizationId) return { hadFailures: false };
+
+        const pending = await getPendingOutboxEvents(500);
+        if (pending.length === 0) return { hadFailures: false };
+
+        let hadFailures = false;
+
+        // Send in batches of MAX_PUSH_BATCH (500).
+        for (let offset = 0; offset < pending.length; offset += 500) {
+            const batch = pending.slice(offset, offset + 500);
+            let response;
+            try {
+                response = await syncApi.pushEvents({
+                    branch_id: this.branchId,
+                    client_clock: new Date().toISOString(),
+                    events: batch.map((ev) => ({
+                        event_id: ev.event_id,
+                        aggregate_id: ev.aggregate_id,
+                        aggregate_type: ev.aggregate_type as import("@/lib/eventEnvelope").AggregateType,
+                        event_type: ev.event_type,
+                        schema_version: ev.schema_version,
+                        payload: ev.payload,
+                        dependencies: ev.dependencies,
+                        authored_at: ev.authored_at,
+                        authored_by: ev.authored_by,
+                        branch_id: ev.branch_id,
+                        org_id: ev.org_id,
+                        hash_self: ev.hash_self,
+                        hash_prev: ev.hash_prev,
+                    })),
+                });
+            } catch (err) {
+                // Network error — mark all as failed for next-cycle retry.
+                for (const ev of batch) {
+                    await markOutboxResult(ev.event_id, "failed", {
+                        code: "network_error",
+                        message: err instanceof Error ? err.message : String(err),
+                    });
+                }
+                hadFailures = true;
+                break;
+            }
+
+            for (const result of response.results) {
+                switch (result.status) {
+                    case "accepted":
+                        await markOutboxResult(result.event_id, "accepted");
+                        break;
+                    case "accepted_deferred":
+                        await markOutboxResult(result.event_id, "accepted_deferred");
+                        break;
+                    case "rejected_permanent":
+                        await markOutboxResult(result.event_id, "rejected_permanent", {
+                            code: result.error_code ?? "rejected_permanent",
+                            message: result.error_message ?? "",
+                        });
+                        hadFailures = true;
+                        break;
+                    case "rejected_transient":
+                        await markOutboxResult(result.event_id, "failed", {
+                            code: result.error_code ?? "rejected_transient",
+                            message: result.error_message ?? "",
+                        });
+                        hadFailures = true;
+                        break;
+                }
+            }
+        }
+
+        return { hadFailures };
+    }
+
+    // ── EVENT-SOURCED PULL ───────────────────────────────────────────
+
+    private async pullEvents(): Promise<void> {
+        if (!this.branchId) return;
+
+        let afterSeq = await getEventPullSeq();
+
+        // Page through server events. Cap at 50 pages per cycle to bound
+        // the time spent here on a fresh install catching up.
+        for (let page = 0; page < 50; page++) {
+            const response = await syncApi.pullEvents(afterSeq);
+
+            for (const envelope of response.events) {
+                // Skip events we authored — we already applied them locally
+                // when the mutation was made. Re-applying would double-count
+                // inventory deltas, duplicate sales rows, etc.
+                let authored = false;
+                try {
+                    authored = await isLocallyAuthored(envelope.event_id);
+                } catch {
+                    // DB error during authorship check — treat as foreign and apply.
+                }
+                if (authored) continue;
+                try {
+                    await applyEventLocally(envelope);
+                } catch (err) {
+                    console.warn(
+                        `[SyncEngine] localProjector failed for event ${envelope.event_id} (${envelope.event_type}):`,
+                        err
+                    );
+                    // Continue — one bad event doesn't stall the pull cursor.
+                }
+            }
+
+            if (response.events.length > 0) {
+                afterSeq = response.next_after_seq;
+                await setEventPullSeq(afterSeq);
+            }
+
+            if (!response.has_more) break;
+        }
     }
 
     // ── PUSH ─────────────────────────────────────────────────────────
@@ -445,13 +575,25 @@ class SyncEngine {
             }
 
             // Failed → increment attempt counter; items exceeding MAX_PUSH_ATTEMPTS
-            // are dead-lettered (excluded by getPendingQueue's attempts < MAX_PUSH_ATTEMPTS)
+            // are dead-lettered (excluded by getPendingQueue's attempts < MAX_PUSH_ATTEMPTS).
+            // PERMANENTLY_REJECTED skips the ramp — the server has told us this exact
+            // payload can never succeed (e.g. a sale whose prescription's CRR push was
+            // rejected and tombstoned in the shadow DB — no future retry will find it),
+            // so retrying 9 more times before surfacing the failure to the user just
+            // delays the resolution the user has to do anyway.
             let deadLettered = 0;
             for (const item of response.failed) {
                 hadFailures = true;
                 const error = item.error?.trim() || "Server rejected the record without an error message.";
                 const isDeferredDependency = item.error_code === SYNC_ERROR_DEPENDENCY_NOT_SYNCED;
-                const attempts = await markQueueError(item.table_name, item.local_id, error, isDeferredDependency);
+                const isPermanentlyRejected = item.error_code === SYNC_ERROR_PERMANENTLY_REJECTED;
+                const attempts = await markQueueError(
+                    item.table_name,
+                    item.local_id,
+                    error,
+                    isDeferredDependency,
+                    isPermanentlyRejected ? MAX_PUSH_ATTEMPTS : undefined,
+                );
                 if (attempts >= MAX_PUSH_ATTEMPTS) {
                     deadLettered++;
                 }

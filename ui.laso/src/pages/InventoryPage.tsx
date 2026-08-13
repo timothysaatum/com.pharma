@@ -295,12 +295,14 @@ const ADJUSTMENT_OPTIONS: {
 function AdjustStockPanel({
     item,
     branchId,
+    organizationId,
     adjustedBy,
     onSuccess,
     onClose,
 }: {
     item: BranchInventoryWithDetails;
     branchId: string;
+    organizationId: string;
     adjustedBy: string;
     onSuccess: () => void;
     onClose: () => void;
@@ -339,11 +341,12 @@ function AdjustStockPanel({
             await inventoryApi.adjust(payload);
             onSuccess();
         } catch (err) {
-            if (isOfflineError(err)) {
+            if (isOfflineError(err) && organizationId) {
                 await writeLocal.stockAdjustment({
                     ...payload,
                     id: crypto.randomUUID(),
                     adjusted_by: adjustedBy,
+                    organization_id: organizationId,
                 });
                 onSuccess();
             } else {
@@ -1771,7 +1774,7 @@ export default function InventoryPage() {
                             <BatchViewerPanel item={panelItem} branchId={activeBranchId} onClose={closePanel} />
                         )}
                         {sidePanel === "adjust" && (
-                            <AdjustStockPanel item={panelItem} branchId={activeBranchId} adjustedBy={user?.id ?? ""} onSuccess={handlePanelSuccess} onClose={closePanel} />
+                            <AdjustStockPanel item={panelItem} branchId={activeBranchId} organizationId={user?.organization_id ?? ""} adjustedBy={user?.id ?? ""} onSuccess={handlePanelSuccess} onClose={closePanel} />
                         )}
                         {sidePanel === "transfer" && (
                             <TransferStockPanel item={panelItem} fromBranchId={activeBranchId} onSuccess={handlePanelSuccess} onClose={closePanel} />

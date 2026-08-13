@@ -1,6 +1,6 @@
 # 0003: Server-Side CRDT Merge Architecture
 
-**Status:** Accepted
+**Status:** Superseded by [0006](0006-event-sourced-sync-spine.md) (2026-08-12)
 **Date:** 2026-07-10
 
 ## Context

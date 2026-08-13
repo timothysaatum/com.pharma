@@ -221,7 +221,7 @@ interface CustomerFormProps {
 }
 
 export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProps) {
-    const { user } = useAuthStore();
+    const { user, activeBranchId } = useAuthStore();
     const isEdit = !!customer;
     const [isSubmitting, setIsSubmitting] = useState(false);
     const [apiError, setApiError] = useState<string | null>(null);
@@ -307,7 +307,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
             if (isEdit) {
                 if (!navigator.onLine || !isBackendReachable()) {
                     saved = buildLocalCustomer(customer.id);
-                    await writeLocal.customer(saved, "update");
+                    await writeLocal.customer(saved, "update", activeBranchId ?? undefined);
                     onSuccess(saved);
                     return;
                 }
@@ -328,7 +328,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
             } else {
                 if (!navigator.onLine || !isBackendReachable()) {
                     saved = buildLocalCustomer(crypto.randomUUID());
-                    await writeLocal.customer(saved, "create");
+                    await writeLocal.customer(saved, "create", activeBranchId ?? undefined);
                     onSuccess(saved);
                     return;
                 }
@@ -354,7 +354,7 @@ export function CustomerForm({ customer, onSuccess, onCancel }: CustomerFormProp
             if (isOfflineError(err)) {
                 const id = customer?.id ?? crypto.randomUUID();
                 const saved = buildLocalCustomer(id);
-                await writeLocal.customer(saved, isEdit ? "update" : "create");
+                await writeLocal.customer(saved, isEdit ? "update" : "create", activeBranchId ?? undefined);
                 onSuccess(saved);
             } else {
                 setApiError(parseApiError(err));

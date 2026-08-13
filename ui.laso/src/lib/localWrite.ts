@@ -15,7 +15,9 @@
  * The sync engine picks up sync_queue entries on next online cycle.
  */
 
-import { getDb, enqueue } from "@/lib/localDb";
+import { getDb, enqueue, appendToOutbox, getOutboxTailHash } from "@/lib/localDb";
+import { generateUlid, computeHashSelf, GENESIS_HASH } from "@/lib/eventEnvelope";
+import type { OutboxEvent } from "@/lib/localDb";
 import type {
     Sale, DrugBatch, StockAdjustmentCreate,
     PurchaseOrder, Customer, Prescription, BranchInventory,
@@ -212,6 +214,258 @@ export function buildLocalSalePayload(
     return pickColumns(rawPayload as Record<string, unknown>, SALE_COLUMNS);
 }
 
+// Serializes all outbox read-hash + insert pairs so concurrent mutations
+// can't race to claim the same hash_prev and break the chain.
+let _outboxLock: Promise<void> = Promise.resolve();
+async function appendOutboxEvent(
+    build: (hashPrev: string) => Promise<OutboxEvent>
+): Promise<void> {
+    _outboxLock = _outboxLock.then(async () => {
+        const hashPrev = (await getOutboxTailHash()) ?? GENESIS_HASH;
+        const envelope = await build(hashPrev);
+        await appendToOutbox(envelope);
+    });
+    return _outboxLock;
+}
+
+async function buildSaleCreatedEnvelope(
+    sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
+    items: Sale["items"],
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+
+    const payload: Record<string, unknown> = {
+        organization_id: sale.organization_id,
+        branch_id: sale.branch_id,
+        sale_number: sale.sale_number,
+        customer_id: sale.customer_id ?? null,
+        customer_name: sale.customer_name ?? null,
+        cashier_id: sale.cashier_id,
+        pharmacist_id: (sale as Record<string, unknown>).pharmacist_id ?? null,
+        payment_method: sale.payment_method,
+        payment_status: sale.payment_status,
+        total_amount: Number(sale.total_amount ?? 0),
+        subtotal: Number((sale as Record<string, unknown>).subtotal ?? 0),
+        discount_amount: Number(
+            (sale as Record<string, unknown>).discount_amount
+            ?? (sale as Record<string, unknown>).total_discount_amount
+            ?? 0,
+        ),
+        tax_amount: Number((sale as Record<string, unknown>).tax_amount ?? 0),
+        amount_paid: Number(sale.amount_paid ?? 0),
+        change_amount: Number((sale as Record<string, unknown>).change_amount ?? 0),
+        prescription_id: sale.prescription_id ?? null,
+        items: (items ?? []).map((item) => ({
+            drug_id: item.drug_id,
+            batch_id: item.batch_id ?? null,
+            drug_name: item.drug_name ?? null,
+            quantity: item.quantity,
+            unit_price: item.unit_price,
+            discount_amount: item.discount_amount ?? 0,
+            subtotal: item.subtotal,
+        })),
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: sale.id, aggregate_type: "sale",
+            event_type: "sale_created", schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: sale.cashier_id,
+            branch_id: sale.branch_id, org_id: sale.organization_id,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: sale.id,
+        aggregate_type: "sale",
+        event_type: "sale_created",
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: sale.cashier_id,
+        branch_id: sale.branch_id,
+        org_id: sale.organization_id,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
+async function buildPrescriptionEnvelope(
+    prescription: Omit<Prescription, "sync_status" | "sync_version"> & { id: string },
+    operation: "create" | "update",
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+    const eventType = operation === "create" ? "prescription_created" : "prescription_updated";
+    const authoredBy = prescription.verified_by ?? prescription.organization_id;
+
+    const payload: Record<string, unknown> = {
+        organization_id: prescription.organization_id,
+        branch_id: prescription.branch_id,
+        prescription_number: prescription.prescription_number,
+        customer_id: prescription.customer_id,
+        prescriber_name: prescription.prescriber_name,
+        prescriber_license: prescription.prescriber_license,
+        prescriber_phone: prescription.prescriber_phone ?? null,
+        prescriber_address: prescription.prescriber_address ?? null,
+        issue_date: prescription.issue_date,
+        expiry_date: prescription.expiry_date,
+        medications: prescription.medications ?? [],
+        diagnosis: prescription.diagnosis ?? null,
+        notes: prescription.notes ?? null,
+        special_instructions: prescription.special_instructions ?? null,
+        refills_allowed: prescription.refills_allowed,
+        refills_remaining: prescription.refills_remaining ?? prescription.refills_allowed ?? 0,
+        status: prescription.status ?? "active",
+        verified_by: prescription.verified_by ?? null,
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: prescription.id, aggregate_type: "prescription",
+            event_type: eventType, schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: authoredBy,
+            branch_id: prescription.branch_id, org_id: prescription.organization_id,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: prescription.id,
+        aggregate_type: "prescription",
+        event_type: eventType,
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: authoredBy,
+        branch_id: prescription.branch_id,
+        org_id: prescription.organization_id,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
+async function buildCustomerEnvelope(
+    customer: Omit<Customer, "sync_status" | "sync_version"> & { id: string },
+    branchId: string,
+    now: string,
+    operation: "create" | "update",
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+    const eventType = operation === "create" ? "customer_created" : "customer_updated";
+
+    const payload: Record<string, unknown> = {
+        organization_id: customer.organization_id,
+        customer_type: customer.customer_type,
+        first_name: customer.first_name ?? null,
+        last_name: customer.last_name ?? null,
+        phone: customer.phone ?? null,
+        email: customer.email ?? null,
+        date_of_birth: customer.date_of_birth ?? null,
+        loyalty_points: customer.loyalty_points ?? 0,
+        loyalty_tier: customer.loyalty_tier,
+        insurance_provider_id: customer.insurance_provider_id ?? null,
+        insurance_member_id: customer.insurance_member_id ?? null,
+        allergies: customer.allergies ?? [],
+        chronic_conditions: customer.chronic_conditions ?? [],
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: customer.id, aggregate_type: "customer",
+            event_type: eventType, schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: customer.organization_id,
+            branch_id: branchId, org_id: customer.organization_id,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: customer.id,
+        aggregate_type: "customer",
+        event_type: eventType,
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: customer.organization_id,
+        branch_id: branchId,
+        org_id: customer.organization_id,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
+async function buildStockAdjustedEnvelope(
+    adjustment: StockAdjustmentCreate & { id: string; adjusted_by: string; organization_id: string },
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+
+    const payload: Record<string, unknown> = {
+        branch_id: adjustment.branch_id,
+        drug_id: adjustment.drug_id,
+        adjustment_type: adjustment.adjustment_type,
+        quantity_change: adjustment.quantity_change,
+        reason: adjustment.reason ?? null,
+        transfer_to_branch_id: adjustment.transfer_to_branch_id ?? null,
+        adjusted_by: adjustment.adjusted_by,
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: adjustment.id, aggregate_type: "stock",
+            event_type: "stock_adjusted", schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: adjustment.adjusted_by,
+            branch_id: adjustment.branch_id, org_id: adjustment.organization_id,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: adjustment.id,
+        aggregate_type: "stock",
+        event_type: "stock_adjusted",
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: adjustment.adjusted_by,
+        branch_id: adjustment.branch_id,
+        org_id: adjustment.organization_id,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
 export function nextSyncVersion(
     current: number | undefined,
     operation: "create" | "update"
@@ -271,6 +525,41 @@ async function upsertAndEnqueue<T extends Record<string, unknown>>(
         ...payload,
         ...queueExtras,
     } as Record<string, unknown>);
+}
+
+/** SQLite-only upsert — no sync_queue entry. Use for event-sourced tables. */
+async function upsertLocal<T extends Record<string, unknown>>(
+    table: string,
+    record: T,
+): Promise<void> {
+    const db = await getDb();
+    const now = new Date().toISOString();
+
+    const payload = {
+        ...record,
+        sync_status: "pending",
+        updated_at: now,
+        created_at: record.created_at ?? now,
+    };
+
+    const cols = Object.keys(payload);
+    const vals = cols.map((c) => {
+        const v = payload[c];
+        if (typeof v === "boolean") return v ? 1 : 0;
+        if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
+        return v ?? null;
+    });
+    const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
+    const updates = cols
+        .filter((c) => c !== "id")
+        .map((c) => `${c} = excluded.${c}`)
+        .join(", ");
+
+    await db.execute(
+        `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})
+         ON CONFLICT(id) DO UPDATE SET ${updates}`,
+        vals
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -342,17 +631,11 @@ export const writeLocal = {
         sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string }
     ): Promise<void> => {
         const items = sale.items ?? [];
-        const payload = buildLocalSalePayload(sale, items);
-        await upsertAndEnqueue(
-            "sales",
-            payload as Record<string, unknown>,
-            "create",
-            {
-                items: items ?? [],
-                sync_protocol_version: 2,
-            }
-        );
+        const now = new Date().toISOString();
+        const payload = buildLocalSalePayload(sale, items, now);
+        await upsertLocal("sales", payload as Record<string, unknown>);
 
+        await appendOutboxEvent((hashPrev) => buildSaleCreatedEnvelope(sale, items, now, hashPrev));
         await writeLocal.auditLog({
             organization_id: sale.organization_id,
             action: "create_sale_offline",
@@ -522,23 +805,10 @@ export const writeLocal = {
      * reflects the correct stock without waiting for a sync cycle.
      */
     stockAdjustment: async (
-        adjustment: StockAdjustmentCreate & { id: string; adjusted_by: string }
+        adjustment: StockAdjustmentCreate & { id: string; adjusted_by: string; organization_id: string }
     ): Promise<void> => {
         const now = new Date().toISOString();
-        const payload = {
-            ...adjustment,
-            updated_at: now,
-            created_at: now,
-        };
-
-        // Push-only: write directly to the queue, bypass local table INSERT
-        await enqueue(
-            "stock_adjustments",
-            adjustment.id,
-            "create",
-            1,
-            payload as Record<string, unknown>
-        );
+        await appendOutboxEvent((hashPrev) => buildStockAdjustedEnvelope(adjustment, now, hashPrev));
 
         // Reflect the stock change locally so the POS is immediately accurate
         await writeLocal.inventory(
@@ -679,7 +949,9 @@ export const writeLocal = {
             PRESCRIPTION_COLUMNS
         );
 
-        await upsertAndEnqueue("prescriptions", payload, operation);
+        await upsertLocal("prescriptions", payload);
+
+        await appendOutboxEvent((hashPrev) => buildPrescriptionEnvelope(prescription, operation, now, hashPrev));
     },
 
     /**
@@ -696,7 +968,8 @@ export const writeLocal = {
      */
     customer: async (
         customer: Omit<Customer, "sync_status" | "sync_version"> & { id: string },
-        operation: "create" | "update" = "create"
+        operation: "create" | "update" = "create",
+        branchId?: string,
     ): Promise<void> => {
         const now = new Date().toISOString();
 
@@ -721,7 +994,11 @@ export const writeLocal = {
             CUSTOMER_COLUMNS
         );
 
-        await upsertAndEnqueue("customers", payload, operation);
+        await upsertLocal("customers", payload);
+
+        if (branchId) {
+            await appendOutboxEvent((hashPrev) => buildCustomerEnvelope(customer, branchId, now, operation, hashPrev));
+        }
 
         await writeLocal.auditLog({
             organization_id: customer.organization_id,
