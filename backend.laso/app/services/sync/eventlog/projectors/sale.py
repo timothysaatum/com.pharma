@@ -450,6 +450,8 @@ async def _apply_item(
                                sync_version = sync_version + 1,
                                sync_status = 'synced'
                          WHERE id = :batch_id
+                           AND branch_id = CAST(:branch_id AS UUID)
+                           AND drug_id   = CAST(:drug_id AS UUID)
                            AND remaining_quantity >= :qty
                            AND (
                                  expiry_date IS NULL
@@ -461,6 +463,8 @@ async def _apply_item(
                     """),
                     {
                         "batch_id": alloc_batch_id,
+                        "branch_id": branch_id,
+                        "drug_id": drug_id,
                         "qty": alloc_qty,
                         "now": now,
                         "sold_at": authored_at,
@@ -477,8 +481,10 @@ async def _apply_item(
                             SELECT remaining_quantity, expiry_date
                               FROM drug_batches
                              WHERE id = :batch_id
+                               AND branch_id = CAST(:branch_id AS UUID)
+                               AND drug_id   = CAST(:drug_id AS UUID)
                         """),
-                        {"batch_id": alloc_batch_id},
+                        {"batch_id": alloc_batch_id, "branch_id": branch_id, "drug_id": drug_id},
                     )
                 ).fetchone()
 
@@ -691,11 +697,13 @@ async def _apply_voided(event: EventEnvelope, db: AsyncSession) -> None:
                                sync_version = sync_version + 1,
                                sync_status = 'synced'
                          WHERE id = :batch_id
+                           AND branch_id = CAST(:branch_id AS UUID)
+                           AND drug_id   = CAST(:drug_id AS UUID)
                         RETURNING
                             remaining_quantity - :qty AS qty_before,
                             remaining_quantity        AS qty_after
                     """),
-                    {"batch_id": str(alloc.batch_id), "qty": alloc_qty, "now": now},
+                    {"batch_id": str(alloc.batch_id), "branch_id": branch_id, "drug_id": drug_id, "qty": alloc_qty, "now": now},
                 )
             ).fetchone()
 
