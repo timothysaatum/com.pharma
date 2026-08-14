@@ -21,6 +21,7 @@ from typing import Optional
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import (
@@ -41,8 +42,37 @@ from app.schemas.customer_schemas import (
     DeductLoyaltyPointsRequest,
 )
 from app.utils.pagination import PaginationParams
+from app.services.sync.eventlog.server_emitter import ServerEventEmitter
+from app.schemas.event_envelope import AggregateType
+from app.schemas.customer_schemas import CustomerWithDetails
+from app.services.sync.eventlog.vector_clock import bump as bump_vector
 
 logger = logging.getLogger(__name__)
+
+
+def _customer_payload(c: CustomerWithDetails) -> dict:
+    """Build a customer_created / customer_updated event payload."""
+    return {
+        "organization_id": str(c.organization_id),
+        "customer_type": c.customer_type,
+        "first_name": c.first_name,
+        "last_name": c.last_name,
+        "phone": c.phone,
+        "email": str(c.email) if c.email else None,
+        "date_of_birth": c.date_of_birth.isoformat() if c.date_of_birth else None,
+        "address": c.address,
+        "allergies": list(c.allergies) if c.allergies else [],
+        "insurance_provider_id": str(c.insurance_provider_id) if c.insurance_provider_id else None,
+        "insurance_member_id": c.insurance_member_id,
+        "preferred_contract_id": str(c.preferred_contract_id) if c.preferred_contract_id else None,
+        "preferred_contact_method": c.preferred_contact_method,
+        "marketing_consent": c.marketing_consent,
+        "loyalty_points": c.loyalty_points,
+        "loyalty_tier": c.loyalty_tier,
+        "is_active": c.is_active,
+        "updated_at": c.updated_at.isoformat() if c.updated_at else None,
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+    }
 
 router = APIRouter(prefix="/customers", tags=["Customers"])
 
@@ -87,11 +117,22 @@ async def create_customer(
             detail="Cannot create customer for a different organisation",
         )
 
-    return await CustomerService.create_customer(
+    customer = await CustomerService.create_customer(
         db=db,
         customer_data=customer_data,
         created_by_user_id=current_user.id,
     )
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=customer.organization_id,
+        event_type="customer_created",
+        aggregate_type=AggregateType.CUSTOMER,
+        aggregate_id=customer.id,
+        payload=_customer_payload(customer),
+        authored_by=current_user.id,
+    )
+    await db.commit()
+    return customer
 
 
 # ============================================================================
@@ -307,13 +348,42 @@ async def update_customer(
     - 404: Customer not found
     - 409: Phone or email already in use by another customer
     """
-    return await CustomerService.update_customer(
+    customer = await CustomerService.update_customer(
         db=db,
         customer_id=customer_id,
         organization_id=current_user.organization_id,
         update_data=update_data,
         updated_by_user_id=current_user.id,
     )
+    # Bump the 'server' component of the version_vector so offline-edited
+    # client events that arrive later will be detected as concurrent.
+    new_vector_row = (
+        await db.execute(
+            text(
+                "UPDATE customers"
+                " SET version_vector = version_vector || "
+                "     jsonb_build_object('server',"
+                "         COALESCE((version_vector->>'server')::int, 0) + 1)"
+                " WHERE id = :id"
+                " RETURNING version_vector"
+            ),
+            {"id": str(customer_id)},
+        )
+    ).first()
+    new_vector = dict(new_vector_row.version_vector) if new_vector_row else {}
+    payload = _customer_payload(customer)
+    payload["version_vector"] = new_vector
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=customer.organization_id,
+        event_type="customer_updated",
+        aggregate_type=AggregateType.CUSTOMER,
+        aggregate_id=customer.id,
+        payload=payload,
+        authored_by=current_user.id,
+    )
+    await db.commit()
+    return customer
 
 
 @router.delete(
@@ -342,12 +412,23 @@ async def delete_customer(
     - 404: Customer not found
     - 400: Customer has recent sales — deactivate instead
     """
-    return await CustomerService.delete_customer(
+    result = await CustomerService.delete_customer(
         db=db,
         customer_id=customer_id,
         organization_id=current_user.organization_id,
         deleted_by_user_id=current_user.id,
     )
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=current_user.organization_id,
+        event_type="customer_deleted",
+        aggregate_type=AggregateType.CUSTOMER,
+        aggregate_id=customer_id,
+        payload={"organization_id": str(current_user.organization_id), "is_deleted": True},
+        authored_by=current_user.id,
+    )
+    await db.commit()
+    return result
 
 
 # ============================================================================

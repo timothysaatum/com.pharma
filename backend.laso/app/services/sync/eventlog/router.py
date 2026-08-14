@@ -43,9 +43,10 @@ the input order.
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -86,7 +87,7 @@ class EventRouter:
     async def process_batch(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         envelopes: Sequence[EventEnvelope],
     ) -> List[EventPushResult]:
         """Process a batch of envelopes for a single organization.
@@ -98,6 +99,7 @@ class EventRouter:
         if not envelopes:
             return []
 
+        org_id = str(org_id)
         await AppendService._acquire_org_lock(db, org_id)
         tail_hash, tail_seq = await AppendService._load_log_tail(db, org_id)
 
@@ -149,7 +151,7 @@ class EventRouter:
     async def _process_one(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         envelope: EventEnvelope,
         current_tail_hash: str,
         current_tail_seq: int,
@@ -261,7 +263,7 @@ class EventRouter:
     @staticmethod
     async def _check_dependencies(
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         declared_deps: List[str],
     ) -> List[str]:
         """Return the subset of ``declared_deps`` that are NOT resolved.
@@ -300,7 +302,7 @@ class EventRouter:
     async def _append_and_defer(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         envelope: EventEnvelope,
         current_tail_hash: str,
         current_tail_seq: int,
@@ -409,7 +411,7 @@ class EventRouter:
     async def _drain_pending(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         seed_event_id: str,
     ) -> None:
         """Re-evaluate parked events after ``seed_event_id`` was applied.
@@ -540,7 +542,7 @@ class EventRouter:
     async def _dispatch_pending(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         projector: Projector,
         envelope: EventEnvelope,
         pending_attempts: int = 0,
@@ -682,7 +684,7 @@ class EventRouter:
     async def _quarantine(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         event_id: str,
         aggregate_type: str,
         event_type: str,
@@ -735,7 +737,7 @@ class EventRouter:
 
     @staticmethod
     async def _delete_pending(
-        db: AsyncSession, org_id: uuid.UUID, event_id: str
+        db: AsyncSession, org_id: str, event_id: str
     ) -> None:
         await db.execute(
             text(
@@ -749,7 +751,7 @@ class EventRouter:
 
     @staticmethod
     async def _load_envelope(
-        db: AsyncSession, org_id: uuid.UUID, event_id: str
+        db: AsyncSession, org_id: str, event_id: str
     ) -> EventEnvelope | None:
         row = (
             await db.execute(
@@ -778,7 +780,7 @@ class EventRouter:
                 "aggregate_type": row[4],
                 "event_type": row[5],
                 "schema_version": row[6],
-                "payload": row[7],
+                "payload": _parse_payload(row[7]),
                 "dependencies": list(row[8] or []),
                 "authored_at": row[9],
                 "authored_by": row[10],
@@ -788,3 +790,11 @@ class EventRouter:
                 "received_at": row[14],
             }
         )
+
+
+def _parse_payload(value: object) -> Dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return {}

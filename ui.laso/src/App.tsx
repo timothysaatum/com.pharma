@@ -21,6 +21,7 @@ const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
 const AdminPage = lazy(() => import("@/pages/AdminPage"));
 const AuditLogPage = lazy(() => import("@/pages/AuditLogPage"));
 const ChangePasswordPage = lazy(() => import("@/pages/ChangePasswordPage"));
+const ConflictsPage = lazy(() => import("@/pages/ConflictsPage"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -388,6 +389,15 @@ function AppRoutes() {
               <RequireManager>
                 <AppShell><AdminPage /></AppShell>
               </RequireManager>
+            </RequireAuth>
+          }
+        />
+
+        <Route
+          path="/conflicts"
+          element={
+            <RequireAuth>
+              <AppShell><ConflictsPage /></AppShell>
             </RequireAuth>
           }
         />

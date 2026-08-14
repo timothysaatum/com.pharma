@@ -204,7 +204,6 @@ pub fn run() {
             db::db_select,
             db::db_execute_batch,
             db::db_test_savepoint,
-            db::db_get_crsql_changes,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -3,7 +3,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import {
     ShoppingCart, Users, BarChart2, FileText,
     LogOut, Building2, Menu, X, Activity,
-    Receipt, Settings, UserCog, Cog, ChevronDown, Check, ShieldAlert,
+    Receipt, Settings, UserCog, Cog, ChevronDown, Check, ShieldAlert, GitMerge,
 } from "lucide-react";
 import { useAuthStore } from "@/stores/authStore";
 import packageMetadata from "../../../package.json";
@@ -58,6 +58,12 @@ export const NAV_ITEMS: NavItem[] = [
         to: "/audit-logs",
         icon: Activity,
         label: "Audit Logs",
+        roles: ["admin", "manager", "super_admin"],
+    },
+    {
+        to: "/conflicts",
+        icon: GitMerge,
+        label: "Conflicts",
         roles: ["admin", "manager", "super_admin"],
     },
 ];

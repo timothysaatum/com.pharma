@@ -25,7 +25,6 @@ vi.mock("@/hooks/useSyncStatus", () => ({
         local_data: {},
       },
     ],
-    permanentlyRejected: [],
     syncNow: vi.fn(),
     resolveConflict: vi.fn(),
   }),

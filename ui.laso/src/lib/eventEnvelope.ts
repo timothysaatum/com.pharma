@@ -22,7 +22,9 @@ export type AggregateType =
   | "prescription"
   | "customer"
   | "stock"
-  | "stock_transfer";
+  | "stock_transfer"
+  | "drug"
+  | "drug_category";
 
 export type EventStatus =
   | "accepted"

@@ -36,6 +36,7 @@ Dependencies:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from typing import Any, Dict, Optional
@@ -50,8 +51,19 @@ from app.services.sync.eventlog.projector import (
     ProjectorResult,
     ProjectorStatus,
 )
+from app.services.sync.eventlog.vector_clock import concurrent, dominates, merge
 
 logger = logging.getLogger(__name__)
+
+# Fields captured in local_snapshot for conflict display.
+_SNAPSHOT_COLS = (
+    "first_name", "last_name", "phone", "email", "date_of_birth",
+    "address", "allergies", "chronic_conditions",
+    "loyalty_points", "loyalty_tier",
+    "insurance_provider_id", "insurance_member_id",
+    "preferred_contact_method", "marketing_consent", "is_active",
+    "version_vector", "updated_at",
+)
 
 
 VALID_CUSTOMER_TYPES = {"walk_in", "registered", "insurance", "corporate"}
@@ -256,6 +268,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
     defaults.
     """
     payload = event.payload
+    incoming_vector: Dict[str, int] = payload.get("version_vector") or {}
     params: Dict[str, Any] = {
         "id": str(event.aggregate_id),
         "organization_id": str(payload["organization_id"]),
@@ -286,6 +299,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             payload.get("preferred_contract_id")
         ),
         "medical_data_encrypted": payload.get("medical_data_encrypted", False),
+        "version_vector": json.dumps(incoming_vector),
         "created_at": event.authored_at,
         "updated_at": event.authored_at,
     }
@@ -301,6 +315,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 insurance_provider_id, insurance_member_id,
                 insurance_card_image_url, preferred_contract_id,
                 medical_data_encrypted,
+                version_vector,
                 sync_version, sync_status, is_deleted,
                 created_at, updated_at
             ) VALUES (
@@ -317,6 +332,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 :insurance_card_image_url,
                 CAST(:preferred_contract_id AS UUID),
                 :medical_data_encrypted,
+                CAST(:version_vector AS JSONB),
                 1, 'synced', FALSE,
                 :created_at, :updated_at
             )
@@ -328,11 +344,45 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
 
 
 async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
-    """Patch the customer row with the payload's non-null fields. A
-    missing field means \"don't change\" — matches CustomerUpdate
-    partial-patch semantics.
+    """Patch the customer row with the payload's non-null fields.
+
+    Before applying, compare version vectors:
+      - concurrent → write to unresolved_conflicts, skip apply.
+      - incoming dominated by current (stale) → skip silently.
+      - incoming dominates or no vector info → apply + update vector.
     """
     payload = event.payload
+    incoming_vector: Dict[str, int] = payload.get("version_vector") or {}
+
+    # Read current row for vector comparison + snapshot.
+    snapshot_cols_sql = ", ".join(_SNAPSHOT_COLS)
+    row = (
+        await db.execute(
+            text(
+                f"SELECT {snapshot_cols_sql} FROM customers"
+                " WHERE id = :customer_id AND organization_id = :org_id"
+            ),
+            {"customer_id": str(event.aggregate_id), "org_id": str(event.org_id)},
+        )
+    ).first()
+
+    if row is None:
+        return  # validate() already confirmed existence; defensive guard only.
+
+    current_vector: Dict[str, int] = row.version_vector or {}
+
+    if incoming_vector:
+        if concurrent(current_vector, incoming_vector):
+            local_snapshot = {c: getattr(row, c) for c in _SNAPSHOT_COLS}
+            await _write_conflict(event, db, current_vector, local_snapshot, incoming_vector)
+            return
+
+        if dominates(current_vector, incoming_vector):
+            # Stale event — a newer version of this customer is already committed.
+            return
+
+    # Incoming dominates or no vector info → apply the update.
+    new_vector = merge(current_vector, incoming_vector) if incoming_vector else current_vector
 
     updates: Dict[str, Any] = {}
     for field in UPDATABLE_FIELDS:
@@ -344,9 +394,6 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
         updates[field] = value
 
     if not updates:
-        # No-op update (payload intentionally empty or all fields
-        # explicitly None — nothing to write, updated_at bump alone is
-        # not worth the write).
         return
 
     set_clauses = []
@@ -354,6 +401,7 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
         "customer_id": str(event.aggregate_id),
         "org_id": str(event.org_id),
         "updated_at": event.authored_at,
+        "new_vector": json.dumps(new_vector),
     }
     for field, value in updates.items():
         if field == "address":
@@ -368,6 +416,7 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
         else:
             set_clauses.append(f"{field} = :{field}")
             params[field] = value
+    set_clauses.append("version_vector = CAST(:new_vector AS JSONB)")
     set_clauses.append("updated_at = :updated_at")
 
     sql = f"""
@@ -377,6 +426,46 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
            AND organization_id = :org_id
     """
     await db.execute(text(sql), params)
+
+
+async def _write_conflict(
+    event: EventEnvelope,
+    db: AsyncSession,
+    current_vector: Dict[str, int],
+    local_snapshot: Dict[str, Any],
+    incoming_vector: Dict[str, int],
+) -> None:
+    """Park a concurrent edit in unresolved_conflicts."""
+    await db.execute(
+        text(
+            """
+            INSERT INTO unresolved_conflicts
+                (org_id, aggregate_type, aggregate_id, event_id,
+                 local_vector, local_snapshot, incoming_vector, incoming_payload,
+                 status, created_at)
+            VALUES
+                (CAST(:org_id AS UUID), :aggregate_type, CAST(:aggregate_id AS UUID),
+                 :event_id,
+                 CAST(:local_vector AS JSONB), CAST(:local_snapshot AS JSONB),
+                 CAST(:incoming_vector AS JSONB), CAST(:incoming_payload AS JSONB),
+                 'pending', now())
+            ON CONFLICT DO NOTHING
+            """
+        ),
+        {
+            "org_id": str(event.org_id),
+            "aggregate_type": event.aggregate_type.value,
+            "aggregate_id": str(event.aggregate_id),
+            "event_id": event.event_id,
+            "local_vector": json.dumps(current_vector),
+            "local_snapshot": json.dumps(
+                {k: (str(v) if not isinstance(v, (int, float, bool, type(None))) else v)
+                 for k, v in local_snapshot.items()}
+            ),
+            "incoming_vector": json.dumps(incoming_vector),
+            "incoming_payload": json.dumps(event.payload),
+        },
+    )
 
 
 async def _apply_deleted(event: EventEnvelope, db: AsyncSession) -> None:

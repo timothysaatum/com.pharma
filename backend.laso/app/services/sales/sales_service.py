@@ -45,6 +45,8 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
+from app.services.sync.eventlog.server_emitter import ServerEventEmitter
+from app.schemas.event_envelope import AggregateType
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
     RefundSaleRequest,
@@ -882,6 +884,7 @@ class SalesService:
             # 15. Persist SaleItems — only model-defined fields
             # ------------------------------------------------------------------
             created_items: List[Tuple[SaleItem, SaleItemCreate]] = []
+            batch_changes_for_event: List[Dict[str, Any]] = []
 
             for pricing in item_pricing:
                 item_data: SaleItemCreate = pricing["item"]
@@ -960,6 +963,7 @@ class SalesService:
 
                     take = min(batch.remaining_quantity, qty_to_deduct)
                     previous_batch_qty = batch.remaining_quantity
+                    batch_changes_for_event.append({"batch_id": str(batch.id), "quantity_used": take})
 
                     if primary_batch_id is None:
                         primary_batch_id = batch.id
@@ -1207,6 +1211,40 @@ class SalesService:
             contract.updated_at = datetime.now(timezone.utc)
             contract.mark_as_pending_sync()
 
+            # Snapshot event payload while ORM objects are still in session.
+            _sale_id_for_event = sale.id
+            _event_payload: Dict[str, Any] = {
+                "organization_id": str(user.organization_id),
+                "branch_id": str(sale_data.branch_id),
+                "sale_number": sale_number,
+                "customer_id": str(sale_data.customer_id) if sale_data.customer_id else None,
+                "customer_name": sale_data.customer_name,
+                "cashier_id": str(user.id),
+                "pharmacist_id": str(pharmacist_id) if pharmacist_id else None,
+                "payment_method": sale_data.payment_method,
+                "payment_status": "completed",
+                "total_amount": float(str(total_amount)),
+                "subtotal": float(str(subtotal)),
+                "discount_amount": float(str(total_discount)),
+                "tax_amount": float(str(total_tax)),
+                "amount_paid": float(amount_paid),
+                "change_amount": float(change_amount),
+                "prescription_id": str(sale_data.prescription_id) if sale_data.prescription_id else None,
+                "items": [
+                    {
+                        "drug_id": str(si.drug_id),
+                        "batch_id": str(si.batch_id) if si.batch_id else None,
+                        "drug_name": si.drug_name,
+                        "quantity": si.quantity,
+                        "unit_price": float(si.unit_price),
+                        "discount_amount": float(si.discount_amount or 0),
+                        "subtotal": float(si.subtotal),
+                    }
+                    for si, _ in created_items
+                ],
+                "batch_changes": batch_changes_for_event,
+            }
+
         # ----------------------------------------------------------------------
         # 20. Commit — outside the savepoint context
         # ----------------------------------------------------------------------
@@ -1239,6 +1277,21 @@ class SalesService:
         except Exception:
             logger.exception("Failed to write process_sale audit log for sale %s", sale.id)
             await db.rollback()
+
+        # ----------------------------------------------------------------------
+        # 21.5 Emit sale_created event so other devices can pull it
+        # ----------------------------------------------------------------------
+        await ServerEventEmitter.emit(
+            db=db,
+            org_id=user.organization_id,
+            event_type="sale_created",
+            aggregate_type=AggregateType.SALE,
+            aggregate_id=_sale_id_for_event,
+            payload=_event_payload,
+            authored_by=user.id,
+            branch_id=sale_data.branch_id,
+        )
+        await db.commit()
 
         # ----------------------------------------------------------------------
         # 22. Build and return response

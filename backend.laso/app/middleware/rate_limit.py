@@ -207,6 +207,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         if request.url.path in ("/health", "/docs", "/redoc", "/openapi.json"):
             return await call_next(request)
 
+        if request.method == "OPTIONS":
+            return await call_next(request)
+
         backend = await _get_backend()
         client_ip = _get_client_ip(request)
         window = settings.RATE_LIMIT_WINDOW_SECONDS

@@ -90,7 +90,7 @@ const expiringReport = { items: [], total_items: 0, total_quantity: 0, total_cos
 vi.mock("@/stores/authStore", () => ({
     useAuthStore: () => ({
         activeBranchId: "branch-1",
-        user: { id: "user-1", full_name: "Jane Pharmacist" },
+        user: { id: "user-1", full_name: "Jane Pharmacist", organization_id: "org-abc" },
     }),
 }));
 

@@ -22,9 +22,62 @@ from app.schemas.drugs_schemas import (
     BulkDrugImport
 )
 from app.utils.pagination import Paginator, PaginationParams, PaginatedResponse
+from app.services.sync.eventlog.server_emitter import ServerEventEmitter
+from app.schemas.event_envelope import AggregateType
 
 
 router = APIRouter(prefix="/drugs", tags=["Drugs"])
+
+
+def _drug_payload(drug) -> dict:
+    """Build a drug_created / drug_updated event payload from an ORM Drug."""
+    return {
+        "organization_id": str(drug.organization_id),
+        "name": drug.name,
+        "generic_name": drug.generic_name,
+        "brand_name": drug.brand_name,
+        "sku": drug.sku,
+        "barcode": drug.barcode,
+        "category_id": str(drug.category_id) if drug.category_id else None,
+        "drug_type": drug.drug_type,
+        "dosage_form": drug.dosage_form,
+        "strength": drug.strength,
+        "manufacturer": drug.manufacturer,
+        "supplier": drug.supplier,
+        "requires_prescription": bool(drug.requires_prescription),
+        "controlled_substance_schedule": drug.controlled_substance_schedule,
+        "ndc_code": drug.ndc_code,
+        "unit_price": float(drug.unit_price),
+        "cost_price": float(drug.cost_price) if drug.cost_price is not None else None,
+        "markup_percentage": float(drug.markup_percentage) if drug.markup_percentage is not None else None,
+        "tax_rate": float(drug.tax_rate),
+        "reorder_level": drug.reorder_level,
+        "reorder_quantity": drug.reorder_quantity,
+        "max_stock_level": drug.max_stock_level,
+        "unit_of_measure": drug.unit_of_measure,
+        "description": drug.description,
+        "usage_instructions": drug.usage_instructions,
+        "side_effects": drug.side_effects,
+        "contraindications": drug.contraindications,
+        "storage_conditions": drug.storage_conditions,
+        "is_active": bool(drug.is_active),
+        "updated_at": drug.updated_at.isoformat() if drug.updated_at else None,
+        "created_at": drug.created_at.isoformat() if drug.created_at else None,
+    }
+
+
+def _category_payload(cat) -> dict:
+    """Build a drug_category_created / drug_category_updated event payload."""
+    return {
+        "organization_id": str(cat.organization_id),
+        "name": cat.name,
+        "description": cat.description,
+        "parent_id": str(cat.parent_id) if cat.parent_id else None,
+        "path": cat.path,
+        "level": cat.level,
+        "updated_at": cat.updated_at.isoformat() if cat.updated_at else None,
+        "created_at": cat.created_at.isoformat() if cat.created_at else None,
+    }
 
 
 def _ensure_branch_price_access(current_user: User, branch_id: Optional[uuid.UUID]) -> None:
@@ -89,9 +142,19 @@ async def create_drug(
         drug_data=drug_data,
         created_by_user_id=current_user.id
     )
-    
+
     await db.commit()
     await db.refresh(drug)
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=drug.organization_id,
+        event_type="drug_created",
+        aggregate_type=AggregateType.DRUG,
+        aggregate_id=drug.id,
+        payload=_drug_payload(drug),
+        authored_by=current_user.id,
+    )
+    await db.commit()
     return drug
 
 
@@ -189,6 +252,16 @@ async def create_drug_category(
         )
     
     category = await DrugService.create_category(db=db, category_data=category_data)
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=category.organization_id,
+        event_type="drug_category_created",
+        aggregate_type=AggregateType.DRUG_CATEGORY,
+        aggregate_id=category.id,
+        payload=_category_payload(category),
+        authored_by=current_user.id,
+    )
+    await db.commit()
     return category
 
 
@@ -247,12 +320,23 @@ async def update_drug_category(
     db: AsyncSession = Depends(get_db),
 ):
     """Update a category and its descendant materialized paths."""
-    return await DrugService.update_category(
+    category = await DrugService.update_category(
         db=db,
         category_id=category_id,
         organization_id=current_user.organization_id,
         category_data=category_data,
     )
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=category.organization_id,
+        event_type="drug_category_updated",
+        aggregate_type=AggregateType.DRUG_CATEGORY,
+        aggregate_id=category.id,
+        payload=_category_payload(category),
+        authored_by=current_user.id,
+    )
+    await db.commit()
+    return category
 
 
 @router.delete(
@@ -496,7 +580,17 @@ async def update_drug(
         organization_id=current_user.organization_id,
         updated_by_user_id=current_user.id
     )
-    
+
+    await ServerEventEmitter.emit(
+        db=db,
+        org_id=drug.organization_id,
+        event_type="drug_updated",
+        aggregate_type=AggregateType.DRUG,
+        aggregate_id=drug.id,
+        payload=_drug_payload(drug),
+        authored_by=current_user.id,
+    )
+    await db.commit()
     return drug
 
 

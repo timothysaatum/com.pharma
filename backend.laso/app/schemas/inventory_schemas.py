@@ -94,14 +94,6 @@ class DrugBatchBase(BaseSchema):
         if 'quantity' in info.data and v > info.data['quantity']:
             raise ValueError('Remaining quantity cannot exceed initial quantity')
         return v
-    
-    @field_validator('expiry_date')
-    @classmethod
-    def validate_expiry(cls, v: date) -> date:
-        """Ensure expiry date is in the future"""
-        if v < date.today():
-            raise ValueError('Expiry date must be in the future')
-        return v
 
     @model_validator(mode='after')
     def default_remaining_quantity(self) -> 'DrugBatchBase':
@@ -115,6 +107,13 @@ class DrugBatchCreate(DrugBatchBase):
     """Schema for creating a drug batch"""
     branch_id: uuid.UUID
     drug_id: uuid.UUID
+
+    @field_validator('expiry_date')
+    @classmethod
+    def validate_expiry(cls, v: date) -> date:
+        if v < date.today():
+            raise ValueError('Expiry date must be in the future')
+        return v
     purchase_order_id: Optional[uuid.UUID] = None
 
 

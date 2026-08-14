@@ -132,7 +132,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 23;
+const MAX_KNOWN_SCHEMA_VERSION = 27;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -212,11 +212,9 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 22) await migrate_v22(db);
       if (user_version < 23) await migrate_v23(db);
       if (user_version < 24) await migrate_v24(db);
-      await ensureSuppressedCrrChangesSchema(db);
-      await ensureCrrAuditUploadSchema(db);
-      await ensureCustomerMergeDirectiveSchema(db);
-      await ensureBranchInventorySchema(db);
-      await ensureCrrMeta(db);
+      if (user_version < 25) await migrate_v25(db);
+      if (user_version < 26) await migrate_v26(db);
+      if (user_version < 27) await migrate_v27(db);
       await ensureAuditLogSchema(db);
   } catch (e) {
       const msg = (e && typeof e === "object" && "message" in e)
@@ -1486,6 +1484,12 @@ async function migrate_v22(db: Database): Promise<void> {
             phone                   TEXT,
             email                   TEXT,
             date_of_birth           TEXT,
+            address                 TEXT,
+            allergies               TEXT,
+            chronic_conditions      TEXT,
+            preferred_contact_method TEXT,
+            marketing_consent       INTEGER NOT NULL DEFAULT 0,
+            insurance_card_image_url TEXT,
             loyalty_points          INTEGER NOT NULL DEFAULT 0,
             loyalty_tier            TEXT NOT NULL DEFAULT 'bronze',
             insurance_provider_id   TEXT,
@@ -1500,7 +1504,9 @@ async function migrate_v22(db: Database): Promise<void> {
             created_at              TEXT NOT NULL DEFAULT ''
           )`,
           cols: `id, organization_id, customer_type, first_name, last_name, phone, email,
-            date_of_birth, loyalty_points, loyalty_tier, insurance_provider_id,
+            date_of_birth, address, allergies, chronic_conditions,
+            preferred_contact_method, marketing_consent, insurance_card_image_url,
+            loyalty_points, loyalty_tier, insurance_provider_id,
             insurance_member_id, preferred_contract_id, is_active, is_deleted,
             sync_status, sync_version, synced_at, updated_at, created_at`,
         },
@@ -3080,62 +3086,99 @@ export async function cacheBranchInventoryRows(items: BranchInventoryWithDetails
       raw.requires_prescription === 1 ||
       raw.requires_prescription === "1" ||
       raw.requires_prescription === "true";
-    await db.execute(
-      `INSERT INTO drugs
-        (id, organization_id, name, generic_name, brand_name, sku, barcode,
-         category_id, drug_type, dosage_form, strength, manufacturer, supplier,
-         requires_prescription, controlled_substance_schedule, ndc_code,
-         unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
-         reorder_quantity, max_stock_level, unit_of_measure, description,
-         usage_instructions, side_effects, contraindications, storage_conditions,
-         is_active, is_deleted, sync_status, sync_version, synced_at, updated_at, created_at)
-       VALUES ($1, '', $2, NULL, NULL, $3, NULL,
-         NULL, $4, NULL, NULL, NULL, NULL,
-         $5, NULL, NULL,
-         $6, NULL, NULL, 0, $7,
-         50, NULL, 'unit', NULL,
-         NULL, NULL, NULL, NULL,
-         1, 0, 'synced', 1, NULL, $8, $8)
-       ON CONFLICT(id) DO UPDATE SET
-         name = excluded.name,
-         sku = excluded.sku,
-         drug_type = excluded.drug_type,
-         requires_prescription = excluded.requires_prescription,
-         unit_price = excluded.unit_price,
-         reorder_level = excluded.reorder_level,
-         updated_at = excluded.updated_at`,
-      [
+    try {
+      await db.execute(
+        `INSERT OR IGNORE INTO drugs
+          (id, organization_id, name, generic_name, brand_name, sku, barcode,
+           category_id, drug_type, dosage_form, strength, manufacturer, supplier,
+           requires_prescription, controlled_substance_schedule, ndc_code,
+           unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
+           reorder_quantity, max_stock_level, unit_of_measure, description,
+           usage_instructions, side_effects, contraindications, storage_conditions,
+           is_active, is_deleted, sync_status, sync_version, synced_at, updated_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7,
+           $8, $9, $10, $11, $12, $13,
+           $14, $15, $16,
+           $17, $18, $19, $20, $21,
+           $22, $23, $24, $25,
+           $26, $27, $28, $29,
+           $30, $31, $32, $33, $34, $35, $36)`,
+        [
+          item.drug_id,                // $1  id
+          "",                          // $2  organization_id
+          item.drug_name || item.drug_id, // $3 name
+          null,                        // $4  generic_name
+          null,                        // $5  brand_name
+          item.drug_sku ?? null,       // $6  sku
+          null,                        // $7  barcode
+          null,                        // $8  category_id
+          drugType,                    // $9  drug_type
+          null,                        // $10 dosage_form
+          null,                        // $11 strength
+          null,                        // $12 manufacturer
+          null,                        // $13 supplier
+          requiresPrescription ? 1 : 0, // $14 requires_prescription
+          null,                        // $15 controlled_substance_schedule
+          null,                        // $16 ndc_code
+          item.effective_unit_price ?? item.drug_unit_price ?? item.selling_price ?? 0, // $17 unit_price
+          null,                        // $18 cost_price
+          null,                        // $19 markup_percentage
+          0,                           // $20 tax_rate
+          item.drug_reorder_level ?? 0, // $21 reorder_level
+          50,                          // $22 reorder_quantity
+          null,                        // $23 max_stock_level
+          "unit",                      // $24 unit_of_measure
+          null,                        // $25 description
+          null,                        // $26 usage_instructions
+          null,                        // $27 side_effects
+          null,                        // $28 contraindications
+          null,                        // $29 storage_conditions
+          1,                           // $30 is_active
+          0,                           // $31 is_deleted
+          "synced",                    // $32 sync_status
+          1,                           // $33 sync_version
+          null,                        // $34 synced_at
+          now,                         // $35 updated_at
+          now,                         // $36 created_at
+        ]
+      );
+    } catch (err) {
+      console.error(
+        "[cacheBranchInventoryRows] DRUGS INSERT failed for drug_id=%s:",
         item.drug_id,
-        item.drug_name || item.drug_id,
-        item.drug_sku ?? null,
-        drugType,
-        requiresPrescription ? 1 : 0,
-        item.effective_unit_price ?? item.drug_unit_price ?? item.selling_price ?? 0,
-        item.drug_reorder_level ?? 0,
-        now,
-      ]
-    );
+        typeof err === "object" && err !== null ? JSON.stringify(err) : String(err)
+      );
+      continue;
+    }
 
-    await db.execute(
-      `INSERT OR REPLACE INTO branch_inventory
-        (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
-         sync_status, sync_version, synced_at, updated_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
-      [
-        item.id,
-        item.branch_id,
+    try {
+      await db.execute(
+        `INSERT OR REPLACE INTO branch_inventory
+          (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+           sync_status, sync_version, synced_at, updated_at, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+        [
+          item.id,
+          item.branch_id,
+          item.drug_id,
+          item.quantity ?? 0,
+          item.reserved_quantity ?? 0,
+          item.location ?? null,
+          item.selling_price ?? null,
+          item.sync_status ?? "synced",
+          item.sync_version ?? 1,
+          item.synced_at ?? null,
+          item.updated_at ?? now,
+          item.created_at ?? now,
+        ]
+      );
+    } catch (err) {
+      console.error(
+        "[cacheBranchInventoryRows] BRANCH_INVENTORY INSERT failed for drug_id=%s:",
         item.drug_id,
-        item.quantity,
-        item.reserved_quantity,
-        item.location,
-        item.selling_price,
-        item.sync_status ?? "synced",
-        item.sync_version ?? 1,
-        item.synced_at ?? null,
-        item.updated_at,
-        item.created_at,
-      ]
-    );
+        typeof err === "object" && err !== null ? JSON.stringify(err) : String(err)
+      );
+    }
   }
 }
 
@@ -3504,4 +3547,210 @@ export async function isLocallyAuthored(eventId: string): Promise<boolean> {
     [eventId]
   );
   return rows.length > 0;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v25 — version_vector + pending_conflicts
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function migrate_v25(db: Database): Promise<void> {
+  // version_vector columns for the three reference-data tables.
+  // ALTER TABLE ... ADD COLUMN IF NOT EXISTS is available in SQLite 3.37+.
+  for (const table of ["customers", "drugs", "drug_categories"]) {
+    try {
+      await db.execute(
+        `ALTER TABLE ${table} ADD COLUMN version_vector TEXT NOT NULL DEFAULT '{}'`
+      );
+    } catch {
+      // Column already exists — safe to ignore.
+    }
+  }
+
+  // Local mirror of server-side unresolved_conflicts. Populated during
+  // pullEvents() so pharmacists can see conflicts without an extra API call.
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS pending_conflicts (
+      id              TEXT PRIMARY KEY,
+      org_id          TEXT NOT NULL,
+      aggregate_type  TEXT NOT NULL,
+      aggregate_id    TEXT NOT NULL,
+      event_id        TEXT,
+      local_vector    TEXT NOT NULL DEFAULT '{}',
+      local_snapshot  TEXT NOT NULL DEFAULT '{}',
+      incoming_vector TEXT NOT NULL DEFAULT '{}',
+      incoming_payload TEXT NOT NULL DEFAULT '{}',
+      status          TEXT NOT NULL DEFAULT 'pending',
+      resolved_at     TEXT,
+      created_at      TEXT NOT NULL
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS ix_pending_conflicts_status ON pending_conflicts (status, created_at)"
+  );
+
+  await db.execute("PRAGMA user_version = 25");
+}
+
+async function migrate_v26(db: Database): Promise<void> {
+  // Drop cr-sqlite shadow tables now that CRR has been retired.
+  // These tables only exist on devices where the crsqlite extension was
+  // previously loaded; DROP IF EXISTS makes this safe on fresh installs.
+  for (const t of [
+    "crsql_changes",
+    "crsql_clock",
+    "crsql_pack_columns",
+    "suppressed_crr_changes",
+    "crr_audit_uploads",
+    "customer_merge_directives",
+  ]) {
+    try {
+      await db.execute(`DROP TABLE IF EXISTS ${t}`);
+    } catch {
+      // Ignore — table may not exist or extension may be absent.
+    }
+  }
+  await db.execute("PRAGMA user_version = 26");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v27 — add customer columns required by localProjectors._customerCreated
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function migrate_v27(db: Database): Promise<void> {
+  // These columns were missing from the customers table schema (never added by
+  // any earlier migration) but are referenced by _customerCreated in
+  // localProjectors.ts. Add them idempotently — ALTER TABLE fails if the column
+  // already exists; we catch and ignore that error.
+  const customerCols: Array<[string, string]> = [
+    ["address", "TEXT"],
+    ["allergies", "TEXT"],
+    ["chronic_conditions", "TEXT"],
+    ["preferred_contact_method", "TEXT"],
+    ["marketing_consent", "INTEGER NOT NULL DEFAULT 0"],
+    ["insurance_card_image_url", "TEXT"],
+  ];
+  for (const [col, def] of customerCols) {
+    try {
+      await db.execute(`ALTER TABLE customers ADD COLUMN ${col} ${def}`);
+    } catch {
+      // Column already exists — safe to ignore.
+    }
+  }
+  await db.execute("PRAGMA user_version = 27");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// VERSION VECTOR HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type VectorClock = Record<string, number>;
+
+/** Read the stored version_vector for a row. Returns {} if not found. */
+export async function getVersionVector(
+  table: "customers" | "drugs" | "drug_categories",
+  id: string
+): Promise<VectorClock> {
+  const db = await getDb();
+  const rows = await db.select<{ version_vector: string }[]>(
+    `SELECT version_vector FROM ${table} WHERE id = $1 LIMIT 1`,
+    [id]
+  );
+  if (!rows.length) return {};
+  try {
+    return JSON.parse(rows[0].version_vector) as VectorClock;
+  } catch {
+    return {};
+  }
+}
+
+/** Persist a version_vector for a row after applying a pulled event. */
+export async function setVersionVector(
+  table: "customers" | "drugs" | "drug_categories",
+  id: string,
+  vec: VectorClock
+): Promise<void> {
+  const db = await getDb();
+  await db.execute(
+    `UPDATE ${table} SET version_vector = $1 WHERE id = $2`,
+    [JSON.stringify(vec), id]
+  );
+}
+
+/** Bump own branch component and return the new vector (does NOT persist). */
+export function bumpVector(vec: VectorClock, branchId: string): VectorClock {
+  return { ...vec, [branchId]: (vec[branchId] ?? 0) + 1 };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PENDING CONFLICTS HELPERS
+// ─────────────────────────────────────────────────────────────────────────────
+
+export interface PendingConflict {
+  id: string;
+  org_id: string;
+  aggregate_type: string;
+  aggregate_id: string;
+  event_id: string | null;
+  local_vector: VectorClock;
+  local_snapshot: Record<string, unknown>;
+  incoming_vector: VectorClock;
+  incoming_payload: Record<string, unknown>;
+  status: string;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+/** Replace the local conflict cache with the latest data from the server. */
+export async function upsertPendingConflicts(conflicts: PendingConflict[]): Promise<void> {
+  const db = await getDb();
+  for (const c of conflicts) {
+    await db.execute(
+      `INSERT INTO pending_conflicts
+         (id, org_id, aggregate_type, aggregate_id, event_id,
+          local_vector, local_snapshot, incoming_vector, incoming_payload,
+          status, resolved_at, created_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       ON CONFLICT(id) DO UPDATE SET
+         status = excluded.status,
+         resolved_at = excluded.resolved_at`,
+      [
+        c.id, c.org_id, c.aggregate_type, c.aggregate_id, c.event_id ?? null,
+        JSON.stringify(c.local_vector),
+        JSON.stringify(c.local_snapshot),
+        JSON.stringify(c.incoming_vector),
+        JSON.stringify(c.incoming_payload),
+        c.status, c.resolved_at ?? null, c.created_at,
+      ]
+    );
+  }
+}
+
+/** Return all pending (unresolved) event-spine conflicts from the local cache. */
+export async function getEventConflicts(): Promise<PendingConflict[]> {
+  const db = await getDb();
+  const rows = await db.select<Record<string, string>[]>(
+    "SELECT * FROM pending_conflicts WHERE status = 'pending' ORDER BY created_at DESC"
+  );
+  return rows.map((r) => ({
+    id: r.id,
+    org_id: r.org_id,
+    aggregate_type: r.aggregate_type,
+    aggregate_id: r.aggregate_id,
+    event_id: r.event_id ?? null,
+    local_vector: _parseVec(r.local_vector),
+    local_snapshot: _parseObj(r.local_snapshot),
+    incoming_vector: _parseVec(r.incoming_vector),
+    incoming_payload: _parseObj(r.incoming_payload),
+    status: r.status,
+    resolved_at: r.resolved_at ?? null,
+    created_at: r.created_at,
+  }));
+}
+
+function _parseVec(s: string): VectorClock {
+  try { return JSON.parse(s) as VectorClock; } catch { return {}; }
+}
+
+function _parseObj(s: string): Record<string, unknown> {
+  try { return JSON.parse(s) as Record<string, unknown>; } catch { return {}; }
 }

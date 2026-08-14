@@ -17,9 +17,10 @@ See ADR 0008 for the wire contract.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -97,7 +98,7 @@ async def push_events(
             ),
         )
 
-    org_id = current_user.organization_id
+    org_id = str(current_user.organization_id)
 
     # Verify every envelope claims the caller's org. Mismatch is a
     # client bug or an outright attempt to write another org's log.
@@ -170,7 +171,7 @@ async def pull_events(
     current_user: User = Depends(get_current_active_user),
     db: AsyncSession = Depends(get_db),
 ) -> EventPullResponse:
-    org_id = current_user.organization_id
+    org_id = str(current_user.organization_id)
 
     # Fetch limit + 1 to detect whether more pages exist without a
     # second round-trip.
@@ -240,7 +241,7 @@ async def pull_events(
                 "aggregate_type": row[4],
                 "event_type": row[5],
                 "schema_version": row[6],
-                "payload": row[7],
+                "payload": _parse_payload(row[7]),
                 "dependencies": list(row[8] or []),
                 "authored_at": row[9],
                 "authored_by": row[10],
@@ -265,7 +266,22 @@ async def pull_events(
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
-async def _current_tail_seq(db: AsyncSession, org_id) -> int:
+def _parse_payload(value: object) -> dict:
+    """Deserialize ``payload`` from the DB row.
+
+    The custom JSONB TypeDecorator stores payload as TEXT in SQLite-compat
+    mode. asyncpg returns the raw string for TEXT columns; Pydantic v2 won't
+    coerce a str into Dict[str, Any] in strict mode. Parse it here so
+    EventEnvelope.model_validate always receives a real dict.
+    """
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        return json.loads(value)
+    return {}
+
+
+async def _current_tail_seq(db: AsyncSession, org_id: str) -> int:
     row = (
         await db.execute(
             text(

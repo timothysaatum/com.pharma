@@ -1002,7 +1002,9 @@ export default function InventoryPage() {
                     setTotal(result.total);
                     setInventoryFromCache(true);
                     setInventoryCachedAt(new Date().toISOString());
-                    void cacheBranchInventoryRows(result.items);
+                    cacheBranchInventoryRows(result.items).catch((e: unknown) =>
+                        console.error("[InventoryPage] cacheBranchInventoryRows (cache):", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
+                    );
                 }
                 return;
             }
@@ -1042,7 +1044,9 @@ export default function InventoryPage() {
                 setInventoryFromCache(timeoutResult.isFromCache);
                 setInventoryCachedAt(timeoutResult.cached_at);
                 if (!timeoutResult.isFromCache) {
-                    void cacheBranchInventoryRows(timeoutResult.data.items);
+                    cacheBranchInventoryRows(timeoutResult.data.items).catch((e: unknown) =>
+                        console.error("[InventoryPage] cacheBranchInventoryRows (server):", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
+                    );
                 }
             }
         } catch (err: unknown) {

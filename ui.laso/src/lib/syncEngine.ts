@@ -26,19 +26,15 @@ import {
     getPendingQueue, getPendingConflicts, getPendingFailures, resetPendingFailures,
     dequeue, markQueueError, markQueueConflict,
     getPendingCount, getNextRetryAt, requeueConflictForLocalWin,
-    getCrrPushChanges, applyCrrPullChanges, getCrrSiteId,
-    applyCustomerMergeDirectives,
-    getPendingCrrRenumberAudits, markCrrRenumberAuditsUploaded,
-    isCrrTable, enqueue,
-    ensureSuppressedCrrChangesSchema,
-    suppressPermanentlyRejectedCrrRow,
-    getPermanentlyRejectedCrrRows,
+    enqueue,
     SYNC_QUEUE_CHANGED_EVENT,
     getPendingOutboxEvents, markOutboxResult,
     getEventPullSeq, setEventPullSeq,
     isLocallyAuthored,
+    upsertPendingConflicts,
 } from "@/lib/localDb";
 import { applyEventLocally } from "@/lib/localProjectors";
+import { conflictsApi } from "@/api/conflicts";
 import {
     BACKEND_CONNECTIVITY_EVENT,
     isBackendReachable,
@@ -57,11 +53,9 @@ import type {
     PushResponse,
     SyncStatus,
 } from "@/types";
-import type { QueueScope, QueuedConflict, QueuedFailure, PermanentlyRejectedCrrRow } from "@/lib/localDb";
+import type { QueueScope, QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
-export const LEGACY_SYNC_TABLES = [
-    "sales",
-];
+export const LEGACY_SYNC_TABLES: string[] = [];
 
 export async function getCompatibleLocalColumns(
     db: { select<T>(sql: string, values?: any[]): Promise<T> },
@@ -78,10 +72,6 @@ export async function getCompatibleLocalColumns(
 
 /** Maximum push attempts before an item is dead-lettered (excluded from sync queue). */
 const MAX_PUSH_ATTEMPTS = 10;
-const LEGACY_CRR_DB_VERSION_KEY = "crr_db_version";
-const CRR_PUSH_DB_VERSION_KEY = "crr_push_db_version";
-const CRR_PULL_DB_VERSION_KEY = "crr_pull_db_version";
-const CUSTOMER_MERGE_VERSION_KEY = "customer_merge_directive_version";
 
 // Re-export SyncStatus so existing callers that import it from this module
 // do not need to update their import paths.
@@ -147,10 +137,6 @@ class SyncEngine {
     // Pending conflict records that need manual resolution
     pendingConflicts: QueuedConflict[] = [];
     pendingFailures: QueuedFailure[] = [];
-    // Rows the server has permanently rejected (see SYNC_ERROR_PERMANENTLY_REJECTED)
-    // — unlike pendingFailures, these are never retried; they're suppressed
-    // from all future push batches and need a human to look at them.
-    pendingPermanentlyRejected: PermanentlyRejectedCrrRow[] = [];
 
     // ── Lifecycle ────────────────────────────────────────────────────
 
@@ -236,7 +222,6 @@ class SyncEngine {
         this.organizationId = null;
         this.pendingConflicts = [];
         this.pendingFailures = [];
-        this.pendingPermanentlyRejected = [];
         this._status = "idle";
         this.notify(0, null);
     }
@@ -285,19 +270,12 @@ class SyncEngine {
         this.setStatus("syncing");
 
         try {
-            // Push event-sourced outbox events first so the server's log
-            // is up-to-date before CRR changes arrive that depend on them.
             const eventPushResult = await this.pushEvents();
-            // CRR push: prescriptions, branch_inventory, etc. must land on
-            // the server before the legacy sync_queue push sends any sale
-            // that references them (e.g. prescription_id FK).
-            const crrPushResult = await this.pushCrr();
             // Repair a missing queue envelope before the push.
             await this.reconcileOfflineSales();
             const pushResult = await this.push();
             // Pull new server events and apply local projectors.
             await this.pullEvents();
-            await this.pullCrr();
             if (LEGACY_SYNC_TABLES.length > 0) {
                 await this.pull(pushResult.nextPullTimestamp ?? undefined);
             }
@@ -314,7 +292,6 @@ class SyncEngine {
             const activeFailures = this.pendingFailures.filter((f) => !f.is_blocked);
             this.setStatus(
                 pushResult.hadFailures
-                    || crrPushResult?.hadFailures
                     || eventPushResult?.hadFailures
                     || activeFailures.length > 0
                     ? "error"
@@ -332,9 +309,6 @@ class SyncEngine {
                 // until the application is restarted.
                 const msg = err instanceof Error ? err.message : String(err);
                 const isSchemaError =
-                    msg.includes("CR-SQLite") ||
-                    msg.includes("cr-sqlite") ||
-                    msg.includes("crsql_as_crr") ||
                     msg.includes("primary key") ||
                     msg.includes("NOT NULL") ||
                     msg.includes("unique index") ||
@@ -470,6 +444,20 @@ class SyncEngine {
             }
 
             if (!response.has_more) break;
+        }
+
+        // Refresh the local conflict cache so the Conflicts page works offline.
+        try {
+            const result = await conflictsApi.list({ status: "pending", page_size: 100 });
+            await upsertPendingConflicts(
+                result.conflicts.map((c) => ({
+                    ...c,
+                    event_id: c.event_id ?? null,
+                    resolved_at: c.resolved_at ?? null,
+                }))
+            );
+        } catch {
+            // Offline or server error — local cache remains from last pull.
         }
     }
 
@@ -669,7 +657,7 @@ class SyncEngine {
 
                 const request: Partial<PullRequest> = {
                     branch_id: this.branchId!,
-                    tables: [...LEGACY_SYNC_TABLES, "customers"],
+                    tables: LEGACY_SYNC_TABLES,
                 };
                 if (since !== null) {
                     request.last_sync_at = since;
@@ -702,200 +690,6 @@ class SyncEngine {
         }
 
         console.log(`[SyncEngine] Pull completed. Total records synced: ${totalRecords}`);
-    }
-
-    // ── PUSH CRR (cr-sqlite changes) ────────────────────────────────
-
-    private async pushCrr(): Promise<{ hadFailures: boolean }> {
-        if (!this.branchId) return { hadFailures: false };
-        // Capture once. `this.branchId` can change mid-call: authStore's
-        // setActiveBranch() runs synchronously (stop() then start()) and
-        // this function has many await points below. getCrrPushChangesFromDb
-        // scopes rows by site_id/db_version only, never by branch, so a
-        // stale re-read of `this.branchId` for the request envelope (further
-        // down) could label a batch containing rows written under the OLD
-        // branch with the NEW branch's id. The server's per-row branch scope
-        // check (_validate_scope) then rejects those rows for a mismatch —
-        // and if it's a row's first-ever push, that rejection is permanent
-        // (restore_rejected_row has no prior Postgres state to fall back to).
-        const pushBranchId = this.branchId;
-        const MAX_RETRIES = 3;
-        for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
-            try {
-                const db = await getDb();
-                const rows = await db.select<{ key: string; value: string }[]>(
-                    "SELECT key, value FROM sync_meta WHERE key = $1",
-                    [CRR_PUSH_DB_VERSION_KEY]
-                );
-                const byKey = new Map(rows.map((row) => [row.key, row.value]));
-                // Do NOT fall back to LEGACY_CRR_DB_VERSION_KEY here. Under the
-                // pre-split single-cursor code, that key was last written by
-                // pullCrr() with a SERVER-scoped db_version watermark, not a
-                // LOCAL crsql_changes.db_version — pushCrr() wrote it too, but
-                // pull ran after push in the old sync() order, so pull's value
-                // (the larger, server-axis one) always won. On any device
-                // upgrading from that code, comparing local db_versions against
-                // that legacy server-scale number makes `db_version > since`
-                // false for every local row, forever — push silently never
-                // fires again, with no error. A missing push-specific cursor
-                // means "never pushed under the new key": start at 0. Resending
-                // already-accepted local changes is safe — cr-sqlite's merge is
-                // idempotent for identical values, and collision checks exclude
-                // the row's own id.
-                const sinceDbVersion = parseInt(byKey.get(CRR_PUSH_DB_VERSION_KEY) ?? "0", 10);
-
-                const changes = await getCrrPushChanges(sinceDbVersion);
-                const auditEvents = await getPendingCrrRenumberAudits();
-                if (changes.length === 0 && auditEvents.length === 0) {
-                    return { hadFailures: false };
-                }
-
-                // Group by table and push in batches
-                const batchSize = 500;
-                const iterations = Math.max(1, Math.ceil(changes.length / batchSize));
-                let hadFailures = false;
-                for (let batchIndex = 0; batchIndex < iterations; batchIndex++) {
-                    const i = batchIndex * batchSize;
-                    const batch = changes.slice(i, i + batchSize);
-                    const response = await promiseWithTimeout(syncApi.crrPush({
-                        branch_id: pushBranchId,
-                        changes: batch as any[],
-                        audit_events: batchIndex === 0 ? auditEvents : [],
-                    }), 15000);
-
-                    if (response.accepted_audit_event_ids?.length) {
-                        await markCrrRenumberAuditsUploaded(
-                            response.accepted_audit_event_ids,
-                        );
-                    }
-
-                    if (response.total_failed > 0) {
-                        // Suppress any failed row that isn't a dependency-timing
-                        // issue. DEPENDENCY_NOT_SYNCED rows should keep retrying
-                        // (the blocker will eventually be accepted). Every other
-                        // failure — including the explicit PERMANENTLY_REJECTED
-                        // code and any unclassified server rejection — can never
-                        // succeed by resending the same bytes, so suppressing them
-                        // lets the cursor advance past them on the next cycle.
-                        let suppressedCount = 0;
-                        for (const result of response.results) {
-                            if (
-                                !result.success &&
-                                result.error_code !== SYNC_ERROR_DEPENDENCY_NOT_SYNCED &&
-                                result.pk_b64
-                            ) {
-                                suppressedCount++;
-                                try {
-                                    await suppressPermanentlyRejectedCrrRow(
-                                        db, result.table, result.pk_b64,
-                                    );
-                                } catch (err) {
-                                    console.warn(
-                                        "[SyncEngine] CRR push: failed to suppress " +
-                                        "stuck row, will keep retrying it",
-                                        result.table, err,
-                                    );
-                                }
-                            }
-                        }
-                        if (suppressedCount > 0) {
-                            console.warn(
-                                "[SyncEngine] CRR push: %d row(s) suppressed from " +
-                                "future pushes (server rejected, needs manual review)",
-                                suppressedCount,
-                            );
-                        }
-                        hadFailures = true;
-                        console.warn(
-                            "[SyncEngine] CRR push: %d accepted, %d failed",
-                            response.total_accepted,
-                            response.total_failed,
-                        );
-                    }
-                }
-
-                // Only advance the global CRR cursor after a fully successful
-                // batch. Advancing past a failed row would make that local
-                // mutation unreachable on later retries.
-                if (changes.length > 0 && !hadFailures) {
-                    const maxDbVersion = Math.max(...changes.map((c) => c.db_version), 0);
-                    await db.execute(
-                        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                        [CRR_PUSH_DB_VERSION_KEY, String(maxDbVersion)]
-                    );
-                    await ensureSuppressedCrrChangesSchema(db);
-                    await db.execute(
-                        "DELETE FROM suppressed_crr_changes WHERE db_version <= $1",
-                        [maxDbVersion],
-                    );
-
-                    // Bug fix: CRR push has no per-row accepted[] list, so markSynced is
-                    // never called for CRR-pushed prescriptions/customers. Without this,
-                    // their sync_status stays 'pending' forever, and the upsertMany guard
-                    // on pull skips them, making them look perpetually un-synced locally
-                    // even after the server has accepted them.
-                    //
-                    // `pk` here is cr-sqlite's packed-columns encoding, transported as a
-                    // "b64:..." string by the Tauri IPC layer (db.rs::row_to_json) — NOT
-                    // the plain row id. A prior version of this fix compared
-                    // `id = String(pk)` directly, which never matched any real row (the
-                    // UPDATE silently affected zero rows every time) and left prescription
-                    // sync_status stuck at 'pending' forever despite successful pushes.
-                    // Matching via crsql_pack_columns(id) = pk keeps the comparison at the
-                    // SQL/blob level, sidestepping the need to unpack pk in JS at all.
-                    const pushedTables = new Set(
-                        changes
-                            .filter((c) => c.table === "prescriptions" || c.table === "customers")
-                            .map((c) => c.table)
-                    );
-                    if (pushedTables.size > 0) {
-                        const crrNow = new Date().toISOString();
-                        for (const table of pushedTables) {
-                            try {
-                                const result = await db.execute(
-                                    `UPDATE ${table}
-                                     SET sync_status = 'synced', synced_at = $1
-                                     WHERE sync_status = 'pending'
-                                       AND EXISTS (
-                                         SELECT 1 FROM crsql_changes
-                                         WHERE "table" = $2
-                                           AND pk = crsql_pack_columns(${table}.id)
-                                           AND db_version > $3 AND db_version <= $4
-                                       )`,
-                                    [crrNow, table, sinceDbVersion, maxDbVersion]
-                                );
-                                console.log(
-                                    `[SyncEngine] CRR push: marked ${result.rowsAffected} ${table} row(s) as synced`
-                                );
-                            } catch (err) {
-                                // Non-fatal: best effort; will be retried on the next sync cycle
-                                console.warn(`[SyncEngine] CRR push: failed to mark ${table} rows synced`, err);
-                            }
-                        }
-                    }
-                } else if (hadFailures) {
-                    console.warn(
-                        "[SyncEngine] CRR push had failed rows; retaining push cursor at %d",
-                        sinceDbVersion,
-                    );
-                }
-
-                return { hadFailures };
-            } catch (err) {
-                this.logError(err, `CRR push attempt ${attempt + 1}/${MAX_RETRIES}`);
-                if (attempt < MAX_RETRIES - 1) {
-                    const backoff = new RetryBackoff();
-                    const delayMs = backoff.getDelay(attempt);
-                    await new Promise((r) => setTimeout(r, delayMs));
-                } else {
-                    console.warn(
-                        `[SyncEngine] CRR push failed after ${MAX_RETRIES} attempts; ` +
-                        "leaving crsql_changes pending for the next CRR retry"
-                    );
-                }
-            }
-        }
-        return { hadFailures: true };
     }
 
     // ── Reconcile offline sales that were never synced ──────────────
@@ -939,105 +733,6 @@ class SyncEngine {
             }
         } catch (err) {
             this.logError(err, "Reconcile offline sales");
-        }
-    }
-
-    // ── PULL CRR (cr-sqlite changes) ────────────────────────────────
-
-    private async pullCrr(): Promise<void> {
-        if (!this.branchId) return;
-        try {
-            const db = await getDb();
-            const rows = await db.select<{ key: string; value: string }[]>(
-                "SELECT key, value FROM sync_meta WHERE key IN ($1, $2)",
-                [CRR_PULL_DB_VERSION_KEY, LEGACY_CRR_DB_VERSION_KEY]
-            );
-            const byKey = new Map(rows.map((row) => [row.key, row.value]));
-            let sinceDbVersion = parseInt(
-                byKey.get(CRR_PULL_DB_VERSION_KEY)
-                ?? byKey.get(LEGACY_CRR_DB_VERSION_KEY)
-                ?? "0",
-                10,
-            );
-            const mergeRows = await db.select<{ value: string }[]>(
-                "SELECT value FROM sync_meta WHERE key = $1",
-                [CUSTOMER_MERGE_VERSION_KEY]
-            );
-            let mergeSinceVersion = parseInt(mergeRows?.[0]?.value ?? "0", 10);
-            const siteId = await getCrrSiteId();
-            let totalRemoteChanges = 0;
-            let totalMergeDirectives = 0;
-            let hasMore = true;
-            let crrPullStallCount = 0; // tracks consecutive has_more=true with no db_version progress
-
-
-            while (hasMore) {
-                const requestSinceDbVersion = sinceDbVersion;
-                const response = await promiseWithTimeout(syncApi.crrPull({
-                    branch_id: this.branchId,
-                    crr_since_db_version: sinceDbVersion,
-                    customer_merge_since_version: mergeSinceVersion,
-                } as PullRequest), 15000);
-
-                // Filter out this site's own changes (already merged locally)
-                const remoteChanges = (response.crr_changes ?? []).filter(
-                    (c) => c.site_id !== siteId && c.table !== "sales"
-                );
-                if (remoteChanges.length > 0) {
-                    await applyCrrPullChanges(remoteChanges);
-                    totalRemoteChanges += remoteChanges.length;
-                }
-                const mergeDirectives = response.customer_merge_directives ?? [];
-                if (mergeDirectives.length > 0) {
-                    await applyCustomerMergeDirectives(mergeDirectives);
-                    totalMergeDirectives += mergeDirectives.length;
-                }
-
-                // Update last pulled db_version without advancing the local push cursor.
-                const newDbVersion = response.crr_max_db_version ?? 0;
-                if (newDbVersion > sinceDbVersion) {
-                    sinceDbVersion = newDbVersion;
-                    await db.execute(
-                        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                        [CRR_PULL_DB_VERSION_KEY, String(newDbVersion)]
-                    );
-                }
-                const newMergeVersion = response.customer_merge_max_version ?? mergeSinceVersion;
-                if (newMergeVersion > mergeSinceVersion) {
-                    mergeSinceVersion = newMergeVersion;
-                    await db.execute(
-                        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-                        [CUSTOMER_MERGE_VERSION_KEY, String(newMergeVersion)]
-                    );
-                }
-
-                hasMore = response.has_more && newDbVersion > requestSinceDbVersion;
-                if (response.has_more && !hasMore) {
-                    crrPullStallCount++;
-                    if (crrPullStallCount >= 3) {
-                        throw new Error(
-                            `[SyncEngine] CRR pull stalled: server reported has_more but did not advance ` +
-                            `db_version after ${crrPullStallCount} consecutive attempts. ` +
-                            `Aborting to prevent an infinite loop; changes will be retried on the next sync cycle.`
-                        );
-                    }
-                    console.warn(
-                        `[SyncEngine] CRR pull: has_more=true but db_version stalled (attempt ${crrPullStallCount}/3); ` +
-                        "stopping to avoid a tight loop"
-                    );
-                }
-            }
-
-            console.log(
-                "[SyncEngine] CRR pull: %d changes, %d customer merges applied (db_version → %d)",
-                totalRemoteChanges,
-                totalMergeDirectives,
-                sinceDbVersion,
-            );
-        } catch (err) {
-            console.warn("[SyncEngine] CRR pull error:", err);
-            this.logError(err, "CRR pull failed");
-            throw err;
         }
     }
 
@@ -1220,7 +915,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.prescriptions.length && !(await isCrrTable("prescriptions"))) {
+        if (response.prescriptions.length) {
             await upsertMany("prescriptions", response.prescriptions, [
                 "id", "organization_id", "branch_id", "prescription_number",
                 "customer_id", "prescriber_name", "prescriber_license",
@@ -1233,13 +928,7 @@ class SyncEngine {
             ]);
         }
 
-        // ── Branch-level ───────────────────────────────────────────────
-        // NOTE: branch_inventory is now a CRR table managed by cr-sqlite.
-        // The old pull response for it is stale — skip it here. CRR changes
-        // are applied via pullCrr() → applyCrrPullChanges() which triggers
-        // cr-sqlite's automatic merge.
-
-        if (response.branch_inventory.length && !(await isCrrTable("branch_inventory"))) {
+        if (response.branch_inventory.length) {
             await upsertMany("branch_inventory", response.branch_inventory, [
                 "id", "branch_id", "drug_id", "quantity", "reserved_quantity",
                 "location", "selling_price", "sync_status", "sync_version",
@@ -1247,7 +936,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.drug_batches.length && !(await isCrrTable("drug_batches"))) {
+        if (response.drug_batches.length) {
             await upsertMany("drug_batches", response.drug_batches, [
                 "id", "branch_id", "drug_id", "batch_number", "quantity",
                 "remaining_quantity", "manufacturing_date", "expiry_date",
@@ -1256,7 +945,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.sales.length && !(await isCrrTable("sales"))) {
+        if (response.sales.length) {
             await upsertMany("sales", response.sales, [
                 "id", "organization_id", "branch_id", "sale_number",
                 "customer_id", "customer_name",
@@ -1288,7 +977,7 @@ class SyncEngine {
             ]);
         }
 
-        if (response.purchase_orders.length && !(await isCrrTable("purchase_orders"))) {
+        if (response.purchase_orders.length) {
             await upsertMany("purchase_orders", response.purchase_orders, [
                 "id", "organization_id", "branch_id", "po_number",
                 "supplier_id", "subtotal", "tax_amount", "shipping_cost",
@@ -1371,7 +1060,6 @@ class SyncEngine {
         if (!this.hasActiveQueueScope()) {
             this.pendingConflicts = [];
             this.pendingFailures = [];
-            this.pendingPermanentlyRejected = [];
             this.notify(0, null);
             return;
         }
@@ -1379,7 +1067,6 @@ class SyncEngine {
             const scope = this.queueScope();
             this.pendingConflicts = await getPendingConflicts(scope);
             this.pendingFailures = await getPendingFailures(MAX_PUSH_ATTEMPTS, scope);
-            this.pendingPermanentlyRejected = await getPermanentlyRejectedCrrRows();
             this.notify(
                 await getPendingCount(scope),
                 await getLastSyncAt(undefined, this.branchId ?? undefined)
@@ -1389,7 +1076,6 @@ class SyncEngine {
             this._dbInitError = msg;
             this.pendingConflicts = [];
             this.pendingFailures = [];
-            this.pendingPermanentlyRejected = [];
             this.notify(0, null);
             throw err;
         }

@@ -6,16 +6,16 @@ import {
 } from "@/lib/syncEngine";
 
 describe("sync table routing", () => {
-  it("routes side-effecting sales through legacy protocol-v2 sync only", () => {
-    const migrated = [
-      "drugs", "drug_categories", "price_contracts", "audit_logs",
-      "branch_inventory", "drug_batches", "customers",
-      "prescriptions", "purchase_orders",
+  it("all tables have migrated off the legacy pull; LEGACY_SYNC_TABLES is empty", () => {
+    const fullyMigrated = [
+      "sales", "drugs", "drug_categories", "price_contracts", "audit_logs",
+      "branch_inventory", "drug_batches", "prescriptions", "purchase_orders",
+      "customers",
     ];
-    for (const table of migrated) {
+    for (const table of fullyMigrated) {
       expect(LEGACY_SYNC_TABLES).not.toContain(table);
     }
-    expect(LEGACY_SYNC_TABLES).toEqual(["sales"]);
+    expect(LEGACY_SYNC_TABLES).toEqual([]);
   });
 
   it("drops additive server fields missing from an older local schema", async () => {
@@ -42,20 +42,18 @@ describe("sync table routing", () => {
       order.push("push");
       return { nextPullTimestamp: null, hadFailures: false };
     });
-    engine.pushCrr = vi.fn().mockImplementation(async () => { order.push("crr-push"); });
-    engine.pullCrr = vi.fn().mockImplementation(async () => { order.push("crr"); });
+    engine.pushEvents = vi.fn().mockResolvedValue({ hadFailures: false });
     engine.pull = vi.fn().mockImplementation(async () => { order.push("legacy"); });
+    engine.pullEvents = vi.fn().mockResolvedValue(undefined);
     engine.scheduleNetworkRetry = vi.fn();
     engine.logError = vi.fn();
 
     await engine.sync();
 
-    // crr-push must run BEFORE push so that offline-created prescriptions
-    // (table_priority=2 in the batch) land on the server before any sale
-    // that references them via prescription_id is pushed.
-    expect(order).toEqual(["crr-push", "reconcile", "push", "crr", "legacy"]);
-    expect(engine.pullCrr).toHaveBeenCalledOnce();
-    expect(engine.pull).toHaveBeenCalledOnce();
+    // CRR push/pull removed — sync order is now: events, reconcile, push, pullEvents.
+    // Legacy pull is skipped because LEGACY_SYNC_TABLES is now empty.
+    expect(order).toEqual(["reconcile", "push"]);
+    expect(engine.pull).not.toHaveBeenCalled();
     engine.branchId = null;
     engine._isSyncing = false;
   });

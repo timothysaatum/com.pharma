@@ -57,26 +57,23 @@ class DrugBase(BaseSchema):
     image_url: Optional[str] = None
     is_active: bool = Field(default=True)
     
-    @field_validator('sku', 'barcode')
-    @classmethod
-    def validate_alphanumeric(cls, v: Optional[str]) -> Optional[str]:
-        """Validate SKU and barcode are alphanumeric"""
-        if v and not re.match(r'^[A-Za-z0-9\-_]+$', v):
-            raise ValueError('Must contain only letters, numbers, hyphens, and underscores')
-        return v
-    
-    @field_validator('unit_price', 'cost_price')
-    @classmethod
-    def validate_price(cls, v: Optional[Decimal]) -> Optional[Decimal]:
-        """Validate prices are reasonable"""
-        if v and v > 1000000:
-            raise ValueError('Price exceeds maximum allowed value')
-        return v
-
-
 class DrugCreate(DrugBase):
     """Schema for creating a drug"""
     organization_id: uuid.UUID
+
+    @field_validator('sku', 'barcode')
+    @classmethod
+    def validate_alphanumeric(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r'^[A-Za-z0-9\-_]+$', v):
+            raise ValueError('Must contain only letters, numbers, hyphens, and underscores')
+        return v
+
+    @field_validator('unit_price', 'cost_price')
+    @classmethod
+    def validate_price(cls, v: Optional[Decimal]) -> Optional[Decimal]:
+        if v and v > 1000000:
+            raise ValueError('Price exceeds maximum allowed value')
+        return v
 
 
 class DrugUpdate(BaseSchema):

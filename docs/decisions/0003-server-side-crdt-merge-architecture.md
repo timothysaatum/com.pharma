@@ -1,6 +1,7 @@
 # 0003: Server-Side CRDT Merge Architecture
 
 **Status:** Superseded by [0006](0006-event-sourced-sync-spine.md) (2026-08-12)
+**Implemented and retired:** 2026-08-14 — `shadow_db.py`, `crr_sync_service.py`, `crr_sync_endpoints.py` deleted server-side; cr-sqlite extension made optional and `crsql_*` tables dropped client-side via localDb v26 migration.
 **Date:** 2026-07-10
 
 ## Context

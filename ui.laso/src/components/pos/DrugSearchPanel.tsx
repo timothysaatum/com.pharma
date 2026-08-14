@@ -208,7 +208,9 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                 setStockQuantities((prev) => ({ ...prev, ...sq }));
                 
                 if (!append) {
-                    void cacheBranchInventoryRows(result.items);
+                    cacheBranchInventoryRows(result.items).catch((e: unknown) =>
+                        console.error("[DrugSearchPanel] cacheBranchInventoryRows:", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
+                    );
                 }
             }
         } catch (err: unknown) {

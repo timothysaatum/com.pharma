@@ -75,33 +75,29 @@ class BranchBase(BaseSchema):
     operating_hours: Optional[WeeklyOperatingHours] = None
     is_active: bool = Field(default=True)
     
+class BranchCreate(BranchBase):
+    """Schema for creating a branch"""
+    organization_id: Optional[uuid.UUID] = None
+
     @field_validator('code')
     @classmethod
     def validate_code(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-
         if not re.match(r'^[A-Z0-9\-_]+$', v, re.IGNORECASE):
             raise ValueError(
                 'Branch code must contain only letters, numbers, hyphens, and underscores'
             )
         return v.upper()
-    
+
     @field_validator('phone')
     @classmethod
     def validate_phone(cls, v: Optional[str]) -> Optional[str]:
-        """Validate phone number format"""
         if v:
-            # Remove spaces and special characters for validation
             cleaned = re.sub(r'[\s\-\(\)]', '', v)
             if not re.match(r'^\+?[0-9]{10,15}$', cleaned):
                 raise ValueError('Invalid phone number format')
         return v
-
-
-class BranchCreate(BranchBase):
-    """Schema for creating a branch"""
-    organization_id: Optional[uuid.UUID] = None
 
 
 class BranchUpdate(BaseSchema):

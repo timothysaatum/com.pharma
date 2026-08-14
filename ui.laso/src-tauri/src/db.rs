@@ -511,30 +511,28 @@ pub fn init_db(
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("Cannot set pragmas: {e}"))?;
 
-    let ext_path = ext_path.ok_or_else(|| {
-        "CR-SQLite extension is required for offline synchronization but was not found".to_string()
-    })?;
-
-    // SAFETY: cr-sqlite is a trusted extension shipped with the app.
-    // SQLite automatically appends the platform extension suffix
-    // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
-    // whether the path already includes it. Strip it to avoid double
-    // suffixes (e.g. crsqlite.so.so).
-    let ext_load_path = extension_load_path(&ext_path);
-    unsafe {
-        conn.load_extension(&ext_load_path, None).map_err(|error| {
-            format!(
-                "Cannot load cr-sqlite extension {}: {error}",
-                ext_path.display()
-            )
-        })?;
+    if let Some(ext_path) = ext_path {
+        // SAFETY: cr-sqlite is a trusted extension shipped with the app.
+        // SQLite automatically appends the platform extension suffix
+        // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
+        // whether the path already includes it. Strip it to avoid double
+        // suffixes (e.g. crsqlite.so.so).
+        let ext_load_path = extension_load_path(&ext_path);
+        unsafe {
+            conn.load_extension(&ext_load_path, None).map_err(|error| {
+                format!(
+                    "Cannot load cr-sqlite extension {}: {error}",
+                    ext_path.display()
+                )
+            })?;
+        }
+        if let Ok(site_id) = conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0)) {
+            let site_id_hex: String = site_id.iter().map(|byte| format!("{byte:02x}")).collect();
+            println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
+        }
+    } else {
+        println!("[db] cr-sqlite extension not found — running without CRDT support");
     }
-
-    let site_id = conn
-        .query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0))
-        .map_err(|error| format!("cr-sqlite loaded but crsql_site_id() failed: {error}"))?;
-    let site_id_hex: String = site_id.iter().map(|byte| format!("{byte:02x}")).collect();
-    println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
 
     Ok(DbState {
         conn: Mutex::new(conn),
@@ -1360,41 +1358,6 @@ pub fn db_test_savepoint(
             Some(last_insert_id)
         },
     })
-}
-
-/// Check crsql_changes table for entries (for testing)
-#[tauri::command]
-pub fn db_get_crsql_changes(
-    db: State<DbState>,
-) -> Result<Vec<serde_json::Map<String, JsonValue>>, DbError> {
-    let conn = db.conn.lock().map_err(|e| DbError {
-        message: format!("Lock error: {e}"),
-    })?;
-    let mut stmt = conn
-        .prepare("SELECT \"table\", pk, cid, val, col_version, db_version, site_id, cl, seq FROM crsql_changes ORDER BY seq")
-        .map_err(|e| DbError { message: format!("Prepare error: {e}") })?;
-    let col_count = stmt.column_count();
-    let col_names: Vec<String> = (0..col_count)
-        .map(|i| stmt.column_name(i).unwrap_or("?").to_string())
-        .collect();
-    let rows = stmt
-        .query_map([], |row| {
-            let mut obj = serde_json::Map::with_capacity(col_count);
-            for i in 0..col_count {
-                obj.insert(col_names[i].clone(), row_to_json(row, i));
-            }
-            Ok(obj)
-        })
-        .map_err(|e| DbError {
-            message: format!("Query error: {e}"),
-        })?;
-    let mut result = Vec::new();
-    for row in rows {
-        result.push(row.map_err(|e| DbError {
-            message: format!("Row error: {e}"),
-        })?);
-    }
-    Ok(result)
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────

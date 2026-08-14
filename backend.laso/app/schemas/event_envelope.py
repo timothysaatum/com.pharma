@@ -48,6 +48,8 @@ class AggregateType(str, Enum):
     CUSTOMER = "customer"
     STOCK = "stock"
     STOCK_TRANSFER = "stock_transfer"
+    DRUG = "drug"
+    DRUG_CATEGORY = "drug_category"
 
 
 class EventStatus(str, Enum):

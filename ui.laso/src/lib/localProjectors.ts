@@ -18,7 +18,8 @@
  *   - Deletes:  UPDATE SET is_deleted=1 (idempotent)
  */
 
-import { getDb } from "@/lib/localDb";
+import { getDb, setVersionVector } from "@/lib/localDb";
+import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
@@ -74,6 +75,22 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
       await _stockTransfer(db, envelope);
       break;
 
+    // ── Drug ────────────────────────────────────────────────────────────
+    case "drug_created":
+      await _drugCreated(db, envelope);
+      break;
+    case "drug_updated":
+      await _drugUpdated(db, envelope);
+      break;
+
+    // ── Drug Category ───────────────────────────────────────────────────
+    case "drug_category_created":
+      await _drugCategoryCreated(db, envelope);
+      break;
+    case "drug_category_updated":
+      await _drugCategoryUpdated(db, envelope);
+      break;
+
     default:
       console.warn(`[localProjectors] No projector for event_type=${envelope.event_type}`);
   }
@@ -86,17 +103,18 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
 async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const now = new Date().toISOString();
+  const incomingVector = (p.version_vector ?? {}) as VectorClock;
   await db.execute(
     `INSERT OR IGNORE INTO customers
        (id, organization_id, first_name, last_name, phone, email,
         date_of_birth, address, allergies, chronic_conditions,
         customer_type, loyalty_points, loyalty_tier,
         preferred_contact_method, marketing_consent,
-        is_active, is_deleted,
+        is_active, is_deleted, version_vector,
         sync_status, sync_version, synced_at, updated_at, created_at)
      VALUES
-       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,1,0,
-        'synced',1,NULL,$16,$16)`,
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,1,0,$16,
+        'synced',1,NULL,$17,$17)`,
     [
       String(e.aggregate_id),
       String(p.organization_id ?? e.org_id),
@@ -113,6 +131,7 @@ async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
       String(p.loyalty_tier ?? "bronze"),
       p.preferred_contact_method != null ? String(p.preferred_contact_method) : null,
       p.marketing_consent != null ? (p.marketing_consent ? 1 : 0) : 0,
+      JSON.stringify(incomingVector),
       e.authored_at ?? now,
     ]
   );
@@ -120,6 +139,8 @@ async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
 
 async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
+  const incomingVector = (p.version_vector ?? {}) as VectorClock;
+
   // Apply only fields present in the payload (partial patch).
   const fields: [string, unknown][] = [];
   const UPDATABLE = [
@@ -148,6 +169,10 @@ async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {
     `UPDATE customers SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
     [...fields.map((f) => f[1]), e.authored_at, String(e.aggregate_id)]
   );
+  // Persist the authoritative vector so future offline edits read the correct base.
+  if (Object.keys(incomingVector).length > 0) {
+    await setVersionVector("customers", String(e.aggregate_id), incomingVector);
+  }
 }
 
 async function _customerDeleted(db: Db, e: EventEnvelope): Promise<void> {
@@ -161,12 +186,20 @@ async function _customerDeleted(db: Db, e: EventEnvelope): Promise<void> {
 
 async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
-  const items = (p.items ?? []) as unknown[];
+  const items = (p.items ?? []) as Array<Record<string, unknown>>;
   const now = new Date().toISOString();
+
+  // Idempotency guard: skip entirely if already applied (online sale the client
+  // authored directly, or duplicate event delivery).
+  const existing = await db.select<{ id: string }[]>(
+    "SELECT id FROM sales WHERE id = $1",
+    [String(e.aggregate_id)]
+  );
+  if (existing.length > 0) return;
 
   // Write the sale row.
   await db.execute(
-    `INSERT OR IGNORE INTO sales
+    `INSERT INTO sales
        (id, organization_id, branch_id, sale_number, customer_id, customer_name,
         subtotal, discount_amount, tax_amount, total_amount,
         price_contract_id, contract_name, contract_discount_percentage,
@@ -222,30 +255,28 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
     ]
   );
 
-  // Deduct stock for each item using FEFO batch changes if provided.
+  // Deduct drug_batches via FEFO batch changes.
   const batchChanges = (p.batch_changes ?? []) as Array<Record<string, unknown>>;
-  if (batchChanges.length > 0) {
-    for (const bc of batchChanges) {
-      const batchId = String(bc.batch_id);
-      const qty = Number(bc.quantity_used ?? 0);
-      // Deduct from drug_batches.
-      await db.execute(
-        `UPDATE drug_batches
-            SET quantity_remaining = MAX(0, quantity_remaining - $1)
-          WHERE id = $2`,
-        [qty, batchId]
-      );
-    }
+  for (const bc of batchChanges) {
+    await db.execute(
+      `UPDATE drug_batches
+          SET quantity_remaining = MAX(0, quantity_remaining - $1)
+        WHERE id = $2`,
+      [Number(bc.quantity_used ?? 0), String(bc.batch_id)]
+    );
   }
 
-  // Deduct from branch_inventory (aggregate).
-  if (p.drug_id != null && p.quantity != null) {
-    await db.execute(
-      `UPDATE branch_inventory
-          SET quantity = MAX(0, quantity - $1)
-        WHERE branch_id = $2 AND drug_id = $3`,
-      [Number(p.quantity), String(p.branch_id ?? e.branch_id), String(p.drug_id)]
-    );
+  // Deduct branch_inventory for every sale item.
+  const branchId = String(p.branch_id ?? e.branch_id);
+  for (const item of items) {
+    if (item.drug_id != null && item.quantity != null) {
+      await db.execute(
+        `UPDATE branch_inventory
+            SET quantity = MAX(0, quantity - $1)
+          WHERE branch_id = $2 AND drug_id = $3`,
+        [Number(item.quantity), branchId, String(item.drug_id)]
+      );
+    }
   }
 }
 
@@ -418,4 +449,158 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
       [batchQty, String(bc.batch_id)]
     );
   }
+}
+
+// ── Drug projectors ────────────────────────────────────────────────────────
+
+async function _drugCreated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  await db.execute(
+    `INSERT OR IGNORE INTO drugs
+       (id, organization_id, name, generic_name, brand_name,
+        sku, barcode, category_id, drug_type, dosage_form,
+        strength, manufacturer, supplier,
+        requires_prescription, controlled_substance_schedule,
+        ndc_code, unit_price, cost_price, markup_percentage,
+        tax_rate, reorder_level, reorder_quantity, max_stock_level,
+        unit_of_measure, description, usage_instructions,
+        side_effects, contraindications, storage_conditions,
+        is_active, is_deleted,
+        sync_status, sync_version, synced_at, updated_at, created_at)
+     VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+        $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,0,
+        'synced',1,NULL,$31,$32)`,
+    [
+      String(e.aggregate_id),
+      String(p.organization_id ?? e.org_id),
+      String(p.name ?? ""),
+      p.generic_name != null ? String(p.generic_name) : null,
+      p.brand_name != null ? String(p.brand_name) : null,
+      p.sku != null ? String(p.sku) : null,
+      p.barcode != null ? String(p.barcode) : null,
+      p.category_id != null ? String(p.category_id) : null,
+      String(p.drug_type ?? "otc"),
+      p.dosage_form != null ? String(p.dosage_form) : null,
+      p.strength != null ? String(p.strength) : null,
+      p.manufacturer != null ? String(p.manufacturer) : null,
+      p.supplier != null ? String(p.supplier) : null,
+      p.requires_prescription ? 1 : 0,
+      p.controlled_substance_schedule != null ? String(p.controlled_substance_schedule) : null,
+      p.ndc_code != null ? String(p.ndc_code) : null,
+      Number(p.unit_price ?? 0),
+      p.cost_price != null ? Number(p.cost_price) : null,
+      p.markup_percentage != null ? Number(p.markup_percentage) : null,
+      Number(p.tax_rate ?? 0),
+      Number(p.reorder_level ?? 10),
+      Number(p.reorder_quantity ?? 50),
+      p.max_stock_level != null ? Number(p.max_stock_level) : null,
+      String(p.unit_of_measure ?? "unit"),
+      p.description != null ? String(p.description) : null,
+      p.usage_instructions != null ? String(p.usage_instructions) : null,
+      p.side_effects != null ? String(p.side_effects) : null,
+      p.contraindications != null ? String(p.contraindications) : null,
+      p.storage_conditions != null ? String(p.storage_conditions) : null,
+      p.is_active !== false ? 1 : 0,
+      p.updated_at != null ? String(p.updated_at) : now,
+      p.created_at != null ? String(p.created_at) : now,
+    ]
+  );
+}
+
+async function _drugUpdated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  await db.execute(
+    `UPDATE drugs SET
+       name = $1, generic_name = $2, brand_name = $3,
+       sku = $4, barcode = $5, category_id = $6,
+       drug_type = $7, dosage_form = $8, strength = $9,
+       manufacturer = $10, supplier = $11,
+       requires_prescription = $12, controlled_substance_schedule = $13,
+       ndc_code = $14, unit_price = $15, cost_price = $16,
+       markup_percentage = $17, tax_rate = $18,
+       reorder_level = $19, reorder_quantity = $20, max_stock_level = $21,
+       unit_of_measure = $22, description = $23, usage_instructions = $24,
+       side_effects = $25, contraindications = $26, storage_conditions = $27,
+       is_active = $28, sync_status = 'synced', updated_at = $29
+     WHERE id = $30`,
+    [
+      String(p.name ?? ""),
+      p.generic_name != null ? String(p.generic_name) : null,
+      p.brand_name != null ? String(p.brand_name) : null,
+      p.sku != null ? String(p.sku) : null,
+      p.barcode != null ? String(p.barcode) : null,
+      p.category_id != null ? String(p.category_id) : null,
+      String(p.drug_type ?? "otc"),
+      p.dosage_form != null ? String(p.dosage_form) : null,
+      p.strength != null ? String(p.strength) : null,
+      p.manufacturer != null ? String(p.manufacturer) : null,
+      p.supplier != null ? String(p.supplier) : null,
+      p.requires_prescription ? 1 : 0,
+      p.controlled_substance_schedule != null ? String(p.controlled_substance_schedule) : null,
+      p.ndc_code != null ? String(p.ndc_code) : null,
+      Number(p.unit_price ?? 0),
+      p.cost_price != null ? Number(p.cost_price) : null,
+      p.markup_percentage != null ? Number(p.markup_percentage) : null,
+      Number(p.tax_rate ?? 0),
+      Number(p.reorder_level ?? 10),
+      Number(p.reorder_quantity ?? 50),
+      p.max_stock_level != null ? Number(p.max_stock_level) : null,
+      String(p.unit_of_measure ?? "unit"),
+      p.description != null ? String(p.description) : null,
+      p.usage_instructions != null ? String(p.usage_instructions) : null,
+      p.side_effects != null ? String(p.side_effects) : null,
+      p.contraindications != null ? String(p.contraindications) : null,
+      p.storage_conditions != null ? String(p.storage_conditions) : null,
+      p.is_active !== false ? 1 : 0,
+      p.updated_at != null ? String(p.updated_at) : (e.authored_at ?? new Date().toISOString()),
+      String(e.aggregate_id),
+    ]
+  );
+}
+
+// ── Drug category projectors ───────────────────────────────────────────────
+
+async function _drugCategoryCreated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  await db.execute(
+    `INSERT OR IGNORE INTO drug_categories
+       (id, organization_id, name, description,
+        parent_id, path, level, is_deleted,
+        sync_status, sync_version, synced_at, updated_at, created_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,0,'synced',1,NULL,$8,$9)`,
+    [
+      String(e.aggregate_id),
+      String(p.organization_id ?? e.org_id),
+      String(p.name ?? ""),
+      p.description != null ? String(p.description) : null,
+      p.parent_id != null ? String(p.parent_id) : null,
+      p.path != null ? String(p.path) : null,
+      Number(p.level ?? 0),
+      p.updated_at != null ? String(p.updated_at) : now,
+      p.created_at != null ? String(p.created_at) : now,
+    ]
+  );
+}
+
+async function _drugCategoryUpdated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  await db.execute(
+    `UPDATE drug_categories SET
+       name = $1, description = $2,
+       parent_id = $3, path = $4, level = $5,
+       sync_status = 'synced', updated_at = $6
+     WHERE id = $7`,
+    [
+      String(p.name ?? ""),
+      p.description != null ? String(p.description) : null,
+      p.parent_id != null ? String(p.parent_id) : null,
+      p.path != null ? String(p.path) : null,
+      Number(p.level ?? 0),
+      p.updated_at != null ? String(p.updated_at) : (e.authored_at ?? new Date().toISOString()),
+      String(e.aggregate_id),
+    ]
+  );
 }

@@ -30,6 +30,7 @@ from .endpoints.export_endpoints import router as export_router
 from .endpoints.insurance_provider_endpoints import router as insurance_provider_router
 from .endpoints.audit_endpoints import router as audit_router
 from .endpoints.auth_reset import router as auth_reset_router
+from .endpoints.conflict_endpoints import router as conflict_router
 
 
 router.include_router(auth_router, tags=["Authentication"])
@@ -54,5 +55,6 @@ router.include_router(reports_router, tags=["Reports"])
 router.include_router(export_router, tags=["Export"])
 router.include_router(insurance_provider_router, tags=["Insurance Providers"])
 router.include_router(audit_router, tags=["Audit Logs"])
+router.include_router(conflict_router, tags=["Conflicts"])
 
 __all__ = ["router"]

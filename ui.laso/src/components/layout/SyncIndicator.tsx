@@ -27,13 +27,12 @@ interface SyncIndicatorProps {
 }
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
-    const { status, pendingCount, lastSyncAt, conflicts, failures, permanentlyRejected, syncNow, discardFailure } = useSyncStatus();
+    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, discardFailure } = useSyncStatus();
     const [showConflictModal, setShowConflictModal] = useState(false);
     const [voidingFailure, setVoidingFailure] = useState<QueuedFailure | null>(null);
 
     const hasConflicts = conflicts.length > 0;
     const hasFailures = failures.length > 0;
-    const hasPermanentlyRejected = permanentlyRejected.length > 0;
     const blockedFailures = failures.filter((failure) => failure.is_blocked).length;
 
     // ── Icon and colour per status ──────────────────────────
@@ -43,7 +42,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return <RefreshCw className="w-3.5 h-3.5 animate-spin text-brand-400" />;
         if (status === "offline")
             return <WifiOff className="w-3.5 h-3.5 text-amber-400" />;
-        if (status === "error" || hasConflicts || hasFailures || hasPermanentlyRejected)
+        if (status === "error" || hasConflicts || hasFailures)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
         return <CheckCircle2 className="w-3.5 h-3.5 text-brand-400" />;
     })();
@@ -58,7 +57,6 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             }
             return `${failures.length} failed`;
         }
-        if (hasPermanentlyRejected) return `${permanentlyRejected.length} need${permanentlyRejected.length > 1 ? "" : "s"} review`;
         if (status === "error") return "Sync error";
         if (pendingCount > 0) return `${pendingCount} pending`;
         return formatRelative(lastSyncAt);
@@ -171,31 +169,6 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                         {failures.length > 3 && (
                             <p className="text-[11px] leading-tight text-white/25">
                                 …and {failures.length - 3} more
-                            </p>
-                        )}
-                    </div>
-                </>
-            )}
-            {hasPermanentlyRejected && (
-                <>
-                    <p className="mt-1.5 text-xs text-red-400 leading-tight">
-                        {permanentlyRejected.length} record{permanentlyRejected.length > 1 ? "s" : ""} could not be
-                        recovered and {permanentlyRejected.length > 1 ? "need" : "needs"} manual review
-                    </p>
-                    <div className="mt-1 space-y-1">
-                        {permanentlyRejected.slice(0, 3).map((row, i) => (
-                            <div key={i} className="text-[11px] leading-tight text-white/35">
-                                <span
-                                    className="truncate block"
-                                    title={`${row.table} record ${row.recordId} never reached the server and cannot be retried automatically.`}
-                                >
-                                    {row.table}: record never reached the server
-                                </span>
-                            </div>
-                        ))}
-                        {permanentlyRejected.length > 3 && (
-                            <p className="text-[11px] leading-tight text-white/25">
-                                …and {permanentlyRejected.length - 3} more
                             </p>
                         )}
                     </div>

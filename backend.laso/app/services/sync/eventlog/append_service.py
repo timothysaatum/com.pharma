@@ -93,7 +93,7 @@ class AppendService:
     async def append_batch(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str | str,
         envelopes: List[EventEnvelope],
     ) -> List[AppendResult]:
         """Append a batch of envelopes for a single organization.
@@ -112,6 +112,7 @@ class AppendService:
         if not envelopes:
             return []
 
+        org_id = str(org_id)
         await cls._acquire_org_lock(db, org_id)
 
         tail_hash, tail_seq = await cls._load_log_tail(db, org_id)
@@ -141,7 +142,7 @@ class AppendService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    async def _acquire_org_lock(db: AsyncSession, org_id: uuid.UUID) -> None:
+    async def _acquire_org_lock(db: AsyncSession, org_id: str) -> None:
         """Take a Postgres transaction-level advisory lock keyed on
         ``org_id``. Released automatically at commit or rollback.
         """
@@ -152,7 +153,7 @@ class AppendService:
 
     @staticmethod
     async def _load_log_tail(
-        db: AsyncSession, org_id: uuid.UUID
+        db: AsyncSession, org_id: str
     ) -> Tuple[str, int]:
         """Read the current tail of ``event_log`` for this org. Returns
         ``(hash_self_of_tail, seq_of_tail)``. For an empty log, returns
@@ -170,7 +171,7 @@ class AppendService:
                      LIMIT 1
                     """
                 ),
-                {"org_id": org_id},
+                {"org_id": str(org_id)},
             )
         ).first()
         if row is None:
@@ -181,7 +182,7 @@ class AppendService:
     async def _append_one(
         cls,
         db: AsyncSession,
-        org_id: uuid.UUID,
+        org_id: str,
         envelope: EventEnvelope,
         current_tail_hash: str,
         current_tail_seq: int,
@@ -197,7 +198,7 @@ class AppendService:
                      WHERE org_id = :org_id AND event_id = :event_id
                     """
                 ),
-                {"org_id": org_id, "event_id": envelope.event_id},
+                {"org_id": str(org_id), "event_id": envelope.event_id},
             )
         ).first()
         if existing is not None:
@@ -256,9 +257,9 @@ class AppendService:
                 ),
                 {
                     "event_id": envelope.event_id,
-                    "org_id": org_id,
+                    "org_id": str(org_id),
                     "seq": seq,
-                    "aggregate_id": envelope.aggregate_id,
+                    "aggregate_id": str(envelope.aggregate_id),
                     "aggregate_type": (
                         envelope.aggregate_type.value
                         if hasattr(envelope.aggregate_type, "value")
@@ -269,8 +270,8 @@ class AppendService:
                     "payload": _payload_json(envelope.payload),
                     "dependencies": envelope.dependencies,
                     "authored_at": envelope.authored_at,
-                    "authored_by": envelope.authored_by,
-                    "branch_id": envelope.branch_id,
+                    "authored_by": str(envelope.authored_by) if envelope.authored_by is not None else None,
+                    "branch_id": str(envelope.branch_id),
                     "hash_self": envelope.hash_self,
                     "hash_prev": current_tail_hash,
                     "received_at": received_at,
@@ -293,7 +294,7 @@ class AppendService:
                          WHERE org_id = :org_id AND event_id = :event_id
                         """
                     ),
-                    {"org_id": org_id, "event_id": envelope.event_id},
+                    {"org_id": str(org_id), "event_id": envelope.event_id},
                 )
             ).first()
             if row is None:

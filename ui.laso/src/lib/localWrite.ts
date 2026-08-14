@@ -15,9 +15,9 @@
  * The sync engine picks up sync_queue entries on next online cycle.
  */
 
-import { getDb, enqueue, appendToOutbox, getOutboxTailHash } from "@/lib/localDb";
+import { getDb, enqueue, appendToOutbox, getOutboxTailHash, getVersionVector, bumpVector } from "@/lib/localDb";
 import { generateUlid, computeHashSelf, GENESIS_HASH } from "@/lib/eventEnvelope";
-import type { OutboxEvent } from "@/lib/localDb";
+import type { OutboxEvent, VectorClock } from "@/lib/localDb";
 import type {
     Sale, DrugBatch, StockAdjustmentCreate,
     PurchaseOrder, Customer, Prescription, BranchInventory,
@@ -371,6 +371,14 @@ async function buildCustomerEnvelope(
     const eventId = generateUlid();
     const eventType = operation === "create" ? "customer_created" : "customer_updated";
 
+    // For updates, read the current vector and bump this branch's component so
+    // the server can detect concurrent edits from other branches.
+    let versionVector: VectorClock = {};
+    if (operation === "update") {
+        const current = await getVersionVector("customers", customer.id);
+        versionVector = bumpVector(current, branchId);
+    }
+
     const payload: Record<string, unknown> = {
         organization_id: customer.organization_id,
         customer_type: customer.customer_type,
@@ -385,6 +393,7 @@ async function buildCustomerEnvelope(
         insurance_member_id: customer.insurance_member_id ?? null,
         allergies: customer.allergies ?? [],
         chronic_conditions: customer.chronic_conditions ?? [],
+        version_vector: versionVector,
     };
 
     const hashSelf = await computeHashSelf(

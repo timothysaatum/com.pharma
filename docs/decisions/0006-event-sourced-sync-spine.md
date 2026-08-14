@@ -1,7 +1,8 @@
 # 0006: Event-Sourced Sync Spine (Supersedes 0003)
 
-**Status:** Accepted
+**Status:** Implemented
 **Date:** 2026-08-12
+**Completed:** 2026-08-14
 **Supersedes:** [0003 — Server-Side CRDT Merge Architecture](0003-server-side-crdt-merge-architecture.md)
 
 ## Context
@@ -79,19 +80,21 @@ movement uses a two-phase event pair (`TransferInitiated` +
 
 ## Consequences
 
-- Two-track sync (CRR + legacy queue) collapses to one — event stream
+- ✅ Two-track sync (CRR + legacy queue) collapsed to one — event stream
   per branch, projected into existing Postgres tables.
-- cr-sqlite native extension leaves the client bundle; `crsql_changes`,
-  `crsql_pack_columns`, and `sync_queue` leave the client schema.
-- `shadow_db.py`, `crr_sync_service.py`, and the legacy sale path in
-  `sync_service.py` are deleted in the final phase of the rewrite.
-  Preserved code: `pricing_calculator.py`, `sale_helpers.py`, all
-  validators (relocated into projectors), all Pydantic schemas.
-- The integration test suite currently coupled to shadow-DB semantics
-  is rewritten in parallel; business-logic tests are retained.
-- Automatic concurrent-edit resolution for reference data is replaced
-  by explicit conflict detection + repair UI (Layer 2). This is a
-  deliberate trade: fewer silent overwrites, more human touchpoints.
+- ✅ cr-sqlite native extension removed from the required startup path
+  (loading is now optional/warn-only); `crsql_changes`, `crsql_pack_columns`,
+  `suppressed_crr_changes`, `crr_audit_uploads`, and `customer_merge_directives`
+  dropped from the client schema via localDb v26 migration (2026-08-14).
+  `sync_queue` retained for purchase_orders/branch_inventory push — deferred.
+- ✅ `shadow_db.py`, `crr_sync_service.py`, `crr_sync_endpoints.py` deleted;
+  legacy sale path in `sync_service.py` removed. `pricing_calculator.py`,
+  `sale_helpers.py`, all validators, all Pydantic schemas preserved.
+- ✅ Integration test suite rewritten; CRR-coupled tests deleted.
+- ✅ Automatic concurrent-edit resolution for reference data replaced by
+  explicit conflict detection + repair UI (ConflictsPage, Layer 2).
+  Vector clocks per customer/drug/drug_category; concurrent edits land in
+  `unresolved_conflicts` for manager review (2026-08-13).
 - The eventlog grows monotonically; retention and snapshotting are
   addressed separately in ADR 0009.
 
