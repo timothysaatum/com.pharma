@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
@@ -208,10 +208,15 @@ function SyncGate({ children }: { children: React.ReactNode }) {
 
 function AppRoutes() {
   const { isAuthenticated, setupState, isLoading, initialize, user } = useAuthStore();
+  const navigate = useNavigate();
 
   useEffect(() => {
     initialize();
-    const handler = () => { window.location.href = "/login"; };
+    // Route to /login via the router, never `window.location`. A hard document
+    // navigation reloads the whole Tauri webview, which tears down React and
+    // orphans any in-flight Rust `invoke` calls — those promises then never
+    // settle, leaving loaders spinning forever ("Couldn't find callback id").
+    const handler = () => { navigate("/login", { replace: true }); };
     window.addEventListener("auth:logout", handler);
 
     // Sync when coming back online
@@ -225,7 +230,7 @@ function AppRoutes() {
       window.removeEventListener("auth:logout", handler);
       window.removeEventListener("online", onlineHandler);
     };
-  }, [initialize]);
+  }, [initialize, navigate]);
 
   if (isLoading) {
     return (

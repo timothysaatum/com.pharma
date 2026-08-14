@@ -63,6 +63,18 @@ class Customer(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
         JSONB,
         comment="{ street, city, state, zip, country }"
     )
+
+    # Per-field causality for offline conflict detection. Added by migration
+    # b2c3d4e5f6a7; declared here so the model matches the schema — otherwise
+    # `alembic revision --autogenerate` emits a DROP COLUMN for it, and any
+    # metadata-built schema (the test fixtures) omits it entirely.
+    version_vector: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="{ site_id: counter } vector clock for field-level merge"
+    )
     
     # Health information (encrypted in production)
     # Should use application-level encryption

@@ -120,7 +120,9 @@ export default function POSPage() {
                 } else {
                     sq[item.drug.id] = info.sellable;
                     if (info.sellable <= 0) {
-                        errors[item.drug.id] = `${item.drug.name} — No valid non-expired batches. Cannot sell.`;
+                        errors[item.drug.id] = info.noBatchData
+                            ? `${item.drug.name} — stock details not synced to this device yet. Sync to sell.`
+                            : `${item.drug.name} — No valid non-expired batches. Cannot sell.`;
                     } else if (item.quantity > info.sellable) {
                         errors[item.drug.id] = `Insufficient stock for ${item.drug.name}. Requested ${item.quantity}, available ${info.sellable}.`;
                     }

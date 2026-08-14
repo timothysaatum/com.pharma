@@ -860,7 +860,12 @@ export function CartPanel({
                     {/* CTA */}
                     <button
                         onClick={onCheckout}
-                        disabled={isSubmitting}
+                        // Block checkout while the cart is invalid — expired/
+                        // insufficient batches, unverified prescriptions, short
+                        // payment. These are already computed and shown above;
+                        // leaving the CTA live let a cashier submit a sale the
+                        // validator had just rejected.
+                        disabled={isSubmitting || validationErrors.length > 0}
                         type="button"
                         className="w-full py-3.5 text-sm font-bold text-white rounded-xl transition-all
                             bg-brand-600 hover:bg-brand-700 active:scale-[0.99]

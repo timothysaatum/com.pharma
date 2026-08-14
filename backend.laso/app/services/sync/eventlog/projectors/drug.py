@@ -15,6 +15,7 @@ The projector is registered so that:
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Dict
 
 from sqlalchemy import text
@@ -30,6 +31,24 @@ from app.services.sync.eventlog.projector import (
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _dt(v: Any, default: datetime) -> datetime:
+    """Coerce a payload timestamp to a real ``datetime``.
+
+    Clients send timestamps as ISO strings. psycopg2 silently casts those, but
+    asyncpg rejects them outright ("expected a datetime.date or
+    datetime.datetime instance, got 'str'"), so every client-pushed drug and
+    category event failed against a Postgres/asyncpg backend.
+    """
+    if isinstance(v, datetime):
+        return v
+    if isinstance(v, str) and v:
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00"))
+        except ValueError:
+            return default
+    return default
+
 
 def _str(v: Any) -> str | None:
     return str(v) if v is not None else None
@@ -76,7 +95,7 @@ class DrugProjector(Projector):
     async def apply(self, event: EventEnvelope, db: AsyncSession) -> None:
         p: Dict[str, Any] = event.payload
         drug_id = str(event.aggregate_id)
-        now = event.authored_at.isoformat()
+        now = event.authored_at
 
         if event.event_type == "drug_created":
             await db.execute(
@@ -91,7 +110,7 @@ class DrugProjector(Projector):
                         unit_of_measure, description, usage_instructions,
                         side_effects, contraindications, storage_conditions,
                         is_active, is_deleted,
-                        sync_status, sync_version, synced_at, updated_at, created_at
+                        sync_status, sync_version, last_synced_at, updated_at, created_at
                     ) VALUES (
                         CAST(:id AS UUID), CAST(:org_id AS UUID),
                         :name, :generic_name, :brand_name,
@@ -138,8 +157,8 @@ class DrugProjector(Projector):
                     "contraindications": _str(p.get("contraindications")),
                     "storage_conditions": _str(p.get("storage_conditions")),
                     "is_active": _bool(p.get("is_active"), True),
-                    "updated_at": p.get("updated_at", now),
-                    "created_at": p.get("created_at", now),
+                    "updated_at": _dt(p.get("updated_at"), now),
+                    "created_at": _dt(p.get("created_at"), now),
                 },
             )
 
@@ -177,7 +196,11 @@ class DrugProjector(Projector):
                         is_active = :is_active,
                         sync_status = 'synced',
                         updated_at = :updated_at
-                    WHERE id = CAST(:id AS UUID)
+                    -- `id` is VARCHAR in both the migrated and the
+                    -- model-built schema (db_types.UUID is String(36)),
+                    -- so casting the parameter to UUID makes Postgres
+                    -- look for a `varchar = uuid` operator and fail.
+                    WHERE id = :id
                 """),
                 {
                     "id": drug_id,
@@ -209,7 +232,7 @@ class DrugProjector(Projector):
                     "contraindications": _str(p.get("contraindications")),
                     "storage_conditions": _str(p.get("storage_conditions")),
                     "is_active": _bool(p.get("is_active"), True),
-                    "updated_at": p.get("updated_at", now),
+                    "updated_at": _dt(p.get("updated_at"), now),
                 },
             )
 
@@ -233,7 +256,7 @@ class DrugCategoryProjector(Projector):
     async def apply(self, event: EventEnvelope, db: AsyncSession) -> None:
         p: Dict[str, Any] = event.payload
         cat_id = str(event.aggregate_id)
-        now = event.authored_at.isoformat()
+        now = event.authored_at
 
         if event.event_type == "drug_category_created":
             await db.execute(
@@ -241,7 +264,7 @@ class DrugCategoryProjector(Projector):
                     INSERT INTO drug_categories (
                         id, organization_id, name, description,
                         parent_id, path, level, is_deleted,
-                        sync_status, sync_version, synced_at,
+                        sync_status, sync_version, last_synced_at,
                         updated_at, created_at
                     ) VALUES (
                         CAST(:id AS UUID), CAST(:org_id AS UUID),
@@ -260,8 +283,8 @@ class DrugCategoryProjector(Projector):
                     "parent_id": _str(p.get("parent_id")),
                     "path": _str(p.get("path")),
                     "level": _int(p.get("level"), 0),
-                    "updated_at": p.get("updated_at", now),
-                    "created_at": p.get("created_at", now),
+                    "updated_at": _dt(p.get("updated_at"), now),
+                    "created_at": _dt(p.get("created_at"), now),
                 },
             )
 
@@ -276,7 +299,11 @@ class DrugCategoryProjector(Projector):
                         level = :level,
                         sync_status = 'synced',
                         updated_at = :updated_at
-                    WHERE id = CAST(:id AS UUID)
+                    -- `id` is VARCHAR in both the migrated and the
+                    -- model-built schema (db_types.UUID is String(36)),
+                    -- so casting the parameter to UUID makes Postgres
+                    -- look for a `varchar = uuid` operator and fail.
+                    WHERE id = :id
                 """),
                 {
                     "id": cat_id,
@@ -285,6 +312,6 @@ class DrugCategoryProjector(Projector):
                     "parent_id": _str(p.get("parent_id")),
                     "path": _str(p.get("path")),
                     "level": _int(p.get("level"), 0),
-                    "updated_at": p.get("updated_at", now),
+                    "updated_at": _dt(p.get("updated_at"), now),
                 },
             )

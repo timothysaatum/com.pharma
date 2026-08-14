@@ -1013,7 +1013,9 @@ export default function SalesHistoryPage() {
                 setSalesFromCache(false);
             }
         } finally {
-            if (!controller.signal.aborted) setLoading(false);
+            // Clear the loader unless a NEWER fetch already owns it. Keying off
+            // `aborted` leaves the spinner stuck forever on any cancellation.
+            if (abortRef.current === controller) setLoading(false);
         }
     }, [activeBranchId, statusFilter, paymentFilter, startDate, endDate]);
 

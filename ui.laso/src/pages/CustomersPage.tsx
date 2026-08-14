@@ -145,7 +145,9 @@ export default function CustomersPage() {
                 setCustomersFromCache(false);
             }
         } finally {
-            if (!ctrl.signal.aborted) setIsLoading(false);
+            // Clear the loader unless a NEWER fetch already owns it. Keying off
+            // `aborted` leaves the spinner stuck forever on any cancellation.
+            if (abortRef.current === ctrl) setIsLoading(false);
         }
     }, [page, debouncedSearch, filterType, filterTier, user?.organization_id]);
 
