@@ -189,7 +189,11 @@ export default function DrugListPage() {
                 setDrugsFromCache(false);
             }
         } finally {
-            if (!controller.signal.aborted) setIsLoading(false);
+            // Clear the loader unless a NEWER fetch has already taken over
+            // (that one owns the loading state). Keying off `aborted` instead
+            // would leave the spinner stuck forever whenever a request was
+            // cancelled, which is exactly how this page hung.
+            if (abortRef.current === controller) setIsLoading(false);
         }
     }, [page, debouncedSearch, filterType, filterCategory, filterActive, activeBranchId]);
 

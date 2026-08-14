@@ -76,6 +76,47 @@ export function getDb(): Promise<Database> {
   return _dbPromise;
 }
 
+/**
+ * Raised when a Tauri `invoke` into the local SQLite layer does not settle in
+ * time. Callers can distinguish this from a genuine SQL error and surface a
+ * retryable state instead of blocking forever.
+ */
+export class LocalDbTimeoutError extends Error {
+  constructor(public readonly command: string, public readonly timeoutMs: number) {
+    super(`Local database call "${command}" timed out after ${timeoutMs}ms`);
+    this.name = "LocalDbTimeoutError";
+  }
+}
+
+/** Hard ceiling for any single local-DB round trip. */
+const LOCAL_DB_TIMEOUT_MS = 15_000;
+
+/**
+ * `invoke` with a hard timeout.
+ *
+ * A Tauri IPC promise can hang indefinitely when its callback id is dropped —
+ * e.g. the webview reloaded while Rust was mid-operation. Without a ceiling
+ * every caller inherits that hang: `withTimeout`'s cache fallback is not
+ * itself bounded, so a stalled read leaves loaders spinning with no error.
+ * Rejecting here converts a silent hang into a surfaced, retryable failure.
+ */
+async function invokeWithTimeout<T>(command: string, args: Record<string, unknown>): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      invoke<T>(command, args),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new LocalDbTimeoutError(command, LOCAL_DB_TIMEOUT_MS)),
+          LOCAL_DB_TIMEOUT_MS,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 async function initDb(): Promise<Database> {
   if (!IS_TAURI) {
     console.warn("[localDb] Not running in Tauri environment, using MockDb.");
@@ -86,19 +127,19 @@ async function initDb(): Promise<Database> {
   // Use rusqlite-backed Tauri commands instead of tauri-plugin-sql
   const db: Database = {
     execute: async (sql: string, values?: unknown[]): Promise<ExecResult> => {
-      const result = await invoke<ExecResult>("db_execute", { sql, values: values ?? [] });
+      const result = await invokeWithTimeout<ExecResult>("db_execute", { sql, values: values ?? [] });
       return result;
     },
     select: async <T>(sql: string, values?: unknown[]): Promise<T> => {
-      const result = await invoke<T>("db_select", { sql, values: values ?? [] });
+      const result = await invokeWithTimeout<T>("db_select", { sql, values: values ?? [] });
       return result;
     },
     execute_batch: async (sql: string): Promise<void> => {
-      await invoke<void>("db_execute_batch", { sql });
+      await invokeWithTimeout<void>("db_execute_batch", { sql });
     },
     executeTransaction: async (
       statements: DbTransactionStatement[],
-    ): Promise<ExecResult[]> => invoke<ExecResult[]>("db_execute_transaction", {
+    ): Promise<ExecResult[]> => invokeWithTimeout<ExecResult[]>("db_execute_transaction", {
       statements: statements.map((statement) => ({
         sql: statement.sql,
         values: statement.values ?? [],
@@ -1839,56 +1880,6 @@ export async function migrate_v23(db: Database): Promise<void> {
     // Already renamed by a prior interrupted attempt at this migration.
   }
   await db.execute("PRAGMA user_version = 23");
-}
-
-async function ensureCrrAuditUploadSchema(db: Database): Promise<void> {
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS crr_renumber_audit (
-      id                INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_id          TEXT NOT NULL UNIQUE,
-      table_name        TEXT NOT NULL,
-      winner_id         TEXT NOT NULL,
-      loser_id          TEXT NOT NULL,
-      business_key_col  TEXT NOT NULL,
-      old_business_key  TEXT NOT NULL,
-      new_business_key  TEXT NOT NULL,
-      renumbered_at     TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      uploaded_at       TEXT
-    )
-  `);
-  try {
-    await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN event_id TEXT");
-  } catch { }
-  try {
-    await db.execute("ALTER TABLE crr_renumber_audit ADD COLUMN uploaded_at TEXT");
-  } catch { }
-  await db.execute(`
-    UPDATE crr_renumber_audit
-    SET event_id = table_name || ':' || loser_id || ':' ||
-                   old_business_key || ':' || new_business_key
-    WHERE event_id IS NULL OR event_id = ''
-  `);
-  await db.execute(`
-    CREATE UNIQUE INDEX IF NOT EXISTS uq_crr_renumber_audit_event_id
-    ON crr_renumber_audit(event_id)
-  `);
-}
-
-async function ensureCustomerMergeDirectiveSchema(db: Database): Promise<void> {
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS customer_merge_aliases (
-      loser_id     TEXT PRIMARY KEY,
-      survivor_id  TEXT NOT NULL,
-      event_id     TEXT NOT NULL,
-      merged_at    TEXT NOT NULL
-    )
-  `);
-  await db.execute(`
-    CREATE TABLE IF NOT EXISTS applied_customer_merge_directives (
-      event_id    TEXT PRIMARY KEY,
-      applied_at  TEXT NOT NULL
-    )
-  `);
 }
 
 async function ensureBranchInventorySchema(db: Database): Promise<void> {

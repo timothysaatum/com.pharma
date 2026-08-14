@@ -185,7 +185,7 @@ class TestDrugProjector:
         assert results[0].status == EventStatus.ACCEPTED
 
         row = (await db.execute(
-            text("SELECT name, drug_type, unit_price, sync_status FROM drugs WHERE id = CAST(:id AS UUID)"),
+            text("SELECT name, drug_type, unit_price, sync_status FROM drugs WHERE id = :id"),
             {"id": str(drug_id)},
         )).mappings().first()
 
@@ -229,7 +229,7 @@ class TestDrugProjector:
         assert r2[0].status == EventStatus.ACCEPTED
 
         count = (await db.execute(
-            text("SELECT COUNT(*) FROM drugs WHERE id = CAST(:id AS UUID)"),
+            text("SELECT COUNT(*) FROM drugs WHERE id = :id"),
             {"id": str(drug_id)},
         )).scalar_one()
         assert count == 1
@@ -269,7 +269,7 @@ class TestDrugProjector:
         assert results[0].status == EventStatus.ACCEPTED
 
         row = (await db.execute(
-            text("SELECT name, unit_price, is_active, sync_status FROM drugs WHERE id = CAST(:id AS UUID)"),
+            text("SELECT name, unit_price, is_active, sync_status FROM drugs WHERE id = :id"),
             {"id": str(drug_id)},
         )).mappings().first()
 
@@ -350,7 +350,7 @@ class TestDrugCategoryProjector:
         assert results[0].status == EventStatus.ACCEPTED
 
         row = (await db.execute(
-            text("SELECT name, description, level, sync_status FROM drug_categories WHERE id = CAST(:id AS UUID)"),
+            text("SELECT name, description, level, sync_status FROM drug_categories WHERE id = :id"),
             {"id": str(cat_id)},
         )).mappings().first()
 
@@ -394,7 +394,7 @@ class TestDrugCategoryProjector:
         assert r2[0].status == EventStatus.ACCEPTED
 
         count = (await db.execute(
-            text("SELECT COUNT(*) FROM drug_categories WHERE id = CAST(:id AS UUID)"),
+            text("SELECT COUNT(*) FROM drug_categories WHERE id = :id"),
             {"id": str(cat_id)},
         )).scalar_one()
         assert count == 1
@@ -434,7 +434,7 @@ class TestDrugCategoryProjector:
         assert results[0].status == EventStatus.ACCEPTED
 
         row = (await db.execute(
-            text("SELECT name, description, level FROM drug_categories WHERE id = CAST(:id AS UUID)"),
+            text("SELECT name, description, level FROM drug_categories WHERE id = :id"),
             {"id": str(cat_id)},
         )).mappings().first()
 

@@ -574,14 +574,21 @@ export interface BranchInventoryWithDetails extends BranchInventory {
     branch_name: string;
     branch_code: string;
     /**
-     * Client-computed convenience field: `quantity - reserved_quantity`.
-     * The server does not return this; compute it where needed:
-     *   const available = inv.available_quantity ?? (inv.quantity - inv.reserved_quantity);
+     * `quantity - reserved_quantity`, floored at 0.
+     *
+     * The server DOES return this (a Pydantic computed field on
+     * BranchInventoryWithDetails). It is expiry-aware: InventoryService
+     * already replaces `quantity` with the sum of unexpired batches before
+     * serialising, so this is derived from unexpired stock, not raw on-hand.
      */
     available_quantity?: number;
     /**
      * Sum of remaining_quantity from non-expired batches for this drug/branch.
      * 0 if all batches are expired or none exist.
+     *
+     * Only the LOCAL read path populates this (localRead.getBranchInventory
+     * computes it in SQL). Server responses omit it — callers fall back to
+     * `available_quantity`, which is equivalent and also expiry-aware.
      */
     valid_batch_quantity?: number;
 }

@@ -1172,7 +1172,14 @@ export const localRead = {
   async getSellableQuantity(
     branchId: string,
     drugId: string,
-  ): Promise<{ sellable: number; totalValidBatch: number; notStocked: boolean }> {
+  ): Promise<{
+    sellable: number;
+    totalValidBatch: number;
+    notStocked: boolean;
+    /** True when this device holds no batch rows at all for the drug — i.e. an
+     *  un-synced cache, not genuinely expired stock. */
+    noBatchData: boolean;
+  }> {
     const db = await getDb();
 
     const invRows = await db.select<Array<{ quantity: number }>>(
@@ -1182,6 +1189,7 @@ export const localRead = {
       [branchId, drugId]
     );
     const notStocked = invRows.length === 0;
+    const inventoryQuantity = Number(invRows[0]?.quantity ?? 0);
 
     const batchRows = await db.select<Array<{ remaining: number }>>(
       `SELECT COALESCE(SUM(remaining_quantity), 0) AS remaining
@@ -1194,8 +1202,28 @@ export const localRead = {
     );
     const totalValidBatch = batchRows[0]?.remaining ?? 0;
 
-    const sellable = Math.max(0, totalValidBatch);
-    return { sellable, totalValidBatch, notStocked };
+    // Does this device hold ANY batch rows for the drug, expired or not?
+    // `drug_batches` is only ever populated by a full sync, whereas
+    // `branch_inventory` is also written by the online inventory cache. So a
+    // device that has not completed a sync has stock rows but zero batch rows —
+    // indistinguishable, by the expiry query alone, from "every batch expired".
+    // Treating that as unsellable blocked legitimate sales at a stocked branch.
+    const anyBatchRows = await db.select<Array<{ n: number }>>(
+      `SELECT COUNT(*) AS n FROM drug_batches WHERE branch_id = $1 AND drug_id = $2`,
+      [branchId, drugId]
+    );
+    const noBatchData = Number(anyBatchRows[0]?.n ?? 0) === 0;
+
+    // With no local batch data, fall back to the cached inventory quantity.
+    // That figure is not raw stock: the server already reduces it to the sum of
+    // unexpired batches before returning it, so the fallback stays expiry-aware.
+    // The server re-validates stock and expiry when the sale is committed, so
+    // this gate is advisory — it must not hard-block on a cold cache.
+    const sellable = noBatchData
+      ? Math.max(0, inventoryQuantity)
+      : Math.max(0, totalValidBatch);
+
+    return { sellable, totalValidBatch, notStocked, noBatchData };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {

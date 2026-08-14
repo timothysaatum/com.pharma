@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -197,6 +197,7 @@ def _make_sale_created_envelope(
     hash_prev: str = GENESIS_HASH,
     payment_method: str = "cash",
     status: str = "completed",
+    authored_at: datetime | None = None,
 ) -> EventEnvelope:
     sid = sale_id or uuid.uuid4()
     item_id = uuid.uuid4()
@@ -254,7 +255,7 @@ def _make_sale_created_envelope(
             ],
         },
         dependencies=[],
-        authored_at=datetime.now(timezone.utc),
+        authored_at=authored_at or datetime.now(timezone.utc),
         authored_by=authored_by,
         branch_id=branch_id,
         org_id=org_id,
@@ -665,6 +666,110 @@ class TestSaleSyncProjector:
             )
         ).fetchone()
         assert batch_row.remaining_quantity == 100  # untouched
+
+    async def test_sale_from_expired_batch_is_rejected(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        """An offline terminal must not be able to push through a sale drawn
+        from a batch that had already expired when the sale was rung up.
+
+        The client alone chooses the batch, so without a server-side expiry
+        guard a stale device could dispense expired medication and the
+        projector would happily decrement it. The online path has always
+        filtered on expiry (SalesService FEFO allocation); this closes the
+        same hole on the offline replay path.
+        """
+        org, branch, user, drug, batch_id, batch_number, _ = sale_test_data
+
+        # The batch expired a week before the sale was authored.
+        expired_on = date.today() - timedelta(days=7)
+        await db.execute(
+            text("UPDATE drug_batches SET expiry_date = :exp WHERE id = :bid"),
+            {"exp": expired_on, "bid": str(batch_id)},
+        )
+        await db.commit()
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expired_on,
+            quantity=5,
+            authored_at=datetime.now(timezone.utc),
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+
+        assert results[0].status == EventStatus.REJECTED_TRANSIENT
+
+        # Neither the sale nor the batch may be touched.
+        count = (
+            await db.execute(
+                text("SELECT COUNT(*) FROM sales WHERE id = :id"),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).scalar()
+        assert count == 0
+
+        batch_row = (
+            await db.execute(
+                text("SELECT remaining_quantity FROM drug_batches WHERE id = :bid"),
+                {"bid": str(batch_id)},
+            )
+        ).fetchone()
+        assert batch_row.remaining_quantity == 100
+
+    async def test_sale_authored_before_expiry_still_applies(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        """The expiry guard keys off when the sale was AUTHORED, not when it is
+        projected.
+
+        A branch that was offline for a fortnight may push sales that were
+        entirely legitimate when rung up, even though the batch has since
+        lapsed. Rejecting those would dead-letter real, already-dispensed
+        sales and silently understate revenue.
+        """
+        org, branch, user, drug, batch_id, batch_number, _ = sale_test_data
+
+        expired_on = date.today() - timedelta(days=3)
+        await db.execute(
+            text("UPDATE drug_batches SET expiry_date = :exp WHERE id = :bid"),
+            {"exp": expired_on, "bid": str(batch_id)},
+        )
+        await db.commit()
+
+        # Rung up 10 days ago — a week before the batch lapsed.
+        authored = datetime.now(timezone.utc) - timedelta(days=10)
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expired_on,
+            quantity=5,
+            authored_at=authored,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+
+        assert results[0].status == EventStatus.ACCEPTED
+
+        batch_row = (
+            await db.execute(
+                text("SELECT remaining_quantity FROM drug_batches WHERE id = :bid"),
+                {"bid": str(batch_id)},
+            )
+        ).fetchone()
+        assert batch_row.remaining_quantity == 95
 
     async def test_sale_org_scope_violation_rejected_permanently(
         self, db: AsyncSession, sale_test_data, event_sync_tables

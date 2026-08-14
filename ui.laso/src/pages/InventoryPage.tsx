@@ -628,7 +628,9 @@ function AddBranchDrugModal({
         drugApi.list({ search: debouncedQuery || undefined, is_active: true, page: 1, page_size: 30 }, ctrl.signal)
             .then((result) => setDrugs(result.items.filter((drug) => !existingDrugIds.has(drug.id))))
             .catch((err) => { if (!ctrl.signal.aborted) setError(parseApiError(err)); })
-            .finally(() => { if (!ctrl.signal.aborted) setLoading(false); });
+            // Always clear the loader — a cancelled request that skips this
+            // leaves the picker spinning with no way to recover.
+            .finally(() => setLoading(false));
         return () => ctrl.abort();
     }, [debouncedQuery, existingDrugIds]);
 
@@ -1056,7 +1058,9 @@ export default function InventoryPage() {
                 setInventoryFromCache(false);
             }
         } finally {
-            if (!controller.signal.aborted) setIsLoading(false);
+            // Clear the loader unless a NEWER fetch already owns it. Keying off
+            // `aborted` leaves the spinner stuck forever on any cancellation.
+            if (abortRef.current === controller) setIsLoading(false);
         }
     }, [activeBranchId, page, filterKey]);
 

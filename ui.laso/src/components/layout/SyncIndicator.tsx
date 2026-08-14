@@ -35,6 +35,16 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
     const hasFailures = failures.length > 0;
     const blockedFailures = failures.filter((failure) => failure.is_blocked).length;
 
+    // This device has never completed a sync, so every local read is served
+    // from an empty or partial cache. Showing that as "healthy" is actively
+    // misleading in a pharmacy: stock figures cannot be trusted until the
+    // first sync lands.
+    const neverSynced = !lastSyncAt;
+    // A sync that succeeded but has since gone cold is also not "green".
+    const STALE_AFTER_MS = 24 * 60 * 60 * 1000;
+    const isStale =
+        !neverSynced && Date.now() - new Date(lastSyncAt).getTime() > STALE_AFTER_MS;
+
     // ── Icon and colour per status ──────────────────────────
 
     const icon = (() => {
@@ -44,6 +54,10 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return <WifiOff className="w-3.5 h-3.5 text-amber-400" />;
         if (status === "error" || hasConflicts || hasFailures)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
+        if (neverSynced)
+            return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
+        if (isStale)
+            return <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />;
         return <CheckCircle2 className="w-3.5 h-3.5 text-brand-400" />;
     })();
 
@@ -58,6 +72,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return `${failures.length} failed`;
         }
         if (status === "error") return "Sync error";
+        if (neverSynced) return "Never synced";
         if (pendingCount > 0) return `${pendingCount} pending`;
         return formatRelative(lastSyncAt);
     })();
@@ -118,6 +133,14 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                     </button>
                 )}
             </div>
+
+            {/* Never-synced warning — explains empty/absent stock figures */}
+            {neverSynced && !hasConflicts && !hasFailures && status !== "syncing" && (
+                <p className="mt-1.5 text-xs text-red-400 leading-tight">
+                    No data has synced to this device yet — stock figures may be
+                    incomplete.
+                </p>
+            )}
 
             {/* Conflict warning */}
             {hasConflicts && (

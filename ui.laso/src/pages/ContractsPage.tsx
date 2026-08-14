@@ -153,7 +153,9 @@ export default function ContractsPage() {
             }
             if (!ctrl.signal.aborted) setError(parseApiError(err));
         } finally {
-            if (!ctrl.signal.aborted) setIsLoading(false);
+            // Clear the loader unless a NEWER fetch already owns it. Keying off
+            // `aborted` leaves the spinner stuck forever on any cancellation.
+            if (abortRef.current === ctrl) setIsLoading(false);
         }
     }, [page, debouncedSearch, filterType, filterStatus]);
 

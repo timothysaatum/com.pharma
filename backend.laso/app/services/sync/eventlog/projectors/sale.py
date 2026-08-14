@@ -433,6 +433,14 @@ async def _apply_item(
         )
 
         if alloc_batch_id:
+            # The expiry guard is evaluated against `authored_at` — when the
+            # cashier actually made the sale — not against the projection time.
+            # An offline sale is legitimate if the batch was in date when it was
+            # rung up, even if it syncs days later and the batch has since
+            # expired. Without this predicate the client alone decided which
+            # batch to draw from, so a terminal holding a stale view could push
+            # an expired-batch sale straight through; the online path has always
+            # filtered on expiry (see SalesService FEFO allocation).
             batch_row = (
                 await db.execute(
                     text("""
@@ -443,18 +451,54 @@ async def _apply_item(
                                sync_status = 'synced'
                          WHERE id = :batch_id
                            AND remaining_quantity >= :qty
+                           AND (
+                                 expiry_date IS NULL
+                                 OR expiry_date >= CAST(:sold_at AS DATE)
+                               )
                         RETURNING
                             remaining_quantity + :qty AS qty_before,
                             remaining_quantity       AS qty_after
                     """),
-                    {"batch_id": alloc_batch_id, "qty": alloc_qty, "now": now},
+                    {
+                        "batch_id": alloc_batch_id,
+                        "qty": alloc_qty,
+                        "now": now,
+                        "sold_at": authored_at,
+                    },
                 )
             ).fetchone()
 
             if batch_row is None:
+                # Distinguish the two causes so the dead-letter entry tells a
+                # human which one it was rather than always blaming stock.
+                diag = (
+                    await db.execute(
+                        text("""
+                            SELECT remaining_quantity, expiry_date
+                              FROM drug_batches
+                             WHERE id = :batch_id
+                        """),
+                        {"batch_id": alloc_batch_id},
+                    )
+                ).fetchone()
+
+                if diag is None:
+                    raise ValueError(
+                        f"Unknown batch {alloc_batch_id} for drug {drug_id}"
+                    )
+                if (
+                    diag.expiry_date is not None
+                    and diag.expiry_date < authored_at.date()
+                ):
+                    raise ValueError(
+                        f"Expired batch {alloc_batch_id} (expired "
+                        f"{diag.expiry_date}) cannot be sold: sale was authored "
+                        f"{authored_at.date()} (drug {drug_id})"
+                    )
                 raise ValueError(
                     f"Insufficient stock in batch {alloc_batch_id}: "
-                    f"need {alloc_qty} units (drug {drug_id})"
+                    f"need {alloc_qty} units, have {diag.remaining_quantity} "
+                    f"(drug {drug_id})"
                 )
             batch_results.append((alloc, batch_row.qty_before, batch_row.qty_after))
 

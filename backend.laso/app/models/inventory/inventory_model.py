@@ -3,7 +3,7 @@ from sqlalchemy import (
     String, Integer, Boolean, Numeric, Text, 
     ForeignKey, Index, CheckConstraint, event
 )
-from app.models.db_types import UUID
+from app.models.db_types import UUID, JSONB
 from sqlalchemy.orm import (
     Mapped, mapped_column, relationship,
     validates
@@ -38,7 +38,17 @@ class DrugCategory(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
       
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
-    
+
+    # See Customer.version_vector — added by migration b2c3d4e5f6a7 and declared
+    # here to keep the model in step with the schema.
+    version_vector: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="{ site_id: counter } vector clock for field-level merge"
+    )
+
     # Hierarchical support
     parent_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
@@ -83,13 +93,23 @@ class Drug(Base, TimestampMixin, SyncTrackingMixin, SoftDeleteMixin):
     Optimized for offline-first with comprehensive indexing.
     """
     __tablename__ = 'drugs'
-    
+
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         primary_key=True,
         default=uuid.uuid4
     )
-    
+
+    # See Customer.version_vector — added by migration b2c3d4e5f6a7 and declared
+    # here to keep the model in step with the schema.
+    version_vector: Mapped[dict] = mapped_column(
+        JSONB,
+        nullable=False,
+        default=dict,
+        server_default="{}",
+        comment="{ site_id: counter } vector clock for field-level merge"
+    )
+
     organization_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey('organizations.id', ondelete='CASCADE'),
