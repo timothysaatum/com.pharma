@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import {
     Eye, EyeOff, AlertTriangle,
@@ -313,12 +313,12 @@ export default function LoginPage() {
                                 <div className="pt-2 border-t border-slate-100 text-center">
                                     <p className="text-xs text-ink-muted">
                                         Don't have an account?{" "}
-                                        <a
-                                            href="/onboarding"
+                                        <Link
+                                            to="/onboarding"
                                             className="text-brand-600 hover:text-brand-700 font-semibold hover:underline"
                                         >
                                             Set up your organization
-                                        </a>
+                                        </Link>
                                     </p>
                                 </div>
                             </motion.div>

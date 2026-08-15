@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, Link } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import type { Resolver } from "react-hook-form";
@@ -198,12 +198,12 @@ export default function OnboardingPage() {
 
                 <p className="text-center text-sm text-ink-muted mt-6">
                     Already have an account?{" "}
-                    <a
-                        href="/login"
+                    <Link
+                        to="/login"
                         className="text-brand-600 hover:text-brand-700 font-semibold hover:underline"
                     >
                         Sign in
-                    </a>
+                    </Link>
                 </p>
             </div>
         </PageShell>

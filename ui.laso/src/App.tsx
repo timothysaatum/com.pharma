@@ -247,13 +247,6 @@ function AppRoutes() {
 
   return (
     <SyncGate>
-      <Suspense
-        fallback={
-          <div className="min-h-screen bg-slate-50 flex items-center justify-center">
-            <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        }
-      >
         <Routes>
         {/* ── Public / setup ── */}
 
@@ -308,104 +301,69 @@ function AppRoutes() {
           }
         />
 
-        {/* ── Protected app routes ── */}
+        {/* ── Protected app routes (Layout Route maintains AppShell mounted) ── */}
         <Route
-          path="/pos"
-          element={<RequireAuth><AppShell><POSPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/customers"
-          element={<RequireAuth><AppShell><CustomersPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/sales"
-          element={<RequireAuth><AppShell><SalesHistoryPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/prescriptions"
-          element={<RequireAuth><AppShell><PrescriptionsPage /></AppShell></RequireAuth>}
-        />
-
-        {/*
-         * /users — user management.
-         * Accessible to admin, super_admin, and manager.
-         * The page itself enforces per-role data scoping (managers only see
-         * users in their branches; only admins/super_admins can create/delete).
-         */}
-        <Route
-          path="/users"
           element={
             <RequireAuth>
-              <RequireManager>
-                <AppShell><UsersPage /></AppShell>
-              </RequireManager>
+              <AppShell />
             </RequireAuth>
           }
-        />
-        <Route
-          path="/audit-logs"
-          element={
-            <RequireAuth>
+        >
+          <Route path="/pos" element={<POSPage />} />
+          <Route path="/customers" element={<CustomersPage />} />
+          <Route path="/sales" element={<SalesHistoryPage />} />
+          <Route path="/prescriptions" element={<PrescriptionsPage />} />
+          <Route
+            path="/users"
+            element={
               <RequireManager>
-                <AppShell><AuditLogPage /></AppShell>
+                <UsersPage />
               </RequireManager>
-            </RequireAuth>
-          }
-        />
-
-        <Route
-          path="/settings"
-          element={
-            <RequireAuth>
+            }
+          />
+          <Route
+            path="/audit-logs"
+            element={
+              <RequireManager>
+                <AuditLogPage />
+              </RequireManager>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
               <RequireAdmin>
-                <AppShell><SettingsPage /></AppShell>
+                <SettingsPage />
               </RequireAdmin>
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/settings/:tab"
-          element={
-            <RequireAuth>
+            }
+          />
+          <Route
+            path="/settings/:tab"
+            element={
               <RequireAdmin>
-                <AppShell><SettingsPage /></AppShell>
+                <SettingsPage />
               </RequireAdmin>
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/reports"
-          element={<RequireAuth><AppShell><ReportsPage /></AppShell></RequireAuth>}
-        />
-        <Route
-          path="/admin"
-          element={
-            <RequireAuth>
+            }
+          />
+          <Route path="/reports" element={<ReportsPage />} />
+          <Route
+            path="/admin"
+            element={
               <RequireManager>
-                <AppShell><AdminPage /></AppShell>
+                <AdminPage />
               </RequireManager>
-            </RequireAuth>
-          }
-        />
-        <Route
-          path="/admin/:tab"
-          element={
-            <RequireAuth>
+            }
+          />
+          <Route
+            path="/admin/:tab"
+            element={
               <RequireManager>
-                <AppShell><AdminPage /></AppShell>
+                <AdminPage />
               </RequireManager>
-            </RequireAuth>
-          }
-        />
-
-        <Route
-          path="/conflicts"
-          element={
-            <RequireAuth>
-              <AppShell><ConflictsPage /></AppShell>
-            </RequireAuth>
-          }
-        />
+            }
+          />
+          <Route path="/conflicts" element={<ConflictsPage />} />
+        </Route>
 
         <Route path="/drugs" element={<Navigate to="/admin/drugs" replace />} />
         <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
@@ -424,7 +382,6 @@ function AppRoutes() {
         />
         <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
-      </Suspense>
     </SyncGate>
   );
 }

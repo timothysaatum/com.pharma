@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { useState, useEffect, useRef, Suspense } from "react";
+import { NavLink, useNavigate, Outlet } from "react-router-dom";
 import {
     ShoppingCart, Users, BarChart2, FileText,
     LogOut, Building2, Menu, X, Activity,
@@ -69,7 +69,7 @@ export const NAV_ITEMS: NavItem[] = [
 ];
 
 
-export function AppShell({ children }: { children: React.ReactNode }) {
+export function AppShell({ children }: { children?: React.ReactNode }) {
     const { user, logout, activeBranchId, setActiveBranch } = useAuthStore();
     const navigate = useNavigate();
     const [collapsed, setCollapsed] = useState(false);
@@ -437,7 +437,18 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         </button>
                     </div>
                 )}
-                {children}
+                <Suspense
+                    fallback={
+                        <div className="flex-1 bg-surface flex items-center justify-center p-12">
+                            <div className="flex flex-col items-center gap-3">
+                                <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
+                                <p className="text-sm font-medium text-ink-muted">Loading page…</p>
+                            </div>
+                        </div>
+                    }
+                >
+                    {children ?? <Outlet />}
+                </Suspense>
             </main>
         </div>
     );
