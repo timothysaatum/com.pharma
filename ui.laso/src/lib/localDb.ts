@@ -3419,6 +3419,28 @@ async function migrate_v27(db: Database): Promise<void> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v28 — add stock_leases table for Phase 4 stock partitioning
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function migrate_v28(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS stock_leases (
+      id                 TEXT PRIMARY KEY,
+      branch_id          TEXT NOT NULL,
+      drug_id            TEXT NOT NULL,
+      terminal_id        TEXT NOT NULL,
+      leased_quantity    INTEGER NOT NULL DEFAULT 0,
+      consumed_quantity  INTEGER NOT NULL DEFAULT 0,
+      expires_at         TEXT NOT NULL,
+      status             TEXT NOT NULL DEFAULT 'active',
+      created_at         TEXT NOT NULL,
+      updated_at         TEXT NOT NULL
+    );
+  `);
+  await db.execute("PRAGMA user_version = 28");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // VERSION VECTOR HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -19,8 +19,11 @@ describe("getSellableQuantity — projected field", () => {
   afterEach(() => vi.clearAllMocks());
 
   it("reads sellable_quantity directly from branch_inventory", async () => {
+    Object.defineProperty(navigator, "onLine", { value: true, configurable: true });
     const db = await getDb();
-    vi.spyOn(db, "select").mockResolvedValueOnce([{ quantity: 100, sellable_quantity: 40 }]);
+    vi.spyOn(db, "select")
+      .mockResolvedValueOnce([{ quantity: 100, sellable_quantity: 40 }])
+      .mockResolvedValueOnce([]);
 
     const info = await localRead.getSellableQuantity("branch-1", "drug-1");
 
@@ -28,6 +31,6 @@ describe("getSellableQuantity — projected field", () => {
     expect(info.totalValidBatch).toBe(40);
     expect(info.notStocked).toBe(false);
     expect(info.noBatchData).toBe(false);
-    expect(db.select).toHaveBeenCalledTimes(1);
+    expect(db.select).toHaveBeenCalledTimes(2);
   });
 });
