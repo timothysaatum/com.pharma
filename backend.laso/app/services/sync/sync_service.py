@@ -640,12 +640,18 @@ class SyncService:
 
         if "branch_inventory" in tables:
             rows = await _pull(BranchInventory, BranchInventory.branch_id == branch_id)
-            result.branch_inventory = [
-                BranchInventoryResponse.model_validate(r).model_copy(
-                    update={"sync_status": "synced"}
-                )
-                for r in rows
-            ]
+            if rows:
+                from app.services.sync._sellable_qty import compute_sellable_quantities
+                drug_ids = [r.drug_id for r in rows]
+                sellable_map = await compute_sellable_quantities(db, branch_id, drug_ids)
+                result.branch_inventory = [
+                    BranchInventoryResponse.model_validate(r).model_copy(
+                        update={"sync_status": "synced", "sellable_quantity": sellable_map.get(r.drug_id, 0)}
+                    )
+                    for r in rows
+                ]
+            else:
+                result.branch_inventory = []
             total += len(rows)
 
         if "drug_batches" in tables:

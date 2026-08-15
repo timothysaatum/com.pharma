@@ -1480,6 +1480,7 @@ async function migrate_v22(db: Database): Promise<void> {
             drug_id           TEXT NOT NULL DEFAULT '',
             quantity          INTEGER NOT NULL DEFAULT 0,
             reserved_quantity INTEGER NOT NULL DEFAULT 0,
+            sellable_quantity INTEGER NOT NULL DEFAULT 0,
             location          TEXT,
             selling_price     REAL,
             sync_status       TEXT NOT NULL DEFAULT 'synced',
@@ -1488,7 +1489,7 @@ async function migrate_v22(db: Database): Promise<void> {
             updated_at        TEXT NOT NULL DEFAULT '',
             created_at        TEXT NOT NULL DEFAULT ''
           )`,
-          cols: `id, branch_id, drug_id, quantity, reserved_quantity, location,
+          cols: `id, branch_id, drug_id, quantity, reserved_quantity, sellable_quantity, location,
             selling_price, sync_status, sync_version, synced_at, updated_at, created_at`,
         },
         drug_batches: {

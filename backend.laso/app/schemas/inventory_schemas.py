@@ -44,6 +44,7 @@ class BranchInventoryResponse(BranchInventoryBase, TimestampSchema, SyncSchema):
     id: uuid.UUID
     branch_id: uuid.UUID
     drug_id: uuid.UUID
+    sellable_quantity: int = 0
     
     @computed_field
     @property

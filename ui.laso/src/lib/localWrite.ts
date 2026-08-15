@@ -768,6 +768,7 @@ export const writeLocal = {
                     drug_id: drugId,
                     quantity: quantityDelta,
                     reserved_quantity: 0,
+                    sellable_quantity: 0,
                     location: null,
                     selling_price: null,
                     updated_at: now,
@@ -776,10 +777,10 @@ export const writeLocal = {
             } else {
                 await db.execute(
                     `INSERT INTO branch_inventory (
-                       id, branch_id, drug_id, quantity, reserved_quantity,
+                       id, branch_id, drug_id, quantity, reserved_quantity, sellable_quantity,
                        location, selling_price, sync_status, sync_version,
                        synced_at, updated_at, created_at
-                     ) VALUES ($1, $2, $3, $4, 0, NULL, NULL, 'synced', 1, NULL, $5, $5)`,
+                     ) VALUES ($1, $2, $3, $4, 0, 0, NULL, NULL, 'synced', 1, NULL, $5, $5)`,
                     [id, branchId, drugId, quantityDelta, now]
                 );
             }

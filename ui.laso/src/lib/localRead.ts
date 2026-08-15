@@ -912,13 +912,7 @@ export const localRead = {
   ): Promise<PaginatedResponse<BranchInventoryWithDetails>> {
     console.log(`[LocalRead] getBranchInventory: branch=${branchId}, search=${params.search}, low_stock=${params.low_stock_only}, page=${page}`);
     const db = await getDb();
-    const validBatchSumSql = `COALESCE((
-      SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
-      WHERE db2.drug_id = bi.drug_id
-        AND db2.branch_id = bi.branch_id
-        AND db2.remaining_quantity > 0
-        AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
-    ), 0)`;
+    const validBatchSumSql = `bi.sellable_quantity`;
 
     const qualifiers = ["bi.branch_id = $1"];
     const values: unknown[] = [branchId];
@@ -932,7 +926,7 @@ export const localRead = {
       )`);
     }
     if (params.low_stock_only) {
-      qualifiers.push(`(${validBatchSumSql} - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)`);
+      qualifiers.push(`(bi.sellable_quantity - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)`);
     }
     if (params.drug_type) {
       values.push(params.drug_type);
@@ -943,7 +937,7 @@ export const localRead = {
       }
     }
     if (!params.include_zero_stock) {
-      qualifiers.push(`${validBatchSumSql} > 0`);
+      qualifiers.push(`bi.sellable_quantity > 0`);
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
@@ -962,7 +956,7 @@ export const localRead = {
          d.organization_id as organization_id, d.generic_name as drug_generic_name,
          d.strength as drug_strength, d.tax_rate as drug_tax_rate,
          d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level,
-         ${validBatchSumSql} AS valid_batch_quantity
+         bi.sellable_quantity AS valid_batch_quantity
        FROM branch_inventory bi
        LEFT JOIN drugs d ON d.id = bi.drug_id
        ${where}
@@ -1182,25 +1176,20 @@ export const localRead = {
   }> {
     const db = await getDb();
 
-    const invRows = await db.select<Array<{ quantity: number }>>(
-      `SELECT quantity FROM branch_inventory
+    const invRows = await db.select<Array<{ quantity: number, sellable_quantity: number }>>(
+      `SELECT quantity, sellable_quantity FROM branch_inventory
        WHERE branch_id = $1 AND drug_id = $2
        LIMIT 1`,
       [branchId, drugId]
     );
     const notStocked = invRows.length === 0;
-    const inventoryQuantity = Number(invRows[0]?.quantity ?? 0);
+    
+    if (notStocked) {
+        return { sellable: 0, totalValidBatch: 0, notStocked: true, noBatchData: false };
+    }
 
-    const batchRows = await db.select<Array<{ remaining: number }>>(
-      `SELECT COALESCE(SUM(remaining_quantity), 0) AS remaining
-       FROM drug_batches
-       WHERE branch_id = $1
-         AND drug_id = $2
-         AND remaining_quantity > 0
-         AND (expiry_date IS NULL OR expiry_date = '' OR DATE(expiry_date) >= DATE('now'))`,
-      [branchId, drugId]
-    );
-    const totalValidBatch = batchRows[0]?.remaining ?? 0;
+    const inventoryQuantity = Number(invRows[0]?.quantity ?? 0);
+    const sellableQuantity = Number(invRows[0]?.sellable_quantity ?? 0);
 
     // Does this device hold ANY batch rows for the drug, expired or not?
     // `drug_batches` is only ever populated by a full sync, whereas
@@ -1208,35 +1197,28 @@ export const localRead = {
     // device that has not completed a sync has stock rows but zero batch rows —
     // indistinguishable, by the expiry query alone, from "every batch expired".
     // Treating that as unsellable blocked legitimate sales at a stocked branch.
-    const anyBatchRows = await db.select<Array<{ n: number }>>(
-      `SELECT COUNT(*) AS n FROM drug_batches WHERE branch_id = $1 AND drug_id = $2`,
-      [branchId, drugId]
-    );
-    const noBatchData = Number(anyBatchRows[0]?.n ?? 0) === 0;
+    let noBatchData = false;
+    let sellable = Math.max(0, sellableQuantity);
+    
+    if (sellableQuantity === 0) {
+        const anyBatchRows = await db.select<Array<{ n: number }>>(
+          `SELECT COUNT(*) AS n FROM drug_batches WHERE branch_id = $1 AND drug_id = $2`,
+          [branchId, drugId]
+        );
+        noBatchData = Number(anyBatchRows[0]?.n ?? 0) === 0;
+        if (noBatchData) {
+            sellable = Math.max(0, inventoryQuantity);
+        }
+    }
 
-    // With no local batch data, fall back to the cached inventory quantity.
-    // That figure is not raw stock: the server already reduces it to the sum of
-    // unexpired batches before returning it, so the fallback stays expiry-aware.
-    // The server re-validates stock and expiry when the sale is committed, so
-    // this gate is advisory — it must not hard-block on a cold cache.
-    const sellable = noBatchData
-      ? Math.max(0, inventoryQuantity)
-      : Math.max(0, totalValidBatch);
-
-    return { sellable, totalValidBatch, notStocked, noBatchData };
+    return { sellable, totalValidBatch: sellableQuantity, notStocked, noBatchData };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {
     const db = await getDb();
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT bi.branch_id, bi.drug_id, 
-         COALESCE((
-           SELECT SUM(db2.remaining_quantity) FROM drug_batches db2
-           WHERE db2.drug_id = bi.drug_id
-             AND db2.branch_id = bi.branch_id
-             AND db2.remaining_quantity > 0
-             AND (db2.expiry_date IS NULL OR db2.expiry_date = '' OR DATE(db2.expiry_date) >= DATE('now'))
-         ), 0) AS quantity,
+         COALESCE(bi.sellable_quantity, 0) AS quantity,
          coalesce(d.name, '') as drug_name, d.sku,
          coalesce(d.cost_price, 0) as cost_price, coalesce(bi.selling_price, d.unit_price, 0) as branch_selling_price,
          coalesce(d.unit_price, 0) as selling_price
