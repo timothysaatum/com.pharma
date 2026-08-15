@@ -8,6 +8,7 @@ from typing import Dict, List, Optional, Protocol, Tuple
 
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
+from starlette.responses import Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.core.config import get_settings
@@ -208,7 +209,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         if request.method == "OPTIONS":
-            return await call_next(request)
+            return Response(status_code=200)
 
         backend = await _get_backend()
         client_ip = _get_client_ip(request)

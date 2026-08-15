@@ -41,59 +41,21 @@ def get_cors_origins(settings) -> list[str]:
 def register_middleware(app: FastAPI, settings) -> None:
     """Attach CORS, request-id, logging, and rate-limit middleware to *app*.
 
-    Order matters: CORS must be added first (outermost) so that OPTIONS
-    preflight requests are short-circuited before reaching custom middleware.
+    Order matters in FastAPI/Starlette: app.add_middleware wraps from last to
+    first, so CORSMiddleware MUST be added LAST so that it becomes the outermost
+    ASGI layer and short-circuits OPTIONS preflight requests before reaching
+    custom BaseHTTPMiddleware layers.
     """
     cors_origins = get_cors_origins(settings)
     logger.info("CORS origins: %s", cors_origins)
 
     # ── GZip (decompresses incoming gzip requests; compresses responses ≥ 1 KB) ─
-    # Must be added before CORS so it wraps all responses, including preflight.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
 
-    # ── CORS ──────────────────────────────────────────────────────────────
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=cors_origins,
-        allow_origin_regex=(
-            None
-            if settings.is_production
-            else r"^http://(localhost|127\.0\.0\.1):\d+$"
-        ),
-        allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "Accept",
-            "X-Request-ID",
-            "Content-Encoding",   # Allow gzip-compressed sync push payloads
-        ],
-    )
-
-    # ── Request-ID ────────────────────────────────────────────────────────────
-    @app.middleware("http")
-    async def add_request_id_middleware(request: Request, call_next):
-        request_id = str(uuid.uuid4())
-        request.state.request_id = request_id
-        response = await call_next(request)
-        response.headers["X-Request-ID"] = request_id
-        return response
-
-    # ── Security headers ─────────────────────────────────────────────────────
-    # The API sits behind a TLS-terminating proxy and its primary client is a
-    # Tauri desktop shell, but CORS_ORIGINS allows arbitrary origins, so a
-    # browser surface is possible. Only send HSTS when the request is
-    # actually HTTPS-scoped so plain-HTTP dev/local traffic isn't told to
-    # upgrade.
-    @app.middleware("http")
-    async def add_security_headers_middleware(request: Request, call_next):
-        response = await call_next(request)
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        if request.url.scheme == "https":
-            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
-        return response
+    # ── Rate limiting (optional) ───────────────────────────────────────────────
+    if settings.RATE_LIMIT_ENABLED:
+        from app.middleware.rate_limit import RateLimitMiddleware
+        app.add_middleware(RateLimitMiddleware)
 
     # ── Request logging ───────────────────────────────────────────────────────
     @app.middleware("http")
@@ -113,7 +75,41 @@ def register_middleware(app: FastAPI, settings) -> None:
         response.headers["X-Process-Time"] = str(process_time)
         return response
 
-    # ── Rate limiting (optional) ───────────────────────────────────────────────
-    if settings.RATE_LIMIT_ENABLED:
-        from app.middleware.rate_limit import RateLimitMiddleware
-        app.add_middleware(RateLimitMiddleware)
+    # ── Security headers ─────────────────────────────────────────────────────
+    @app.middleware("http")
+    async def add_security_headers_middleware(request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        if request.url.scheme == "https":
+            response.headers["Strict-Transport-Security"] = "max-age=63072000; includeSubDomains"
+        return response
+
+    # ── Request-ID ────────────────────────────────────────────────────────────
+    @app.middleware("http")
+    async def add_request_id_middleware(request: Request, call_next):
+        request_id = str(uuid.uuid4())
+        request.state.request_id = request_id
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        return response
+
+    # ── CORS (added LAST to be OUTERMOST in ASGI stack) ──────────────────────
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cors_origins,
+        allow_origin_regex=(
+            None
+            if settings.is_production
+            else r"^http://(localhost|127\.0\.0\.1):\d+$"
+        ),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Accept",
+            "X-Request-ID",
+            "Content-Encoding",   # Allow gzip-compressed sync push payloads
+        ],
+    )
