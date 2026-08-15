@@ -219,16 +219,8 @@ function AppRoutes() {
     const handler = () => { navigate("/login", { replace: true }); };
     window.addEventListener("auth:logout", handler);
 
-    // Sync when coming back online
-    const onlineHandler = () => {
-      console.log("App: Network is back online, triggering sync...");
-      void syncEngine.sync();
-    };
-    window.addEventListener("online", onlineHandler);
-
     return () => {
       window.removeEventListener("auth:logout", handler);
-      window.removeEventListener("online", onlineHandler);
     };
   }, [initialize, navigate]);
 

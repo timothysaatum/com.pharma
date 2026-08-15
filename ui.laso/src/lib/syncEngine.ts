@@ -269,6 +269,15 @@ class SyncEngine {
         this._isSyncing = true;
         this.setStatus("syncing");
 
+        // 30s timeout guard — prevents status from staying stuck in "syncing"
+        const timeoutId = setTimeout(() => {
+            if (this._isSyncing) {
+                console.warn("[SyncEngine] Sync cycle timed out after 30s — resetting syncing status.");
+                this._isSyncing = false;
+                this.setStatus("error");
+            }
+        }, 30_000);
+
         try {
             const eventPushResult = await this.pushEvents();
             // Repair a missing queue envelope before the push.
@@ -319,6 +328,7 @@ class SyncEngine {
                 }
             }
         } finally {
+            clearTimeout(timeoutId);
             this._isSyncing = false;
         }
     }
@@ -1206,7 +1216,14 @@ class SyncEngine {
         await this.applyPullResponse(base as unknown as PullResponse);
     }
 
+    private _lastOnlineSyncAt = 0;
+
     private onOnline(): void {
+        const now = Date.now();
+        if (now - this._lastOnlineSyncAt < 2000) {
+            return;
+        }
+        this._lastOnlineSyncAt = now;
         console.info("[SyncEngine] Back online — triggering sync");
         this.networkRetryAttempt = 0;
         if (this._dbInitError) {
