@@ -54,14 +54,22 @@ function getStore(): Promise<AnyStore | null> {
 
 async function storageGet<T>(key: string): Promise<T | null> {
     if (IS_TAURI && _SENSITIVE_KEYS.has(key)) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        return await invoke<T | null>("secure_get", { key });
+        try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            return await invoke<T | null>("secure_get", { key });
+        } catch (err) {
+            console.warn(`[storage] Tauri secure_get failed for key "${key}", falling back:`, err);
+        }
     }
     const store = await getStore();
     if (store) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const val: any = await store.get(key);
-        return (val ?? null) as T | null;
+        try {
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const val: any = await store.get(key);
+            return (val ?? null) as T | null;
+        } catch (err) {
+            console.warn(`[storage] Tauri store get failed for key "${key}":`, err);
+        }
     }
     const raw = browserStorage(key).getItem(key);
     if (!raw) return null;
@@ -77,14 +85,22 @@ async function storageSet(key: string, value: unknown): Promise<void> {
         if (typeof value !== "string") {
             throw new TypeError("Secure auth values must be strings.");
         }
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("secure_set", { key, value });
-        return;
+        try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("secure_set", { key, value });
+            return;
+        } catch (err) {
+            console.warn(`[storage] Tauri secure_set failed for key "${key}", falling back:`, err);
+        }
     }
     const store = await getStore();
     if (store) {
-        await store.set(key, value);
-        return;
+        try {
+            await store.set(key, value);
+            return;
+        } catch (err) {
+            console.warn(`[storage] Tauri store set failed for key "${key}":`, err);
+        }
     }
     const serialized = JSON.stringify(value);
     browserStorage(key).setItem(key, serialized);
@@ -92,14 +108,22 @@ async function storageSet(key: string, value: unknown): Promise<void> {
 
 async function storageDel(key: string): Promise<void> {
     if (IS_TAURI && _SENSITIVE_KEYS.has(key)) {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("secure_delete", { key });
-        return;
+        try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("secure_delete", { key });
+            return;
+        } catch (err) {
+            console.warn(`[storage] Tauri secure_delete failed for key "${key}", falling back:`, err);
+        }
     }
     const store = await getStore();
     if (store) {
-        await store.delete(key);
-        return;
+        try {
+            await store.delete(key);
+            return;
+        } catch (err) {
+            console.warn(`[storage] Tauri store delete failed for key "${key}":`, err);
+        }
     }
     browserStorage(key).removeItem(key);
 }

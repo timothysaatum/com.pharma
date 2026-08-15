@@ -101,15 +101,9 @@ def register_middleware(app: FastAPI, settings) -> None:
         allow_origin_regex=(
             None
             if settings.is_production
-            else r"^http://(localhost|127\.0\.0\.1):\d+$"
+            else r"^(http://(localhost|127\.0\.0\.1):\d+|https?://tauri\.localhost|tauri://localhost)$"
         ),
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=[
-            "Authorization",
-            "Content-Type",
-            "Accept",
-            "X-Request-ID",
-            "Content-Encoding",   # Allow gzip-compressed sync push payloads
-        ],
+        allow_methods=["*"],
+        allow_headers=["*"],
     )
