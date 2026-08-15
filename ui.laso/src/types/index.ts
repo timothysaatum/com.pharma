@@ -1663,3 +1663,26 @@ export interface SyncConflict {
     server_data: Record<string, unknown>;
     resolution: "server_wins" | "local_wins" | "merged" | "manual_required" | null;
 }
+
+export interface DrugReconciliationItem {
+    drug_id: string;
+    drug_name: string;
+    inventory_quantity: number;
+    batch_sum_quantity: number;
+    sellable_quantity: number;
+    unleased_sellable: number;
+    drift: number;
+    status: string;
+}
+
+export interface ReconciliationReportResponse {
+    branch_id: string;
+    report_date: string;
+    total_drugs_checked: number;
+    balanced_count: number;
+    drift_count: number;
+    dead_letter_count: number;
+    items: DrugReconciliationItem[];
+    has_drift: boolean;
+}
+

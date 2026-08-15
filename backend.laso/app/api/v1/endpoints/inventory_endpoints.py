@@ -620,6 +620,9 @@ async def get_inventory_valuation(
 
 from app.schemas.lease_schemas import LeaseAcquireRequest, LeaseAcquireResponse, LeaseResponse
 from app.services.inventory.lease_service import LeaseService
+from app.schemas.reconciliation_schemas import ReconciliationReportResponse
+from app.services.inventory.reconciliation_service import generate_reconciliation_report
+from datetime import date
 
 @router.post("/branch/{branch_id}/leases/acquire", response_model=LeaseAcquireResponse)
 async def acquire_leases(
@@ -646,4 +649,24 @@ async def acquire_leases(
     
     return LeaseAcquireResponse(
         leases=[LeaseResponse.model_validate(lease, from_attributes=True) for lease in leases]
+    )
+
+@router.get("/branch/{branch_id}/reconciliation/report", response_model=ReconciliationReportResponse)
+async def get_reconciliation_report(
+    branch_id: uuid.UUID,
+    report_date: Optional[date] = Query(None, description="Date for the report"),
+    current_user: User = Depends(require_permission("view_reports")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Generate daily inventory reconciliation report.
+    """
+    _ensure_branch_access(current_user, branch_id)
+    if report_date is None:
+        report_date = date.today()
+    
+    return await generate_reconciliation_report(
+        db=db,
+        branch_id=branch_id,
+        report_date=report_date
     )
