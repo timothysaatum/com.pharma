@@ -5,7 +5,8 @@ import type { Sale, SaleItem } from "@/types";
 const mocks = vi.hoisted(() => ({
   select: vi.fn(),
   executeTransaction: vi.fn(),
-  notifySyncQueueChanged: vi.fn(),
+  appendOutboxEvent: vi.fn(),
+  buildSaleCreatedEnvelope: vi.fn(),
 }));
 
 vi.mock("@/lib/localDb", () => ({
@@ -13,7 +14,6 @@ vi.mock("@/lib/localDb", () => ({
     select: mocks.select,
     executeTransaction: mocks.executeTransaction,
   })),
-  notifySyncQueueChanged: mocks.notifySyncQueueChanged,
 }));
 
 vi.mock("@/lib/localWrite", () => ({
@@ -31,6 +31,8 @@ vi.mock("@/lib/localWrite", () => ({
     updated_at: now,
     created_at: now,
   })),
+  appendOutboxEvent: mocks.appendOutboxEvent,
+  buildSaleCreatedEnvelope: mocks.buildSaleCreatedEnvelope,
 }));
 
 vi.mock("@/lib/leaseEngine", () => ({
@@ -87,6 +89,7 @@ describe("offlineSalesManager atomic checkout", () => {
       return [];
     });
     mocks.executeTransaction.mockResolvedValue([]);
+    mocks.appendOutboxEvent.mockResolvedValue(undefined);
   });
 
   it("writes one stable protocol-v2 command and local projections", async () => {
@@ -107,41 +110,15 @@ describe("offlineSalesManager atomic checkout", () => {
     expect(statements.map((statement) => statement.sql)).toEqual(expect.arrayContaining([
       expect.stringContaining("INSERT INTO offline_sales"),
       expect.stringContaining("INSERT INTO sales"),
-      expect.stringContaining("INSERT INTO sync_queue"),
       expect.stringContaining("UPDATE branch_inventory"),
-      expect.stringContaining("INSERT OR IGNORE INTO suppressed_crr_changes"),
     ]));
-
-    const queueStatement = statements.find((statement) =>
-      statement.sql.includes("INSERT INTO sync_queue"),
-    )!;
-    expect(queueStatement.values[0]).toBe(saleId);
-    const queuePayload = JSON.parse(queueStatement.values[5] as string);
-    expect(queuePayload.sync_protocol_version).toBe(2);
-    expect(queuePayload.items).toEqual([expect.objectContaining({
-      drug_id: drugId,
-      quantity: 2,
-      total_price: 25,
-      provisional_batch_allocations: [
-        {
-          allocation_id: expect.any(String),
-          batch_id: "batch-1",
-          quantity: 2,
-        }
-      ],
-    })]);
 
     const stockStatement = statements.find((statement) =>
       statement.sql.includes("UPDATE branch_inventory"),
     )!;
     expect(stockStatement.sql).toContain("quantity + $1 >= reserved_quantity");
     expect(stockStatement.values).toEqual([-2, expect.any(String), "branch-1", drugId]);
-    const suppressionStatement = statements.find((statement) =>
-      statement.sql.includes("suppressed_crr_changes"),
-    )!;
-    expect(suppressionStatement.sql).toContain("'branch_inventory', 'prescriptions'");
-    expect(suppressionStatement.values[0]).toBe(saleId);
-    expect(mocks.notifySyncQueueChanged).toHaveBeenCalledOnce();
+    expect(mocks.appendOutboxEvent).toHaveBeenCalledOnce();
   });
 
   it("returns an exact idempotent replay without a second transaction", async () => {
@@ -189,7 +166,7 @@ describe("offlineSalesManager atomic checkout", () => {
       success: false,
       error: expect.stringContaining("Insufficient available local stock"),
     });
-    expect(mocks.notifySyncQueueChanged).not.toHaveBeenCalled();
+    expect(mocks.appendOutboxEvent).not.toHaveBeenCalled();
   });
 
   it("guards prescription ownership, status, and remaining refills in the same transaction", async () => {

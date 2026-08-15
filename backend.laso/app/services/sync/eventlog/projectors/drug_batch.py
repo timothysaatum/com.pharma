@@ -41,7 +41,7 @@ class DrugBatchProjector(Projector):
         payload = event.payload
         drug_id = payload.get("drug_id")
         branch_id = payload.get("branch_id")
-        org_id = payload.get("org_id")
+        org_id = payload.get("org_id") or payload.get("organization_id") or (str(event.org_id) if event.org_id else None)
         
         if not drug_id or not branch_id or not org_id:
             return ProjectorResult(

@@ -509,23 +509,6 @@ async function migrate_v1(db: Database): Promise<void> {
   `);
 
   await db.execute(`
-    CREATE TABLE IF NOT EXISTS sync_queue (
-      id              INTEGER PRIMARY KEY AUTOINCREMENT,
-      table_name      TEXT NOT NULL,
-      record_id       TEXT NOT NULL,
-      operation       TEXT NOT NULL DEFAULT 'create',
-      sync_version    INTEGER NOT NULL DEFAULT 1,
-      payload_json    TEXT NOT NULL,
-      created_offline_at TEXT NOT NULL,
-      attempts        INTEGER NOT NULL DEFAULT 0,
-      last_attempt_at TEXT,
-      error           TEXT,
-      conflict_json   TEXT,
-      UNIQUE(table_name, record_id)
-    )
-  `);
-
-  await db.execute(`
     CREATE TABLE IF NOT EXISTS sync_meta (
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
@@ -678,32 +661,36 @@ async function migrate_v11(db: Database): Promise<void> {
 }
 
 async function migrate_v12(db: Database): Promise<void> {
-  const addQueueColumn = async (column: string) => {
-    try { await db.execute(`ALTER TABLE sync_queue ADD COLUMN ${column}`); }
-    catch { }
-  };
+  if (await tableExists(db, "sync_queue")) {
+    const addQueueColumn = async (column: string) => {
+      try { await db.execute(`ALTER TABLE sync_queue ADD COLUMN ${column}`); }
+      catch { }
+    };
 
-  await addQueueColumn("operation_id TEXT");
-  await addQueueColumn("next_attempt_at TEXT");
+    await addQueueColumn("operation_id TEXT");
+    await addQueueColumn("next_attempt_at TEXT");
 
-  // Existing queue rows predate operation-level idempotency. Give every row a
-  // stable UUID-shaped identifier so retries after this migration are safe.
-  await db.execute(`
-    UPDATE sync_queue
-    SET operation_id =
-      lower(hex(randomblob(4))) || '-' ||
-      lower(hex(randomblob(2))) || '-' ||
-      lower(hex(randomblob(2))) || '-' ||
-      lower(hex(randomblob(2))) || '-' ||
-      lower(hex(randomblob(6)))
-    WHERE operation_id IS NULL OR operation_id = ''
-  `);
-  await db.execute(
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_operation_id ON sync_queue(operation_id)"
-  );
-  await db.execute(
-    "CREATE INDEX IF NOT EXISTS idx_sync_queue_next_attempt ON sync_queue(next_attempt_at)"
-  );
+    // Existing queue rows predate operation-level idempotency. Give every row a
+    // stable UUID-shaped identifier so retries after this migration are safe.
+    try {
+      await db.execute(`
+        UPDATE sync_queue
+        SET operation_id =
+          lower(hex(randomblob(4))) || '-' ||
+          lower(hex(randomblob(2))) || '-' ||
+          lower(hex(randomblob(2))) || '-' ||
+          lower(hex(randomblob(2))) || '-' ||
+          lower(hex(randomblob(6)))
+        WHERE operation_id IS NULL OR operation_id = ''
+      `);
+      await db.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_sync_queue_operation_id ON sync_queue(operation_id)"
+      );
+      await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_sync_queue_next_attempt ON sync_queue(next_attempt_at)"
+      );
+    } catch { }
+  }
   await db.execute("PRAGMA user_version = 12");
 }
 
@@ -775,25 +762,6 @@ export async function migrate_v15(db: Database): Promise<void> {
     `);
     await db.execute("DROP TABLE branch_inventory");
     await db.execute("ALTER TABLE branch_inventory_crr RENAME TO branch_inventory");
-
-    // Convert to CRDT replicated row (requires cr-sqlite extension loaded).
-    // A failure here is an accepted degraded mode (extension unavailable),
-    // not a migration failure — it must NOT roll back the DDL above, so it
-    // stays in its own nested try/catch, same as every later CRR migration.
-    try {
-      await db.execute_batch("SELECT crsql_as_crr('branch_inventory')");
-      console.log("[localDb] branch_inventory converted to CRR");
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        ["crr_enabled_branch_inventory", "1"]
-      );
-    } catch (e) {
-      console.warn("[localDb] crsql_as_crr not available — running without CRDT:", e);
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        ["crr_enabled_branch_inventory", "0"]
-      );
-    }
 
     await db.execute("PRAGMA user_version = 15");
     await db.execute("COMMIT");
@@ -1155,27 +1123,6 @@ export async function migrate_v16(db: Database): Promise<void> {
   );
 
   // ── Convert all 5 tables to CRR ───────────────────────────────────
-  const crrTables = [
-    "drug_batches", "customers", "prescriptions",
-    "purchase_orders", "sales",
-  ];
-  for (const table of crrTables) {
-    try {
-      await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
-      console.log(`[localDb] ${table} converted to CRR`);
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        [`crr_enabled_${table}`, "1"]
-      );
-    } catch (e) {
-      console.warn(`[localDb] crsql_as_crr for ${table} not available:`, e);
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        [`crr_enabled_${table}`, "0"]
-      );
-    }
-  }
-
     await db.execute("COMMIT");
     await db.execute("PRAGMA user_version = 16");
   } catch (error) {

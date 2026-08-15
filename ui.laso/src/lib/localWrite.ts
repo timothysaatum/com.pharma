@@ -193,7 +193,7 @@ export function buildLocalSalePayload(
 // Serializes all outbox read-hash + insert pairs so concurrent mutations
 // can't race to claim the same hash_prev and break the chain.
 let _outboxLock: Promise<void> = Promise.resolve();
-async function appendOutboxEvent(
+export async function appendOutboxEvent(
     build: (hashPrev: string) => Promise<OutboxEvent>
 ): Promise<void> {
     _outboxLock = _outboxLock.then(async () => {
@@ -204,7 +204,7 @@ async function appendOutboxEvent(
     return _outboxLock;
 }
 
-async function buildSaleCreatedEnvelope(
+export async function buildSaleCreatedEnvelope(
     sale: Omit<Sale, "sync_status" | "sync_version"> & { id: string },
     items: Sale["items"],
     now: string,

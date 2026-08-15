@@ -82,11 +82,10 @@ movement uses a two-phase event pair (`TransferInitiated` +
 
 - ✅ Two-track sync (CRR + legacy queue) collapsed to one — event stream
   per branch, projected into existing Postgres tables.
-- ✅ cr-sqlite native extension removed from the required startup path
-  (loading is now optional/warn-only); `crsql_changes`, `crsql_pack_columns`,
-  `suppressed_crr_changes`, `crr_audit_uploads`, and `customer_merge_directives`
-  dropped from the client schema via localDb v26 migration (2026-08-14).
-  `sync_queue` retained for purchase_orders/branch_inventory push — deferred.
+- ✅ cr-sqlite native extension removed entirely from client and server;
+  `crsql_changes`, `crsql_pack_columns`, `suppressed_crr_changes`, `crr_audit_uploads`,
+  `customer_merge_directives`, and `sync_queue` dropped from the client schema via
+  localDb migrations v26 and v29. Event-sourced spine handles all mutations (2026-08-15).
 - ✅ `shadow_db.py`, `crr_sync_service.py`, `crr_sync_endpoints.py` deleted;
   legacy sale path in `sync_service.py` removed. `pricing_calculator.py`,
   `sale_helpers.py`, all validators, all Pydantic schemas preserved.

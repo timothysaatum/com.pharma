@@ -13,12 +13,14 @@
 
 import {
   getDb,
-  notifySyncQueueChanged,
   type Database,
   type DbTransactionStatement,
 } from "@/lib/localDb";
-import { LeaseEngine } from "@/lib/leaseEngine";
-import { buildLocalSalePayload } from "@/lib/localWrite";
+import {
+  buildLocalSalePayload,
+  appendOutboxEvent,
+  buildSaleCreatedEnvelope,
+} from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
 
 export interface OfflineSaleRecord {
@@ -40,7 +42,7 @@ export interface OfflineSaleRecord {
 const MAX_RETRIES = 5;
 const INITIAL_RETRY_DELAY_MS = 1000; // 1 second
 
-class OfflineSalesManager {
+export class OfflineSalesManager {
   /**
    * Atomically persist the sale, its protocol-v2 sync envelope, local inventory
    * projection, optional prescription projection, and audit trail. The Rust DB
@@ -108,10 +110,15 @@ class OfflineSalesManager {
         now,
     );
     await db.executeTransaction(statements);
-      notifySyncQueueChanged();
-      console.info(
+
+    // Append sale_created outbox event for sync engine FIFO shipping
+    await appendOutboxEvent((hashPrev) =>
+      buildSaleCreatedEnvelope(sale, items, now, hashPrev)
+    );
+
+    console.info(
         `[OfflineSalesManager] offline_sale_recorded sale_id=${sale.id} `
-        + `items=${items.length} operation_id=${sale.id}`,
+        + `items=${items.length}`,
       );
       return { success: true, saleId: sale.id };
     } catch (err) {
@@ -148,24 +155,7 @@ class OfflineSalesManager {
       items,
       now,
     );
-    // Attach batch allocations to sync queue payload items
-    const itemsWithProvisional = items.map((item) => {
-      const allocs = batchAllocs.get(item.drug_id) ?? [];
-      return {
-        ...item,
-        provisional_batch_allocations: allocs.map((a) => ({
-          allocation_id: crypto.randomUUID(),
-          batch_id: a.batchId,
-          quantity: a.allocatedQty,
-        })),
-      };
-    });
-    const queuePayload = {
-      ...salePayload,
-      items: itemsWithProvisional,
-      sync_protocol_version: 2,
-      terminal_id: LeaseEngine.getTerminalId(),
-    };
+
     const offlineRecord: Record<string, unknown> = {
       id: sale.id,
       idempotency_key: idempotencyKey,
@@ -178,7 +168,6 @@ class OfflineSalesManager {
       last_retry_at: null,
       next_retry_at: null,
       error_message: null,
-      crr_start_db_version: 0,
       created_at: now,
       updated_at: now,
     };
@@ -189,35 +178,11 @@ class OfflineSalesManager {
         offlineRecord,
         "Offline checkout identity is already recorded.",
       ),
-      {
-        sql: `UPDATE offline_sales
-              SET crr_start_db_version = COALESCE(
-                (SELECT MAX(db_version) FROM crsql_changes), 0
-              )
-              WHERE id = $1`,
-        values: [sale.id],
-        expectedRows: 1,
-        errorMessage: "Unable to checkpoint local sync state for the offline sale.",
-      },
       this.insertStatement(
         "sales",
         salePayload,
         "The local sale ID already exists without a matching offline audit.",
       ),
-      this.insertStatement("sync_queue", {
-        operation_id: sale.id,
-        table_name: "sales",
-        record_id: sale.id,
-        operation: "create",
-        sync_version: 1,
-        payload_json: JSON.stringify(queuePayload),
-        created_offline_at: now,
-        attempts: 0,
-        last_attempt_at: null,
-        next_attempt_at: null,
-        error: null,
-        conflict_json: null,
-      }, "The sale already has a different sync operation."),
     ];
 
     // FEFO batch deduction (allocations pre-computed in recordSaleTransaction)
@@ -266,21 +231,6 @@ class OfflineSalesManager {
           "Prescription is missing, inactive, out of refills, or belongs to another branch; no part of the sale was recorded.",
       });
     }
-
-    // Inventory and prescription writes above are local projections of the
-    // queued sale command. Suppress only the CRR changes created since this
-    // transaction's checkpoint so protocol v2 remains the sole server writer.
-    statements.push({
-      sql: `INSERT OR IGNORE INTO suppressed_crr_changes
-              (table_name, db_version, record_id, reason, created_at)
-            SELECT DISTINCT "table", db_version, $1, 'offline_sale_projection', $2
-            FROM crsql_changes
-            WHERE db_version > (
-              SELECT crr_start_db_version FROM offline_sales WHERE id = $1
-            )
-              AND "table" IN ('branch_inventory', 'prescriptions')`,
-      values: [sale.id, now],
-    });
 
     return statements;
   }

@@ -42,7 +42,7 @@ class PurchaseOrderProjector(Projector):
         
         payload = event.payload
         branch_id = payload.get("branch_id")
-        org_id = payload.get("org_id")
+        org_id = payload.get("org_id") or payload.get("organization_id") or (str(event.org_id) if event.org_id else None)
         status = payload.get("status")
 
         if not branch_id or not org_id:
