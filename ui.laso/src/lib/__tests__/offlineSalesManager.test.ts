@@ -33,6 +33,13 @@ vi.mock("@/lib/localWrite", () => ({
   })),
 }));
 
+vi.mock("@/lib/leaseEngine", () => ({
+  LeaseEngine: {
+    getTerminalId: vi.fn(() => "TERM-TEST"),
+  },
+  leaseEngine: { start: vi.fn(), stop: vi.fn() },
+}));
+
 import { offlineSalesManager } from "@/lib/offlineSalesManager";
 
 const saleId = "4ea1562f-840f-4bc1-bba9-6eeabc1ee50f";

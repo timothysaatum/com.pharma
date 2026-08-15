@@ -298,6 +298,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
 
     sync_version = int(payload.get("sync_protocol_version", 1))
     use_server_fefo = sync_version >= 2
+    terminal_id: Optional[str] = payload.get("terminal_id") or None
 
     for item in items:
         await _apply_item(
@@ -311,6 +312,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             authored_at=event.authored_at,
             now=now,
             use_server_fefo=use_server_fefo,
+            terminal_id=terminal_id,
         )
 
 
@@ -325,6 +327,7 @@ async def _apply_item(
     authored_at: datetime,
     now: datetime,
     use_server_fefo: bool = False,
+    terminal_id: Optional[str] = None,
 ) -> None:
     item_id = str(item["item_id"])
     drug_id = str(item["drug_id"])
@@ -667,6 +670,34 @@ async def _apply_item(
             "updated_at": now,
         },
     )
+
+    # ── 2f. Increment lease consumed_quantity for this terminal ───────────────
+    # If the client included terminal_id in the payload, find any active lease
+    # for (branch, drug, terminal) and mark the quantity as consumed.
+    # This keeps server-side lease accounting in sync with actual sales.
+    if terminal_id:
+        await db.execute(
+            text("""
+                UPDATE stock_leases
+                   SET consumed_quantity = LEAST(
+                           consumed_quantity + :qty,
+                           leased_quantity
+                       ),
+                       updated_at = :now
+                 WHERE branch_id  = CAST(:branch_id AS UUID)
+                   AND drug_id    = CAST(:drug_id AS UUID)
+                   AND terminal_id = :terminal_id
+                   AND status      = 'active'
+                   AND expires_at  > :now
+            """),
+            {
+                "qty": total_deducted,
+                "branch_id": branch_id,
+                "drug_id": drug_id,
+                "terminal_id": terminal_id,
+                "now": now,
+            },
+        )
 
 
 async def _apply_voided(event: EventEnvelope, db: AsyncSession) -> None:

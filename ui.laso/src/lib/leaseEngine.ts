@@ -1,5 +1,5 @@
 import { getDb } from "./localDb";
-import { fetchAuthSession } from "aws-amplify/auth";
+import { authStorage } from "@/lib/storage";
 import { z } from "zod";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -20,6 +20,7 @@ export class LeaseEngine {
   private isRunning = false;
 
   public static getTerminalId(): string {
+    if (typeof localStorage === "undefined") return "TERM-SERVER";
     let tid = localStorage.getItem("laso_terminal_id");
     if (!tid) {
       tid = "TERM-" + Math.random().toString(36).substring(2, 10).toUpperCase();
@@ -74,8 +75,7 @@ export class LeaseEngine {
       const items = rows.map(r => [r.drug_id, Math.min(10, r.sellable_quantity)] as [string, number]);
       
       // Request from server
-      const session = await fetchAuthSession();
-      const token = session.tokens?.idToken?.toString();
+      const token = await authStorage.getAccessToken();
       if (!token) return;
 
       const response = await fetch(`${API_BASE_URL}/api/v1/inventory/branch/${branchId}/leases/acquire`, {

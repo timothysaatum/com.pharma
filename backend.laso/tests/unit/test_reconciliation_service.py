@@ -25,7 +25,7 @@ async def test_reconciliation_zero_drift():
     branch_result = MagicMock()
     branch_result.scalar_one_or_none.return_value = branch
     
-    inv_row = MockRow(drug_id=drug_id, drug_name="Test Drug", total_quantity=100, total_reserved=10)
+    inv_row = MockRow(drug_id=drug_id, drug_name="Test Drug", total_quantity=100, total_reserved=10, total_sellable=90)
     inv_result = MagicMock()
     inv_result.all.return_value = [inv_row]
     
@@ -71,7 +71,7 @@ async def test_reconciliation_batch_mismatch():
     branch_result = MagicMock()
     branch_result.scalar_one_or_none.return_value = branch
     
-    inv_row = MockRow(drug_id=drug_id, drug_name="Test Drug", total_quantity=100, total_reserved=10)
+    inv_row = MockRow(drug_id=drug_id, drug_name="Test Drug", total_quantity=100, total_reserved=10, total_sellable=90)
     inv_result = MagicMock()
     inv_result.all.return_value = [inv_row]
     

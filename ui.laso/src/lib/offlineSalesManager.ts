@@ -17,6 +17,7 @@ import {
   type Database,
   type DbTransactionStatement,
 } from "@/lib/localDb";
+import { LeaseEngine } from "@/lib/leaseEngine";
 import { buildLocalSalePayload } from "@/lib/localWrite";
 import type { Sale, SaleItem } from "@/types";
 
@@ -163,6 +164,7 @@ class OfflineSalesManager {
       ...salePayload,
       items: itemsWithProvisional,
       sync_protocol_version: 2,
+      terminal_id: LeaseEngine.getTerminalId(),
     };
     const offlineRecord: Record<string, unknown> = {
       id: sale.id,

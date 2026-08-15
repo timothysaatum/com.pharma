@@ -20,12 +20,30 @@ async def generate_reconciliation_report(
     org_id = branch.organization_id
 
     # 2. Get inventory quantities
+    today = date.today()
+
+    # Correlated subquery: unexpired batch sum per drug/branch = canonical sellable qty
+    sellable_subq = (
+        select(
+            func.coalesce(func.sum(DrugBatch.remaining_quantity), 0)
+        )
+        .where(
+            DrugBatch.branch_id == BranchInventory.branch_id,
+            DrugBatch.drug_id == BranchInventory.drug_id,
+            DrugBatch.remaining_quantity > 0,
+            (DrugBatch.expiry_date.is_(None)) | (DrugBatch.expiry_date >= today),
+        )
+        .correlate(BranchInventory)
+        .scalar_subquery()
+    )
+
     inventory_stmt = (
         select(
             BranchInventory.drug_id,
             Drug.name.label("drug_name"),
             func.sum(BranchInventory.quantity).label("total_quantity"),
-            func.sum(BranchInventory.reserved_quantity).label("total_reserved")
+            func.sum(BranchInventory.reserved_quantity).label("total_reserved"),
+            func.coalesce(func.sum(sellable_subq), 0).label("total_sellable"),
         )
         .join(Drug, Drug.id == BranchInventory.drug_id)
         .where(BranchInventory.branch_id == branch_id)
@@ -76,11 +94,14 @@ async def generate_reconciliation_report(
         d_name = row.drug_name
         inv_qty = row.total_quantity or 0
         inv_reserved = row.total_reserved or 0
-        
+        # Use the server-computed sellable_quantity (Phase 1 canonical value)
+        # rather than recomputing from quantity - reserved, so the report
+        # matches exactly what the POS displays to the cashier.
+        sellable_quantity = row.total_sellable or 0
+
         batch_sum_qty = batch_sums.get(d_id, 0)
         lease_unconsumed = lease_sums.get(d_id, 0)
 
-        sellable_quantity = inv_qty - inv_reserved
         unleased_sellable = sellable_quantity - lease_unconsumed
 
         drift = inv_qty - batch_sum_qty
