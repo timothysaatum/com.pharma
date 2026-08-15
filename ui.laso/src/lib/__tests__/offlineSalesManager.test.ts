@@ -115,6 +115,13 @@ describe("offlineSalesManager atomic checkout", () => {
       drug_id: drugId,
       quantity: 2,
       total_price: 25,
+      provisional_batch_allocations: [
+        {
+          allocation_id: expect.any(String),
+          batch_id: "batch-1",
+          quantity: 2,
+        }
+      ],
     })]);
 
     const stockStatement = statements.find((statement) =>

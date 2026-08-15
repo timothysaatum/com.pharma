@@ -41,6 +41,7 @@ from app.services.sync.eventlog.projector import (
     ProjectorResult,
     ProjectorStatus,
 )
+from app.services.sync.eventlog.projectors._fefo import fefo_allocate
 
 logger = logging.getLogger(__name__)
 
@@ -217,21 +218,21 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 sync_version, sync_status,
                 created_at, updated_at
             ) VALUES (
-                CAST(:id AS UUID), CAST(:org_id AS UUID),
-                CAST(:branch_id AS UUID), :sale_number,
-                CAST(:customer_id AS UUID), :customer_name,
+                :id, :org_id,
+                :branch_id, :sale_number,
+                :customer_id, :customer_name,
                 :subtotal, :discount_amount, :tax_amount, :total_amount,
-                CAST(:price_contract_id AS UUID), :contract_name,
+                :price_contract_id, :contract_name,
                 :contract_discount_pct, :contract_type,
                 :payment_method, :payment_status,
                 :amount_paid, :change_amount, :payment_reference,
-                CAST(:split_payment_details AS JSONB),
+                :split_payment_details,
                 :insurance_preauth_number, :insurance_claim_number,
                 :patient_copay_amount, :insurance_covered_amount,
                 :insurance_verified,
-                CAST(:prescription_id AS UUID), :prescription_number,
+                :prescription_id, :prescription_number,
                 :prescriber_name, :prescriber_license,
-                CAST(:cashier_id AS UUID), CAST(:pharmacist_id AS UUID),
+                :cashier_id, :pharmacist_id,
                 :status, :notes,
                 FALSE, FALSE,
                 1, 'synced',
@@ -295,6 +296,9 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
     sale_number = payload["sale_number"]
     cashier_id = str(payload["cashier_id"])
 
+    sync_version = int(payload.get("sync_protocol_version", 1))
+    use_server_fefo = sync_version >= 2
+
     for item in items:
         await _apply_item(
             db=db,
@@ -306,6 +310,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             cashier_id=cashier_id,
             authored_at=event.authored_at,
             now=now,
+            use_server_fefo=use_server_fefo,
         )
 
 
@@ -319,11 +324,36 @@ async def _apply_item(
     cashier_id: str,
     authored_at: datetime,
     now: datetime,
+    use_server_fefo: bool = False,
 ) -> None:
     item_id = str(item["item_id"])
     drug_id = str(item["drug_id"])
     item_qty = int(item["quantity"])
-    allocations: List[Dict[str, Any]] = item.get("batch_allocations") or []
+
+    if use_server_fefo:
+        try:
+            server_allocations = await fefo_allocate(
+                db=db, branch_id=branch_id, drug_id=drug_id,
+                quantity=item_qty, authored_at=authored_at,
+            )
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        allocations = [
+            {
+                "allocation_id": str(uuid.uuid4()),
+                "batch_id": a.batch_id,
+                "batch_number": a.batch_number,
+                "batch_expiry_date": a.expiry_date.isoformat() if hasattr(a.expiry_date, 'isoformat') else a.expiry_date,
+                "quantity": a.quantity,
+                "unit_cost_at_sale": a.unit_cost,
+                "unit_price_at_sale": a.unit_price,
+            }
+            for a in server_allocations
+        ]
+        provisional = item.get("provisional_batch_allocations") or item.get("batch_allocations") or []
+    else:
+        allocations = item.get("batch_allocations") or []
+        provisional = []
 
     # Derive the primary batch_id: first allocation's batch_id (mirrors the
     # existing service's behaviour of tagging the item with its primary batch).
@@ -344,9 +374,9 @@ async def _apply_item(
                 requires_prescription, prescription_verified,
                 created_at, updated_at
             ) VALUES (
-                CAST(:id AS UUID), CAST(:sale_id AS UUID),
-                CAST(:drug_id AS UUID), :drug_name, :drug_sku,
-                CAST(:batch_id AS UUID),
+                :id, :sale_id,
+                :drug_id, :drug_name, :drug_sku,
+                :batch_id,
                 :quantity, 0,
                 :unit_price, :subtotal,
                 :discount_pct, :discount_amount,
@@ -402,9 +432,9 @@ async def _apply_item(
                     unit_cost_at_sale, unit_price_at_sale,
                     created_at, updated_at
                 ) VALUES (
-                    CAST(:id AS UUID), CAST(:sale_item_id AS UUID),
-                    CAST(:branch_id AS UUID), CAST(:drug_id AS UUID),
-                    CAST(:batch_id AS UUID),
+                    :id, :sale_item_id,
+                    :branch_id, :drug_id,
+                    :batch_id,
                     :batch_number, :batch_expiry_date,
                     :quantity, 0,
                     :unit_cost_at_sale, :unit_price_at_sale,
@@ -450,12 +480,12 @@ async def _apply_item(
                                sync_version = sync_version + 1,
                                sync_status = 'synced'
                          WHERE id = :batch_id
-                           AND branch_id = CAST(:branch_id AS UUID)
-                           AND drug_id   = CAST(:drug_id AS UUID)
+                           AND branch_id = :branch_id
+                           AND drug_id   = :drug_id
                            AND remaining_quantity >= :qty
                            AND (
                                  expiry_date IS NULL
-                                 OR expiry_date >= CAST(:sold_at AS DATE)
+                                 OR expiry_date >= :sold_at
                                )
                         RETURNING
                             remaining_quantity + :qty AS qty_before,
@@ -481,8 +511,8 @@ async def _apply_item(
                             SELECT remaining_quantity, expiry_date
                               FROM drug_batches
                              WHERE id = :batch_id
-                               AND branch_id = CAST(:branch_id AS UUID)
-                               AND drug_id   = CAST(:drug_id AS UUID)
+                               AND branch_id = :branch_id
+                               AND drug_id   = :drug_id
                         """),
                         {"batch_id": alloc_batch_id, "branch_id": branch_id, "drug_id": drug_id},
                     )
@@ -567,20 +597,20 @@ async def _apply_item(
                     reference_number, reason,
                     created_by, occurred_at
                 ) VALUES (
-                    CAST(:id AS UUID),
-                    CAST(:org_id AS UUID),
-                    CAST(:branch_id AS UUID),
-                    CAST(:drug_id AS UUID),
-                    CAST(:batch_id AS UUID),
+                    :id,
+                    :org_id,
+                    :branch_id,
+                    :drug_id,
+                    :batch_id,
                     'sale', :qty_change,
                     :branch_before, :branch_after,
                     :batch_before, :batch_after,
                     :unit_price,
                     'sale',
-                    CAST(:source_id AS UUID),
-                    CAST(:source_line_id AS UUID),
+                    :source_id,
+                    :source_line_id,
                     :ref_number, :reason,
-                    CAST(:created_by AS UUID), :occurred_at
+                    :created_by, :occurred_at
                 )
             """),
             {
@@ -614,13 +644,13 @@ async def _apply_item(
                 reason, adjusted_by,
                 created_at, updated_at
             ) VALUES (
-                CAST(:id AS UUID),
-                CAST(:branch_id AS UUID),
-                CAST(:drug_id AS UUID),
+                :id,
+                :branch_id,
+                :drug_id,
                 'correction', :qty_change,
                 :prev_qty, :new_qty,
                 :reason,
-                CAST(:adjusted_by AS UUID),
+                :adjusted_by,
                 :created_at, :updated_at
             )
         """),
@@ -697,8 +727,8 @@ async def _apply_voided(event: EventEnvelope, db: AsyncSession) -> None:
                                sync_version = sync_version + 1,
                                sync_status = 'synced'
                          WHERE id = :batch_id
-                           AND branch_id = CAST(:branch_id AS UUID)
-                           AND drug_id   = CAST(:drug_id AS UUID)
+                           AND branch_id = :branch_id
+                           AND drug_id   = :drug_id
                         RETURNING
                             remaining_quantity - :qty AS qty_before,
                             remaining_quantity        AS qty_after
@@ -719,19 +749,19 @@ async def _apply_voided(event: EventEnvelope, db: AsyncSession) -> None:
                             reference_number, reason,
                             created_by, occurred_at
                         ) VALUES (
-                            CAST(:id AS UUID),
-                            CAST(:org_id AS UUID),
-                            CAST(:branch_id AS UUID),
-                            CAST(:drug_id AS UUID),
-                            CAST(:batch_id AS UUID),
+                            :id,
+                            :org_id,
+                            :branch_id,
+                            :drug_id,
+                            :batch_id,
                             'refund', :qty_change,
                             :branch_before, :branch_after,
                             :batch_before, :batch_after,
                             'sale',
-                            CAST(:source_id AS UUID),
-                            CAST(:source_line_id AS UUID),
+                            :source_id,
+                            :source_line_id,
                             :ref_number, :reason,
-                            CAST(:created_by AS UUID), :occurred_at
+                            :created_by, :occurred_at
                         )
                     """),
                     {
@@ -792,13 +822,13 @@ async def _apply_voided(event: EventEnvelope, db: AsyncSession) -> None:
                         reason, adjusted_by,
                         created_at, updated_at
                     ) VALUES (
-                        CAST(:id AS UUID),
-                        CAST(:branch_id AS UUID),
-                        CAST(:drug_id AS UUID),
+                        :id,
+                        :branch_id,
+                        :drug_id,
                         'return', :qty_change,
                         :prev_qty, :new_qty,
                         :reason,
-                        CAST(:adjusted_by AS UUID),
+                        :adjusted_by,
                         :created_at, :updated_at
                     )
                 """),

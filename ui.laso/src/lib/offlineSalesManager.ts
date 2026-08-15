@@ -148,17 +148,20 @@ class OfflineSalesManager {
       now,
     );
     // Attach batch allocations to sync queue payload items
-    const itemsWithBatches = items.map((item) => {
+    const itemsWithProvisional = items.map((item) => {
       const allocs = batchAllocs.get(item.drug_id) ?? [];
       return {
         ...item,
-        batch_allocations: allocs,
-        batch_id: allocs.length === 1 ? allocs[0].batchId : null,
+        provisional_batch_allocations: allocs.map((a) => ({
+          allocation_id: crypto.randomUUID(),
+          batch_id: a.batchId,
+          quantity: a.allocatedQty,
+        })),
       };
     });
     const queuePayload = {
       ...salePayload,
-      items: itemsWithBatches,
+      items: itemsWithProvisional,
       sync_protocol_version: 2,
     };
     const offlineRecord: Record<string, unknown> = {
