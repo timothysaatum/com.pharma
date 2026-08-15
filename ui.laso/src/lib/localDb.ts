@@ -5,8 +5,7 @@
  * Mirrors the server's schema for the tables the branch owns or caches.
  */
 
-import type { BranchInventoryWithDetails, PushConflict, Drug, Sale } from "@/types";
-import { RetryBackoff } from "@/lib/syncRetryBackoff";
+import type { Sale } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -150,7 +149,6 @@ async function initDb(): Promise<Database> {
     load: async (_path: string): Promise<Database> => {
       // Connection is already opened by Rust setup; the path arg is ignored.
       await runMigrations(db);
-      await ensureCrrTablesEnabled(db);
       return db;
     },
   };
@@ -257,6 +255,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 26) await migrate_v26(db);
       if (user_version < 27) await migrate_v27(db);
       if (user_version < 28) await migrate_v28(db);
+      if (user_version < 29) await migrate_v29(db);
       await ensureAuditLogSchema(db);
   } catch (e) {
       const msg = (e && typeof e === "object" && "message" in e)
@@ -1460,6 +1459,17 @@ export async function tableExists(db: Database, name: string): Promise<boolean> 
 async function migrate_v22(db: Database): Promise<void> {
   await db.execute("BEGIN IMMEDIATE");
   try {
+    const CRR_TABLES = [
+      "branch_inventory",
+      "drug_batches",
+      "customers",
+      "prescriptions",
+      "purchase_orders",
+      "drugs",
+      "drug_categories",
+      "price_contracts",
+      "audit_logs",
+    ];
     const crrTableDefs: Array<{ table: string; ddl: string; cols: string }> = [];
 
     // Collect table definitions for all CRR tables that exist.
@@ -1851,7 +1861,6 @@ async function migrate_v22(db: Database): Promise<void> {
         [`crr_enabled_${table}`]
       );
     }
-    resetCrrCache();
 
     await db.execute("PRAGMA user_version = 22");
     await db.execute("COMMIT");
@@ -1956,163 +1965,6 @@ export async function ensureAuditLogSchema(db: Database): Promise<void> {
   }
 }
 
-interface LocalTableColumn {
-  name: string;
-  notnull?: number;
-  dflt_value?: unknown;
-  pk?: number;
-}
-
-async function getLocalTableColumns(
-  db: Database,
-  table: string,
-): Promise<LocalTableColumn[]> {
-  return db.select<LocalTableColumn[]>(`PRAGMA table_info(${table})`);
-}
-
-function needsCrrDefaultRepair(columns: LocalTableColumn[]): boolean {
-  return columns.some((column) => {
-    if (column.pk && column.pk > 0) return false;
-    return column.notnull === 1 && column.dflt_value == null;
-  });
-}
-
-async function recreateTableForCrr(
-  db: Database,
-  oldName: string,
-  newName: string,
-  ddl: string,
-  selectCols: string,
-): Promise<void> {
-  await db.execute(ddl);
-  await db.execute(`
-    INSERT INTO ${newName} (${selectCols})
-    SELECT ${selectCols} FROM ${oldName}
-  `);
-  await db.execute(`DROP TABLE ${oldName}`);
-  await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
-}
-
-async function ensureDrugsCrrCompatibleSchema(db: Database): Promise<boolean> {
-  const exists = await db.select<{ name: string }[]>(
-    "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
-    ["drugs"]
-  );
-  if (exists.length === 0) return false;
-
-  try {
-    await db.execute("ALTER TABLE drugs ADD COLUMN image_url TEXT");
-  } catch {
-    // Already present on databases that reached migration v17 cleanly.
-  }
-
-  const columns = await getLocalTableColumns(db, "drugs");
-  if (!needsCrrDefaultRepair(columns)) return false;
-
-  await recreateTableForCrr(
-    db,
-    "drugs",
-    "drugs_crr_repair",
-    `CREATE TABLE drugs_crr_repair (
-      id                TEXT NOT NULL PRIMARY KEY,
-      organization_id   TEXT NOT NULL DEFAULT '',
-      name              TEXT NOT NULL DEFAULT '',
-      generic_name      TEXT,
-      brand_name        TEXT,
-      sku               TEXT,
-      barcode           TEXT,
-      category_id       TEXT,
-      drug_type         TEXT NOT NULL DEFAULT 'otc',
-      dosage_form       TEXT,
-      strength          TEXT,
-      manufacturer      TEXT,
-      supplier          TEXT,
-      requires_prescription INTEGER NOT NULL DEFAULT 0,
-      controlled_substance_schedule TEXT,
-      ndc_code          TEXT,
-      unit_price        REAL NOT NULL DEFAULT 0,
-      cost_price        REAL,
-      markup_percentage REAL,
-      tax_rate          REAL NOT NULL DEFAULT 0,
-      reorder_level     INTEGER NOT NULL DEFAULT 10,
-      reorder_quantity  INTEGER NOT NULL DEFAULT 50,
-      max_stock_level   INTEGER,
-      unit_of_measure   TEXT NOT NULL DEFAULT 'unit',
-      description       TEXT,
-      usage_instructions TEXT,
-      side_effects      TEXT,
-      contraindications TEXT,
-      storage_conditions TEXT,
-      image_url         TEXT,
-      is_active         INTEGER NOT NULL DEFAULT 1,
-      is_deleted        INTEGER NOT NULL DEFAULT 0,
-      sync_status       TEXT NOT NULL DEFAULT 'synced',
-      sync_version      INTEGER NOT NULL DEFAULT 1,
-      synced_at         TEXT,
-      updated_at        TEXT NOT NULL DEFAULT '',
-      created_at        TEXT NOT NULL DEFAULT ''
-    )`,
-    `id, organization_id, name, generic_name, brand_name, sku, barcode,
-     category_id, drug_type, dosage_form, strength, manufacturer, supplier,
-     requires_prescription, controlled_substance_schedule, ndc_code,
-     unit_price, cost_price, markup_percentage, tax_rate, reorder_level,
-     reorder_quantity, max_stock_level, unit_of_measure, description,
-     usage_instructions, side_effects, contraindications, storage_conditions,
-     image_url, is_active, is_deleted, sync_status, sync_version, synced_at,
-     updated_at, created_at`,
-  );
-  return true;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-const CRR_TABLES: readonly string[] = [
-  "branch_inventory",
-  "drug_batches",
-  "customers",
-  "prescriptions",
-  "purchase_orders",
-  "drugs",
-  "drug_categories",
-  "price_contracts",
-  "audit_logs",
-];
-
-async function hasCrrChangeTracking(db: Database, table: string): Promise<boolean> {
-  try {
-    const rows = await db.select<{ count: number }[]>(
-      "SELECT COUNT(*) as count FROM crsql_master WHERE tbl_name = $1",
-      [table],
-    );
-    if ((rows[0]?.count ?? 0) > 0) return true;
-  } catch {
-    // Older broken installs can have cr-sqlite unavailable or partially loaded.
-  }
-
-  try {
-    const triggers = await db.select<{ count: number }[]>(
-      `SELECT COUNT(*) as count
-       FROM sqlite_master
-       WHERE type = 'trigger'
-         AND tbl_name = $1
-         AND name LIKE '%crsql%'`,
-      [table],
-    );
-    return (triggers[0]?.count ?? 0) > 0;
-  } catch {
-    return false;
-  }
-}
-
-async function hasCrrRuntime(db: Database): Promise<boolean> {
-  try {
-    await db.select<unknown[]>("SELECT 1 FROM crsql_changes LIMIT 1");
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
   if (typeof error === "string") return error;
@@ -2131,76 +1983,45 @@ export function errorMessage(error: unknown): string {
   return String(error);
 }
 
-/** Repair missing CRR triggers and reset the pull cursor if any table was missing. */
-export async function ensureCrrTablesEnabled(
-  db: Database,
-  options: { strict?: boolean } = { strict: IS_TAURI },
-): Promise<void> {
-  let repaired = false;
-  const failures: string[] = [];
+// ── Compatibility stubs for legacy components ────────────────────────────────
 
-  for (const table of CRR_TABLES) {
-    const rows = await db.select<{ value: string }[]>(
-      "SELECT value FROM sync_meta WHERE key = $1",
-      [`crr_enabled_${table}`]
-    );
-
-    const exists = await db.select<{ name: string }[]>(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name=$1",
-      [table]
-    );
-    if (exists.length === 0) continue;
-
-    if (await hasCrrChangeTracking(db, table)) {
-      if (rows[0]?.value !== "1") {
-        await db.execute(
-          "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-          [`crr_enabled_${table}`, "1"]
-        );
-        repaired = true;
-      }
-      continue;
-    }
-
-    try {
-      if (table === "drugs") {
-        const schemaRepaired = await ensureDrugsCrrCompatibleSchema(db);
-        if (schemaRepaired) repaired = true;
-      }
-      await db.execute_batch(`SELECT crsql_as_crr('${table}')`);
-      if (!(await hasCrrChangeTracking(db, table)) && !(await hasCrrRuntime(db))) {
-        throw new Error("crsql_as_crr completed but crsql_changes is unavailable");
-      }
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        [`crr_enabled_${table}`, "1"]
-      );
-      console.log(`[localDb] CRR enabled for ${table}`);
-      repaired = true;
-    } catch (e) {
-      const message = errorMessage(e);
-      failures.push(`${table}: ${message}`);
-      console.error(`[localDb] CRR required for ${table} but unavailable:`, e);
-      await db.execute(
-        "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-        [`crr_enabled_${table}`, "0"]
-      );
-    }
-  }
-
-  if (repaired) {
-    console.log("[localDb] CRR repair applied — resetting pull cursor");
-    await db.execute("DELETE FROM sync_meta WHERE key = 'crr_pull_db_version'");
-  }
-  resetCrrCache();
-
-  if (failures.length > 0 && options.strict !== false) {
-    throw new Error(
-      "CR-SQLite change tracking is required for offline sync but could not be enabled: "
-      + failures.join("; ")
-    );
-  }
+export interface QueuedRecord {
+  id: number;
+  operation_id: string;
+  table_name: string;
+  record_id: string;
+  operation: "create" | "update" | "delete";
+  sync_version: number;
+  payload_json: string;
+  created_offline_at: string;
+  attempts: number;
+  last_attempt_at: string | null;
+  next_attempt_at: string | null;
+  error: string | null;
+  conflict_json?: string | null;
 }
+
+export interface QueuedConflict {
+  table_name: string;
+  record_id: string;
+  conflict: any;
+  local_data: Record<string, unknown>;
+}
+
+export interface QueuedFailure {
+  table_name: string;
+  record_id: string;
+  attempts: number;
+  error: string | null;
+  is_blocked: boolean;
+  local_data: Record<string, unknown>;
+}
+
+export function isQueuedRecordInScope(_row: any, _scope?: any): boolean {
+  return true;
+}
+
+export function notifySyncQueueChanged(): void {}
 
 function syncMetaKey(table?: string, branchId?: string): string {
   if (branchId) {
@@ -2232,520 +2053,6 @@ export async function setLastSyncAt(
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// SYNC QUEUE HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-export interface QueuedRecord {
-  id: number;
-  operation_id: string;
-  table_name: string;
-  record_id: string;
-  operation: "create" | "update" | "delete";
-  sync_version: number;
-  payload_json: string;
-  created_offline_at: string;
-  attempts: number;
-  last_attempt_at: string | null;
-  next_attempt_at: string | null;
-  error: string | null;
-  conflict_json?: string | null;
-}
-
-export interface QueueScope {
-  organizationId?: string | null;
-  branchId?: string | null;
-}
-
-export interface QueuedConflict extends QueuedRecord {
-  conflict: PushConflict;
-  local_data: Record<string, unknown>;
-}
-
-export interface QueuedFailure extends QueuedRecord {
-  is_blocked: boolean;
-  local_data: Record<string, unknown>;
-}
-
-const BRANCH_SCOPED_QUEUE_TABLES = new Set([
-  "branch_inventory",
-  "drug_batches",
-  "stock_adjustments",
-  "sales",
-  "purchase_orders",
-  "prescriptions",
-]);
-
-const ORGANIZATION_SCOPED_QUEUE_TABLES = new Set([
-  "customers",
-  "drugs",
-  "drug_categories",
-  "price_contracts",
-]);
-
-let _crrCache: Record<string, boolean> | null = null;
-
-export async function isCrrTable(table: string): Promise<boolean> {
-  // A sale is a domain command, not a mergeable row. Its server-side effects
-  // are applied by SyncService._push_sale under an operation receipt.
-  if (table === "sales") return false;
-  if (_crrCache === null) {
-    const db = await getDb();
-    const rows = await db.select<{ key: string; value: string }[]>(
-      "SELECT key, value FROM sync_meta WHERE key LIKE 'crr_enabled_%'"
-    );
-    _crrCache = {};
-    for (const row of rows) {
-      _crrCache[row.key.replace("crr_enabled_", "")] = row.value === "1";
-    }
-  }
-  return _crrCache[table] ?? false;
-}
-
-export function resetCrrCache(): void {
-  _crrCache = null;
-}
-
-export const SYNC_QUEUE_CHANGED_EVENT = "laso:sync-queue-changed";
-
-export function notifySyncQueueChanged(): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new CustomEvent(SYNC_QUEUE_CHANGED_EVENT));
-}
-
-function hasQueueScope(scope?: QueueScope): boolean {
-  return Boolean(scope?.organizationId || scope?.branchId);
-}
-
-function asScopeString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-function parseQueuePayload(row: QueuedRecord): Record<string, unknown> | null {
-  try {
-    const parsed = JSON.parse(row.payload_json);
-    return parsed && typeof parsed === "object"
-      ? parsed as Record<string, unknown>
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-export function isQueuedRecordInScope(row: QueuedRecord, scope?: QueueScope): boolean {
-  if (!hasQueueScope(scope)) return true;
-
-  const payload = parseQueuePayload(row);
-  if (!payload) return false;
-
-  const branchId = asScopeString(payload.branch_id);
-  const organizationId = asScopeString(payload.organization_id);
-
-  if (BRANCH_SCOPED_QUEUE_TABLES.has(row.table_name)) {
-    return Boolean(scope?.branchId && branchId === scope.branchId);
-  }
-
-  if (ORGANIZATION_SCOPED_QUEUE_TABLES.has(row.table_name)) {
-    return Boolean(scope?.organizationId && organizationId === scope.organizationId);
-  }
-
-  if (branchId) {
-    return Boolean(scope?.branchId && branchId === scope.branchId);
-  }
-
-  if (organizationId) {
-    return Boolean(scope?.organizationId && organizationId === scope.organizationId);
-  }
-
-  return false;
-}
-
-function filterQueueByScope<T extends QueuedRecord>(rows: T[], scope?: QueueScope): T[] {
-  if (!hasQueueScope(scope)) return rows;
-  return rows.filter((row) => isQueuedRecordInScope(row, scope));
-}
-
-export async function enqueue(
-  tableName: string,
-  recordId: string,
-  operation: "create" | "update" | "delete",
-  syncVersion: number,
-  payload: Record<string, unknown>,
-  operationIdOverride?: string,
-): Promise<void> {
-  // CRR tables are tracked by cr-sqlite's crsql_changes — skip the old sync_queue
-  if (await isCrrTable(tableName)) return;
-  const db = await getDb();
-  const operationId = operationIdOverride ?? crypto.randomUUID();
-  await db.execute(
-    `INSERT INTO sync_queue
-       (operation_id, table_name, record_id, operation, sync_version, payload_json,
-        created_offline_at, next_attempt_at, conflict_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, NULL)
-     ON CONFLICT(table_name, record_id) DO UPDATE SET
-       operation_id = excluded.operation_id,
-       operation    = excluded.operation,
-       sync_version = excluded.sync_version,
-       payload_json = excluded.payload_json,
-       attempts     = 0,
-       last_attempt_at = NULL,
-       next_attempt_at = NULL,
-       error        = NULL,
-       conflict_json = NULL`,
-    [
-      operationId,
-      tableName,
-      recordId,
-      operation,
-      syncVersion,
-      JSON.stringify(payload),
-      new Date().toISOString(),
-    ]
-  );
-  notifySyncQueueChanged();
-}
-
-export async function getPendingQueue(
-  limit = 500,
-  maxAttempts = 10,
-  scope?: QueueScope
-): Promise<QueuedRecord[]> {
-  const db = await getDb();
-  if (!hasQueueScope(scope)) {
-    return db.select<QueuedRecord[]>(
-      `SELECT * FROM sync_queue
-       WHERE conflict_json IS NULL
-         AND attempts < $2
-         AND (next_attempt_at IS NULL OR next_attempt_at <= $3)
-       ORDER BY id ASC
-       LIMIT $1`,
-      [limit, maxAttempts, new Date().toISOString()]
-    );
-  }
-
-  const rows = await db.select<QueuedRecord[]>(
-    `SELECT * FROM sync_queue
-     WHERE conflict_json IS NULL
-       AND attempts < $1
-       AND (next_attempt_at IS NULL OR next_attempt_at <= $2)
-     ORDER BY id ASC`,
-    [maxAttempts, new Date().toISOString()]
-  );
-  return filterQueueByScope(rows ?? [], scope).slice(0, limit);
-}
-
-export async function dequeue(tableName: string, recordId: string): Promise<void> {
-  const db = await getDb();
-  await db.execute(
-    "DELETE FROM sync_queue WHERE table_name = $1 AND record_id = $2",
-    [tableName, recordId]
-  );
-  notifySyncQueueChanged();
-}
-
-export async function markQueueError(
-  tableName: string,
-  recordId: string,
-  error: string,
-  skipIncrement = false,
-  forceAttempts?: number,
-): Promise<number> {
-  const db = await getDb();
-  const currentRows = await db.select<{ attempts: number }[]>(
-    "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
-    [tableName, recordId]
-  );
-  const currentAttempts = currentRows[0]?.attempts ?? 0;
-  const nextAttemptAt = new Date(
-    Date.now() + new RetryBackoff().getDelay(currentAttempts)
-  ).toISOString();
-
-  if (forceAttempts !== undefined) {
-    await db.execute(
-      `UPDATE sync_queue
-       SET attempts = $1,
-           last_attempt_at = $2,
-           next_attempt_at = $3,
-           error = $4
-       WHERE table_name = $5 AND record_id = $6`,
-      [forceAttempts, new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
-    );
-  } else if (skipIncrement) {
-    await db.execute(
-      `UPDATE sync_queue
-       SET last_attempt_at = $1,
-           next_attempt_at = $2,
-           error = $3
-       WHERE table_name = $4 AND record_id = $5`,
-      [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
-    );
-  } else {
-    await db.execute(
-      `UPDATE sync_queue
-       SET attempts = attempts + 1,
-           last_attempt_at = $1,
-           next_attempt_at = $2,
-           error = $3
-       WHERE table_name = $4 AND record_id = $5`,
-      [new Date().toISOString(), nextAttemptAt, error, tableName, recordId]
-    );
-  }
-
-  notifySyncQueueChanged();
-  const rows = await db.select<{ attempts: number }[]>(
-    "SELECT attempts FROM sync_queue WHERE table_name = $1 AND record_id = $2",
-    [tableName, recordId]
-  );
-  return rows[0]?.attempts ?? 0;
-}
-
-export async function markQueueConflict(
-  tableName: string,
-  recordId: string,
-  error: string,
-  conflict: PushConflict
-): Promise<void> {
-  const db = await getDb();
-  await db.execute(
-    `UPDATE sync_queue
-     SET attempts = attempts + 1,
-         last_attempt_at = $1,
-         error = $2,
-         conflict_json = $3
-     WHERE table_name = $4 AND record_id = $5`,
-    [new Date().toISOString(), error, JSON.stringify(conflict), tableName, recordId]
-  );
-  notifySyncQueueChanged();
-}
-
-export async function clearQueueConflict(
-  tableName: string,
-  recordId: string
-): Promise<void> {
-  const db = await getDb();
-  await db.execute(
-    `UPDATE sync_queue
-     SET error = NULL,
-         conflict_json = NULL,
-         next_attempt_at = NULL
-     WHERE table_name = $1 AND record_id = $2`,
-    [tableName, recordId]
-  );
-  notifySyncQueueChanged();
-}
-
-export async function getPendingConflicts(scope?: QueueScope): Promise<QueuedConflict[]> {
-  const db = await getDb();
-  const rows = await db.select<QueuedRecord[] & { conflict_json: string }[]>(
-    "SELECT * FROM sync_queue WHERE conflict_json IS NOT NULL ORDER BY id ASC"
-  );
-
-  return filterQueueByScope(rows ?? [], scope).map((row) => {
-    let conflict: PushConflict = {
-      local_id: row.record_id,
-      table_name: row.table_name,
-      local_version: row.sync_version,
-      server_version: 0,
-      server_record: {},
-      resolution: "manual_required",
-    };
-    try {
-      conflict = JSON.parse(row.conflict_json ?? "{}");
-    } catch { }
-    return {
-      ...row,
-      conflict,
-      local_data: JSON.parse(row.payload_json),
-    };
-  });
-}
-
-export async function getPendingFailures(
-  maxAttempts = 10,
-  scope?: QueueScope
-): Promise<QueuedFailure[]> {
-  const db = await getDb();
-  const rows = await db.select<QueuedRecord[]>(
-    `SELECT *
-     FROM sync_queue
-     WHERE conflict_json IS NULL
-       AND error IS NOT NULL
-     ORDER BY
-       CASE WHEN attempts >= $1 THEN 0 ELSE 1 END,
-       last_attempt_at DESC,
-       id ASC`,
-    [maxAttempts]
-  );
-
-  return filterQueueByScope(rows ?? [], scope).map((row) => {
-    let localData: Record<string, unknown> = {};
-    try {
-      localData = JSON.parse(row.payload_json);
-    } catch { }
-    return {
-      ...row,
-      is_blocked: row.attempts >= maxAttempts,
-      local_data: localData,
-    };
-  });
-}
-
-export async function resetPendingFailures(scope?: QueueScope): Promise<void> {
-  const db = await getDb();
-  if (hasQueueScope(scope)) {
-    const rows = await db.select<QueuedRecord[]>(
-      `SELECT *
-       FROM sync_queue
-       WHERE conflict_json IS NULL
-         AND error IS NOT NULL
-       ORDER BY id ASC`
-    );
-    const scopedRows = filterQueueByScope(rows ?? [], scope);
-    for (const row of scopedRows) {
-      await db.execute(
-        `UPDATE sync_queue
-         SET attempts = 0,
-             last_attempt_at = NULL,
-             next_attempt_at = NULL,
-             error = NULL
-         WHERE id = $1`,
-        [row.id]
-      );
-    }
-    notifySyncQueueChanged();
-    return;
-  }
-
-  await db.execute(
-    `UPDATE sync_queue
-     SET attempts = 0,
-         last_attempt_at = NULL,
-         next_attempt_at = NULL,
-         error = NULL
-     WHERE conflict_json IS NULL
-       AND error IS NOT NULL`
-  );
-  notifySyncQueueChanged();
-}
-
-export async function getNextRetryAt(
-  scope?: QueueScope,
-  maxAttempts = 10
-): Promise<string | null> {
-  const db = await getDb();
-  const rows = await db.select<QueuedRecord[]>(
-    `SELECT *
-     FROM sync_queue
-     WHERE conflict_json IS NULL
-       AND attempts < $1
-       AND next_attempt_at IS NOT NULL
-     ORDER BY next_attempt_at ASC`,
-    [maxAttempts]
-  );
-  const scopedRows = filterQueueByScope(rows ?? [], scope);
-  return scopedRows[0]?.next_attempt_at ?? null;
-}
-
-export async function requeueConflictForLocalWin(
-  conflict: QueuedConflict
-): Promise<void> {
-  const db = await getDb();
-  const nextVersion = Math.max(
-    conflict.sync_version,
-    conflict.conflict.server_version
-  ) + 1;
-  const payload = {
-    ...conflict.local_data,
-    sync_version: nextVersion,
-    _force_sync_overwrite: true,
-  };
-
-  await db.execute(
-    `UPDATE sync_queue
-     SET operation_id = $1,
-         sync_version = $2,
-         payload_json = $3,
-         attempts = 0,
-         last_attempt_at = NULL,
-         next_attempt_at = NULL,
-         error = NULL,
-         conflict_json = NULL
-     WHERE table_name = $4 AND record_id = $5`,
-    [
-      crypto.randomUUID(),
-      nextVersion,
-      JSON.stringify(payload),
-      conflict.table_name,
-      conflict.record_id,
-    ]
-  );
-  notifySyncQueueChanged();
-
-  // Manual conflicts currently apply only to locally editable cached tables.
-  // Keep the row version aligned with the queue so the next pull cannot
-  // overwrite the user's chosen local value before the forced push completes.
-  if (conflict.table_name === "customers" || conflict.table_name === "prescriptions") {
-    await db.execute(
-      `UPDATE ${conflict.table_name}
-       SET sync_status = 'pending', sync_version = $1
-       WHERE id = $2`,
-      [nextVersion, conflict.record_id]
-    );
-  }
-}
-
-export async function getPendingCount(scope?: QueueScope): Promise<number> {
-  const db = await getDb();
-  if (hasQueueScope(scope)) {
-    const rows = await db.select<QueuedRecord[]>(
-      "SELECT * FROM sync_queue ORDER BY id ASC"
-    );
-    return filterQueueByScope(rows ?? [], scope).length;
-  }
-
-  const rows = await db.select<{ count: number }[]>(
-    "SELECT COUNT(*) as count FROM sync_queue"
-  );
-  return rows?.[0]?.count ?? 0;
-}
-
-// ─── CRR (cr-sqlite) helpers ───────────────────────────────────────────
-
-export interface CrrRenumberAuditEvent {
-  event_id: string;
-  table_name: "prescriptions" | "purchase_orders" | "sales";
-  winner_id: string;
-  loser_id: string;
-  business_key_col: string;
-  old_business_key: string;
-  new_business_key: string;
-  renumbered_at: string;
-}
-
-export async function getPendingCrrRenumberAudits(): Promise<CrrRenumberAuditEvent[]> {
-  const db = await getDb();
-  return db.select<CrrRenumberAuditEvent[]>(`
-    SELECT event_id, table_name, winner_id, loser_id, business_key_col,
-           old_business_key, new_business_key, renumbered_at
-    FROM crr_renumber_audit
-    WHERE uploaded_at IS NULL
-    ORDER BY id
-    LIMIT 500
-  `);
-}
-
-export async function markCrrRenumberAuditsUploaded(eventIds: string[]): Promise<void> {
-  if (eventIds.length === 0) return;
-  const db = await getDb();
-  const uploadedAt = new Date().toISOString();
-  for (const eventId of eventIds) {
-    await db.execute(
-      "UPDATE crr_renumber_audit SET uploaded_at = $1 WHERE event_id = $2",
-      [uploadedAt, eventId],
-    );
-  }
-}
-
 let _device_id: string | null = null;
 
 /** Get the stable local device ID (cached after first call). */
@@ -2765,312 +2072,6 @@ export async function getDeviceId(): Promise<string> {
     );
   }
   return _device_id;
-}
-
-export interface CrrChangeRow {
-  table: string;
-  pk: unknown;
-  cid: string;
-  val: unknown;
-  col_version: number;
-  db_version: number;
-  site_id: string;
-  cl: number;
-  seq: number;
-}
-
-export interface CustomerMergeDirective {
-  directive_version: number;
-  event_id: string;
-  survivor_id: string;
-  loser_id: string;
-  merged_at: string;
-}
-
-async function normalizeMergedCustomerReferences(db: Database): Promise<void> {
-  for (const table of ["sales", "prescriptions"]) {
-    await db.execute(`
-      UPDATE ${table}
-      SET customer_id = (
-        SELECT survivor_id FROM customer_merge_aliases
-        WHERE loser_id = ${table}.customer_id
-      )
-      WHERE customer_id IN (SELECT loser_id FROM customer_merge_aliases)
-    `);
-  }
-}
-
-export async function applyCustomerMergeDirectives(
-  directives: CustomerMergeDirective[],
-): Promise<void> {
-  if (directives.length === 0) return;
-  const db = await getDb();
-  await applyCustomerMergeDirectivesToDb(db, directives);
-}
-
-export async function applyCustomerMergeDirectivesToDb(
-  db: Database,
-  directives: CustomerMergeDirective[],
-): Promise<void> {
-  await db.execute("BEGIN IMMEDIATE");
-  try {
-    for (const directive of directives) {
-      const applied = await db.select<{ event_id: string }[]>(
-        "SELECT event_id FROM applied_customer_merge_directives WHERE event_id = $1",
-        [directive.event_id],
-      );
-      if (applied.length > 0) continue;
-
-      // Collapse older aliases if their survivor is itself merged later.
-      await db.execute(
-        "UPDATE customer_merge_aliases SET survivor_id = $1 WHERE survivor_id = $2",
-        [directive.survivor_id, directive.loser_id],
-      );
-      await db.execute(`
-        INSERT INTO customer_merge_aliases
-          (loser_id, survivor_id, event_id, merged_at)
-        VALUES ($1, $2, $3, $4)
-        ON CONFLICT(loser_id) DO UPDATE SET
-          survivor_id = excluded.survivor_id,
-          event_id = excluded.event_id,
-          merged_at = excluded.merged_at
-      `, [
-        directive.loser_id,
-        directive.survivor_id,
-        directive.event_id,
-        directive.merged_at,
-      ]);
-
-      await normalizeMergedCustomerReferences(db);
-      await db.execute("DELETE FROM customers WHERE id = $1", [directive.loser_id]);
-      await db.execute(
-        "INSERT INTO applied_customer_merge_directives(event_id, applied_at) VALUES($1, $2)",
-        [directive.event_id, new Date().toISOString()],
-      );
-    }
-    await normalizeMergedCustomerReferences(db);
-    await db.execute("COMMIT");
-  } catch (error) {
-    try { await db.execute("ROLLBACK"); } catch { }
-    throw error;
-  }
-}
-
-/**
- * Return crsql_changes entries newer than `sinceDbVersion` for the given
- * site_id (defaults to local site).  These are the changes this client
- * produced locally and needs to push to the server.
- */
-export async function getCrrPushChanges(
-  sinceDbVersion = 0,
-): Promise<CrrChangeRow[]> {
-  const db = await getDb();
-  const siteId = await getDeviceId();
-  if (!siteId) return [];
-  return getCrrPushChangesFromDb(db, siteId, sinceDbVersion);
-}
-
-export async function getCrrPushChangesFromDb(
-  db: Pick<Database, "execute" | "select">,
-  siteId: string,
-  sinceDbVersion = 0,
-): Promise<CrrChangeRow[]> {
-  await ensureSuppressedCrrChangesSchema(db as Database);
-  // `seq` resets to 0 at the start of every transaction in cr-sqlite — it
-  // orders rows WITHIN one commit, not across commits. Sorting by `seq`
-  // alone leaves rows from different transactions that happen to share a
-  // `seq` value in an undefined relative order, which can send a
-  // dependent row (e.g. a prescription) to the server before the row it
-  // references (its customer), permanently failing FK validation and
-  // wedging the push cursor forever (see the bug report this fixes: an
-  // offline customer + prescription created moments apart never synced).
-  // `db_version` is the true chronological ordering across transactions.
-  // `siteId` comes from getDeviceId(). The Tauri IPC read path
-  // (db.rs::row_to_json) serializes any BLOB as a "b64:..." STRING, so
-  // `siteId` here is that string, not raw bytes. Binding it directly as a
-  // query parameter sends it to Rust as JSON string -> Value::Text (see
-  // json_to_rusqlite): only the `{"__laso_blob_b64": ...}` object shape
-  // binds as Value::Blob. A TEXT parameter can never equal a real BLOB
-  // `crsql_changes.site_id` value in SQLite, so `WHERE site_id = ?` with
-  // the raw string silently matched zero rows, forever — the push query
-  // returned empty even with a correct db_version cursor. Re-wrap through
-  // blobTransportValue() so it binds as the blob the column actually is.
-  // `sales` and the org-level catalog tables (drugs, drug_categories,
-  // price_contracts, audit_logs) are all `server_authoritative: True` on
-  // the backend (_CRR_TABLE_CONFIG) — the server unconditionally rejects
-  // any client push touching them (sales has its own command-based push
-  // path; the catalog tables are pull-only). A device that ever had local
-  // rows for one of these (e.g. locally-seeded demo data predating the
-  // pull-only convention) keeps regenerating crsql_changes for them
-  // forever. Because pushCrr() only advances the cursor and marks rows
-  // synced when the *whole* batch succeeds, even one such permanently-
-  // rejected row blocks every other table in the same batch — including
-  // genuinely pushable customers/prescriptions — from ever completing.
-  // Excluding these tables here, the same way `sales` already is, stops
-  // the local device from ever re-selecting a change it can't win.
-  return db.select<CrrChangeRow[]>(
-    `SELECT "table", pk, cid, val, col_version, db_version, site_id, cl, seq
-     FROM crsql_changes
-     WHERE site_id = ? AND db_version > ?
-       AND "table" NOT IN ('sales', 'drugs', 'drug_categories', 'price_contracts', 'audit_logs')
-       AND NOT EXISTS (
-         SELECT 1 FROM suppressed_crr_changes suppressed
-         WHERE suppressed.table_name = crsql_changes."table"
-           AND suppressed.db_version = crsql_changes.db_version
-       )
-     ORDER BY db_version, seq`,
-    [decodeCrrValue(siteId), sinceDbVersion]
-  );
-}
-
-/**
- * Insert changes from the server into local crsql_changes, triggering
- * cr-sqlite's auto-merge into the local table.
- */
-const BLOB_TRANSPORT_KEY = "__laso_blob_b64";
-
-function blobTransportValue(encoded: string): Record<typeof BLOB_TRANSPORT_KEY, string> {
-  return { [BLOB_TRANSPORT_KEY]: encoded.slice(4) };
-}
-
-function decodeCrrValue(v: unknown): unknown {
-  if (typeof v === "string" && v.startsWith("b64:")) {
-    return blobTransportValue(v);
-  }
-  return v;
-}
-
-const PERMANENTLY_REJECTED_REASON = "permanently_rejected";
-
-export interface SuppressedPermanentlyRejectedRow {
-  table: string;
-  recordId: string | null;
-  reason: string;
-}
-
-/**
- * Permanently stop resending a CRR row's local changes after the server
- * classifies it PERMANENTLY_REJECTED (see syncErrorCodes.ts) -- the server
- * already confirmed resending the identical local bytes can never resolve
- * differently (see crr_sync_service.py's
- * _STRATEGIES_WITH_ONLY_REJECTION_TOMBSTONES). Suppresses every local
- * crsql_changes row for this (table, pk) group so
- * getCrrPushChangesFromDb never re-selects it -- otherwise this one row
- * would keep failing every cycle forever and block every other row in
- * the same push batch from ever advancing the cursor.
- */
-export async function suppressPermanentlyRejectedCrrRow(
-  db: Database,
-  table: string,
-  pkB64: string,
-): Promise<SuppressedPermanentlyRejectedRow> {
-  if (!KNOWN_CRR_TABLES.includes(table)) {
-    throw new Error(`suppressPermanentlyRejectedCrrRow: unknown CRR table ${table}`);
-  }
-  await ensureSuppressedCrrChangesSchema(db);
-  const pkValue = decodeCrrValue(pkB64);
-
-  // The server can't resolve this row's id (that's exactly why it's
-  // permanently rejected), but the client authored it locally, so it's
-  // still readable from the client's own table by packed-pk lookup --
-  // the same match technique pushCrr() already uses to mark rows synced.
-  const idRows = await db.select<{ id: string }[]>(
-    `SELECT id FROM ${table} WHERE crsql_pack_columns(id) = ?`,
-    [pkValue],
-  );
-  const recordId = idRows[0]?.id ?? null;
-
-  const versionRows = await db.select<{ db_version: number }[]>(
-    'SELECT DISTINCT db_version FROM crsql_changes WHERE "table" = ? AND pk = ?',
-    [table, pkValue],
-  );
-
-  const now = new Date().toISOString();
-  for (const { db_version } of versionRows) {
-    await db.execute(
-      `INSERT OR IGNORE INTO suppressed_crr_changes
-         (table_name, db_version, record_id, reason, created_at)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [table, db_version, recordId ?? pkB64, PERMANENTLY_REJECTED_REASON, now],
-    );
-  }
-
-  return { table, recordId, reason: PERMANENTLY_REJECTED_REASON };
-}
-
-export interface PermanentlyRejectedCrrRow {
-  table: string;
-  recordId: string;
-  createdAt: string;
-}
-
-/** Distinct rows the user needs to manually review (see SyncIndicator.tsx). */
-export async function getPermanentlyRejectedCrrRows(): Promise<PermanentlyRejectedCrrRow[]> {
-  const db = await getDb();
-  await ensureSuppressedCrrChangesSchema(db);
-  const rows = await db.select<
-    { table_name: string; record_id: string; created_at: string }[]
-  >(
-    `SELECT table_name, record_id, MIN(created_at) AS created_at
-     FROM suppressed_crr_changes
-     WHERE reason = $1
-     GROUP BY table_name, record_id
-     ORDER BY created_at DESC`,
-    [PERMANENTLY_REJECTED_REASON],
-  );
-  return rows.map((r) => ({
-    table: r.table_name,
-    recordId: r.record_id,
-    createdAt: r.created_at,
-  }));
-}
-
-export async function applyCrrPullChanges(
-  changes: CrrChangeRow[],
-): Promise<void> {
-  if (changes.length === 0) return;
-  const db = await getDb();
-  await applyCrrPullChangesToDb(db, changes);
-}
-
-export async function applyCrrPullChangesToDb(
-  db: Database,
-  changes: CrrChangeRow[],
-): Promise<void> {
-  const mergeableChanges = changes.filter((change) => change.table !== "sales");
-  if (mergeableChanges.length === 0) {
-    await normalizeMergedCustomerReferences(db);
-    return;
-  }
-  const tables = new Set(mergeableChanges.map((change) => change.table));
-  if ([...tables].some((table) => CRR_TABLES.includes(table))) {
-    await ensureCrrTablesEnabled(db);
-  }
-  await db.execute("BEGIN IMMEDIATE");
-  try {
-    for (const ch of mergeableChanges) {
-      await db.execute(
-        `INSERT INTO crsql_changes ("table", pk, cid, val, col_version, db_version, site_id, cl, seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)`,
-        [
-          ch.table,
-          decodeCrrValue(ch.pk),
-          ch.cid,
-          decodeCrrValue(ch.val),
-          ch.col_version,
-          ch.db_version,
-          decodeCrrValue(ch.site_id),
-          ch.cl,
-          ch.seq,
-        ]
-      );
-    }
-    await normalizeMergedCustomerReferences(db);
-    await db.execute("COMMIT");
-  } catch (error) {
-    try { await db.execute("ROLLBACK"); } catch { }
-    throw error;
-  }
 }
 
 
@@ -3297,6 +2298,15 @@ export async function markOutboxResult(
   );
 }
 
+/** Return the number of outbox events pending push. */
+export async function getPendingOutboxCount(): Promise<number> {
+  const db = await getDb();
+  const rows = await db.select<{ count: number }[]>(
+    "SELECT COUNT(*) as count FROM event_outbox WHERE status IN ('pending', 'failed', 'accepted_deferred')"
+  );
+  return rows?.[0]?.count ?? 0;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // EVENT PULL CURSOR
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3445,6 +2455,17 @@ async function migrate_v28(db: Database): Promise<void> {
     );
   `);
   await db.execute("PRAGMA user_version = 28");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v29 — drop legacy sync_queue
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function migrate_v29(db: Database): Promise<void> {
+  try {
+    await db.execute("DROP TABLE IF EXISTS sync_queue");
+  } catch {}
+  await db.execute("PRAGMA user_version = 29");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

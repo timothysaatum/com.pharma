@@ -160,20 +160,12 @@ pub fn run() {
             app.handle()
                 .plugin(tauri_plugin_updater::Builder::new().build())?;
 
-            // Initialize the local SQLite database with rusqlite + cr-sqlite
+            // Initialize the local SQLite database with SQLCipher encryption
             let db_dir = app.path().app_data_dir().ok();
-            let resource_dir = app.path().resource_dir().ok();
-            let ext_path = match db::resolve_extension_path(resource_dir) {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    eprintln!("[db] {e}");
-                    None
-                }
-            };
             let encryption_key = get_or_create_db_encryption_key().map_err(|error| {
                 format!("Failed to obtain local database encryption key: {error}")
             })?;
-            let db_state = db::init_db(db_dir.clone(), ext_path, &encryption_key)
+            let db_state = db::init_db(db_dir.clone(), &encryption_key)
                 .map_err(|error| format!("Failed to initialize local database: {error}"))?;
             if let Some(warning) = &db_state.startup_warning {
                 eprintln!("[db] {warning}");

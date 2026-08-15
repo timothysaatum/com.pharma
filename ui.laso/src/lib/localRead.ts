@@ -912,7 +912,6 @@ export const localRead = {
   ): Promise<PaginatedResponse<BranchInventoryWithDetails>> {
     console.log(`[LocalRead] getBranchInventory: branch=${branchId}, search=${params.search}, low_stock=${params.low_stock_only}, page=${page}`);
     const db = await getDb();
-    const validBatchSumSql = `bi.sellable_quantity`;
 
     const qualifiers = ["bi.branch_id = $1"];
     const values: unknown[] = [branchId];

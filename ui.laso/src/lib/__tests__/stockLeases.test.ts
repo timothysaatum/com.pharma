@@ -11,12 +11,6 @@ describe("Stock Leases & Offline Gating", () => {
 
   beforeEach(() => {
     vi.resetAllMocks();
-    
-    // Mock navigator.onLine setter since we change it in tests
-    Object.defineProperty(navigator, 'onLine', {
-      writable: true,
-      value: true
-    });
 
     const store: Record<string, string> = {};
     (global as any).localStorage = {
@@ -32,7 +26,7 @@ describe("Stock Leases & Offline Gating", () => {
   });
 
   it("when online, returns leaseRemaining + unleasedPool", async () => {
-    navigator.onLine = true;
+    vi.stubGlobal("navigator", { onLine: true });
     localStorage.setItem("laso_terminal_id", "TERM-123");
 
     mockDb.select.mockImplementation(async (query: string) => {
@@ -50,7 +44,7 @@ describe("Stock Leases & Offline Gating", () => {
   });
 
   it("when offline, returns ONLY leaseRemaining", async () => {
-    navigator.onLine = false;
+    vi.stubGlobal("navigator", { onLine: false });
     localStorage.setItem("laso_terminal_id", "TERM-123");
 
     mockDb.select.mockImplementation(async (query: string) => {
@@ -68,7 +62,7 @@ describe("Stock Leases & Offline Gating", () => {
   });
 
   it("ignores expired or non-active leases", async () => {
-    navigator.onLine = false;
+    vi.stubGlobal("navigator", { onLine: false });
     localStorage.setItem("laso_terminal_id", "TERM-123");
 
     mockDb.select.mockImplementation(async (query: string) => {

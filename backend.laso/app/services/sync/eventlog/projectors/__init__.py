@@ -13,6 +13,9 @@ from app.services.sync.eventlog.projectors.prescription import PrescriptionProje
 from app.services.sync.eventlog.projectors.stock import StockProjector
 from app.services.sync.eventlog.projectors.stock_transfer import StockTransferProjector
 from app.services.sync.eventlog.projectors.drug import DrugProjector, DrugCategoryProjector
+from app.services.sync.eventlog.projectors.drug_batch import DrugBatchProjector
+from app.services.sync.eventlog.projectors.branch_inventory import BranchInventoryProjector
+from app.services.sync.eventlog.projectors.purchase_order import PurchaseOrderProjector
 
 __all__ = [
     "CustomerProjector",
@@ -22,4 +25,7 @@ __all__ = [
     "StockTransferProjector",
     "DrugProjector",
     "DrugCategoryProjector",
+    "DrugBatchProjector",
+    "BranchInventoryProjector",
+    "PurchaseOrderProjector",
 ]

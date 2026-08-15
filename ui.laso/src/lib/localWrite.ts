@@ -15,7 +15,7 @@
  * The sync engine picks up sync_queue entries on next online cycle.
  */
 
-import { getDb, enqueue, appendToOutbox, getOutboxTailHash, getVersionVector, bumpVector } from "@/lib/localDb";
+import { getDb, appendToOutbox, getOutboxTailHash, getVersionVector, bumpVector } from "@/lib/localDb";
 import { generateUlid, computeHashSelf, GENESIS_HASH } from "@/lib/eventEnvelope";
 import type { OutboxEvent, VectorClock } from "@/lib/localDb";
 import type {
@@ -628,58 +628,7 @@ export function nextSyncVersion(
     return operation === "update" ? version + 1 : version;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// INTERNAL — upsert a row and enqueue it
-// ─────────────────────────────────────────────────────────────────────────────
 
-async function upsertAndEnqueue<T extends Record<string, unknown>>(
-    table: string,
-    record: T,
-    operation: "create" | "update" = "create",
-    queueExtras: Record<string, unknown> = {}
-): Promise<void> {
-    const db = await getDb();
-    const id = record.id as string;
-    // Updates must advertise the next version.  The server rejects equality
-    // because it means another writer may already have committed that version.
-    const syncVersion = nextSyncVersion(
-        record.sync_version as number | undefined,
-        operation
-    );
-    const now = new Date().toISOString();
-
-    const payload = {
-        ...record,
-        sync_status: "pending",
-        sync_version: syncVersion,
-        updated_at: now,
-        created_at: record.created_at ?? now,
-    };
-
-    const cols = Object.keys(payload);
-    const vals = cols.map((c) => {
-        const v = payload[c];
-        if (typeof v === "boolean") return v ? 1 : 0;
-        if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
-        return v ?? null;
-    });
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-    const updates = cols
-        .filter((c) => c !== "id")
-        .map((c) => `${c} = excluded.${c}`)
-        .join(", ");
-
-    await db.execute(
-        `INSERT INTO ${table} (${cols.join(", ")}) VALUES (${placeholders})
-         ON CONFLICT(id) DO UPDATE SET ${updates}`,
-        vals
-    );
-
-    await enqueue(table, id, operation, syncVersion, {
-        ...payload,
-        ...queueExtras,
-    } as Record<string, unknown>);
-}
 
 /** SQLite-only upsert — no sync_queue entry. Use for event-sourced tables. */
 async function upsertLocal<T extends Record<string, unknown>>(
@@ -900,29 +849,14 @@ export const writeLocal = {
 
             // No row yet — create one only for non-negative stock additions.
             const id = crypto.randomUUID();
-            if (enqueueForSync) {
-                await upsertAndEnqueue("branch_inventory", {
-                    id,
-                    branch_id: branchId,
-                    drug_id: drugId,
-                    quantity: quantityDelta,
-                    reserved_quantity: 0,
-                    sellable_quantity: 0,
-                    location: null,
-                    selling_price: null,
-                    updated_at: now,
-                    created_at: now,
-                }, "create");
-            } else {
-                await db.execute(
-                    `INSERT INTO branch_inventory (
-                       id, branch_id, drug_id, quantity, reserved_quantity, sellable_quantity,
-                       location, selling_price, sync_status, sync_version,
-                       synced_at, updated_at, created_at
-                     ) VALUES ($1, $2, $3, $4, 0, 0, NULL, NULL, 'synced', 1, NULL, $5, $5)`,
-                    [id, branchId, drugId, quantityDelta, now]
-                );
-            }
+            await db.execute(
+                `INSERT INTO branch_inventory (
+                   id, branch_id, drug_id, quantity, reserved_quantity, sellable_quantity,
+                   location, selling_price, sync_status, sync_version,
+                   synced_at, updated_at, created_at
+                 ) VALUES ($1, $2, $3, $4, 0, 0, NULL, NULL, 'synced', 1, NULL, $5, $5)`,
+                [id, branchId, drugId, quantityDelta, now]
+            );
             return;
         }
 

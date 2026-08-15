@@ -43,98 +43,6 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
-fn crsqlite_library_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "crsqlite.dll"
-    } else if cfg!(target_os = "macos") {
-        "crsqlite.dylib"
-    } else {
-        "crsqlite.so"
-    }
-}
-
-fn crsqlite_platform_dir() -> Result<&'static str, String> {
-    match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("linux", "x86_64") => Ok("linux-x86_64"),
-        ("linux", "aarch64") => Ok("linux-aarch64"),
-        ("windows", "x86_64") => Ok("windows-x86_64"),
-        ("macos", "aarch64") => Ok("darwin-aarch64"),
-        ("macos", "x86_64") => Ok("darwin-x86_64"),
-        (os, arch) => Err(format!(
-            "cr-sqlite extension is not packaged for {os}/{arch}"
-        )),
-    }
-}
-
-fn extension_load_path(ext_path: &std::path::Path) -> PathBuf {
-    let p = ext_path.to_string_lossy().to_string();
-    let stripped = p
-        .strip_suffix(".so")
-        .or_else(|| p.strip_suffix(".dylib"))
-        .or_else(|| p.strip_suffix(".dll"))
-        .unwrap_or(&p);
-    PathBuf::from(stripped)
-}
-
-/// Resolve the cr-sqlite shared-library path at runtime.
-///
-/// Resolution order (first match wins):
-///   1. `CRSQLITE_EXTENSION_PATH` environment variable
-///   2. Tauri resource directory — for production bundling
-///   3. Repository-relative layouts — works with `cargo test` and `tauri dev`
-///   4. Current/parent directory fallbacks using the explicit architecture dir
-pub fn resolve_extension_path(resource_dir: Option<PathBuf>) -> Result<PathBuf, String> {
-    // 1. Environment variable (highest priority)
-    if let Ok(val) = std::env::var("CRSQLITE_EXTENSION_PATH") {
-        let p = PathBuf::from(&val);
-        if p.exists() {
-            return Ok(p);
-        }
-    }
-
-    let library_name = crsqlite_library_name();
-    let platform_dir = crsqlite_platform_dir()?;
-
-    // Build candidate list
-    let mut candidates: Vec<PathBuf> = Vec::new();
-
-    // 2. Tauri resource directory (used in production bundles)
-    if let Some(dir) = &resource_dir {
-        candidates.push(dir.join("crsqlite").join(platform_dir).join(library_name));
-        candidates.push(dir.join(platform_dir).join(library_name));
-    }
-
-    // 3. Working-directory fallbacks for repo root, ui.laso, and src-tauri.
-    candidates.push(
-        PathBuf::from("crsqlite")
-            .join(platform_dir)
-            .join(library_name),
-    );
-    candidates.push(
-        PathBuf::from("..")
-            .join("crsqlite")
-            .join(platform_dir)
-            .join(library_name),
-    );
-    candidates.push(
-        PathBuf::from("..")
-            .join("..")
-            .join("crsqlite")
-            .join(platform_dir)
-            .join(library_name),
-    );
-
-    for p in &candidates {
-        if p.exists() {
-            return Ok(p.clone());
-        }
-    }
-
-    Err(format!(
-        "cr-sqlite extension not found. Tried: env CRSQLITE_EXTENSION_PATH, {candidates:?}"
-    ))
-}
-
 // ─── SQLCipher at-rest encryption ──────────────────────────────────────
 //
 // `laso.db` holds prescriptions, customer PII, and controlled-substance
@@ -479,7 +387,6 @@ fn ensure_db_ready(db_path: &Path, key: &str) -> Result<Option<String>, String> 
 
 pub fn init_db(
     db_dir: Option<PathBuf>,
-    ext_path: Option<PathBuf>,
     encryption_key: &str,
 ) -> Result<DbState, String> {
     // Resolve DB path: use app's data dir or fallback to CWD
@@ -511,26 +418,6 @@ pub fn init_db(
     conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
         .map_err(|e| format!("Cannot set pragmas: {e}"))?;
 
-    if let Some(ext_path) = ext_path {
-        // SAFETY: cr-sqlite is a trusted extension shipped with the app.
-        // SQLite automatically appends the platform extension suffix
-        // (.so on Linux, .dylib on macOS, .dll on Windows), regardless of
-        // whether the path already includes it. Strip it to avoid double
-        // suffixes (e.g. crsqlite.so.so).
-        let ext_load_path = extension_load_path(&ext_path);
-        unsafe {
-            conn.load_extension(&ext_load_path, None).map_err(|error| {
-                format!(
-                    "Cannot load cr-sqlite extension {}: {error}",
-                    ext_path.display()
-                )
-            })?;
-        }
-
-    } else {
-        println!("[db] cr-sqlite extension not found — running without CRDT support");
-    }
-
     Ok(DbState {
         conn: Mutex::new(conn),
         startup_warning: migration_warning,
@@ -540,14 +427,13 @@ pub fn init_db(
 #[cfg(test)]
 mod startup_tests {
     use super::{
-        build_encrypted_copy, crsqlite_platform_dir, ensure_db_ready, execute_transaction,
-        extension_load_path, generate_sqlcipher_raw_key, init_db, is_plaintext_sqlite,
+        build_encrypted_copy, ensure_db_ready, execute_transaction,
+        generate_sqlcipher_raw_key, init_db, is_plaintext_sqlite,
         json_to_rusqlite, migration_bak_path, migration_tmp_path, open_and_key,
-        rename_with_sidecars, resolve_extension_path, TransactionStatement,
+        rename_with_sidecars, TransactionStatement,
         PLAINTEXT_SQLITE_MAGIC,
     };
     use rusqlite::{types::Value, Connection};
-    use std::path::Path;
 
     /// Fixed key for tests — production always uses
     /// `generate_sqlcipher_raw_key()` via the OS keyring; tests inject an
@@ -568,156 +454,6 @@ mod startup_tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    /// SPIKE — TEMPORARY, see plan P1-6 Step 0.
-    /// Verifies that `conn.load_extension()` (used to load the vendored
-    /// cr-sqlite extension) still works against a SQLCipher-linked rusqlite
-    /// connection, including AFTER `PRAGMA key` has been set. This is the
-    /// go/no-go check for the whole DB-encryption approach.
-    #[test]
-    fn spike_sqlcipher_load_extension_after_pragma_key() {
-        let extension =
-            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
-
-        let temp = std::env::temp_dir().join(format!(
-            "pharmacare-sqlcipher-spike-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(&temp).unwrap();
-        let db_path = temp.join("spike.db");
-
-        let key = "x'0101010101010101010101010101010101010101010101010101010101010101'";
-
-        // 1. Open a fresh (SQLCipher) connection and set PRAGMA key FIRST.
-        let conn = Connection::open(&db_path).unwrap();
-        conn.pragma_update(None, "key", key)
-            .expect("PRAGMA key should succeed on a SQLCipher-linked connection");
-
-        // 2. Prove the connection is actually SQLCipher-encrypted by forcing
-        //    a write, then confirming a fresh connection WITHOUT the key
-        //    cannot read it as plaintext SQLite.
-        conn.execute_batch("CREATE TABLE spike (id INTEGER PRIMARY KEY NOT NULL, val TEXT); INSERT INTO spike (id, val) VALUES (1, 'hello');")
-            .expect("should be able to create/write on the keyed connection");
-
-        // 3. Load the cr-sqlite extension AFTER PRAGMA key has been set.
-        let ext_load_path = extension_load_path(&extension);
-        unsafe {
-            conn.load_extension(&ext_load_path, None)
-                .expect("cr-sqlite extension should load on a SQLCipher connection with a key already set");
-        }
-
-        // 4. Call an actual cr-sqlite function end-to-end, not just "loaded
-        //    without erroring".
-        let site_id: Vec<u8> = conn
-            .query_row("SELECT crsql_site_id()", [], |row| row.get(0))
-            .expect("crsql_site_id() should work on a SQLCipher-linked, keyed connection");
-        assert!(!site_id.is_empty(), "site_id should be non-empty");
-
-        // 5. Also confirm cr-sqlite's own bookkeeping tables/functions work,
-        //    not just a no-arg getter: exercise crsql_as_crr on a real table.
-        conn.execute_batch("SELECT crsql_as_crr('spike');")
-            .expect("crsql_as_crr should work against a SQLCipher-linked connection");
-        let changes: i64 = conn
-            .query_row("SELECT COUNT(*) FROM crsql_changes", [], |row| row.get(0))
-            .expect("crsql_changes virtual table should be queryable");
-        assert!(changes >= 1, "expected at least one recorded change");
-
-        drop(conn);
-
-        // 6. Sanity check: reopening WITHOUT the key must NOT see plaintext
-        //    (proves the file is genuinely encrypted, not just PRAGMA key
-        //    being silently ignored by a non-SQLCipher build).
-        let conn_no_key = Connection::open(&db_path).unwrap();
-        let unkeyed_result: Result<i64, _> =
-            conn_no_key.query_row("SELECT COUNT(*) FROM spike", [], |row| row.get(0));
-        assert!(
-            unkeyed_result.is_err(),
-            "opening the SQLCipher DB without the key should fail to read plaintext, but got: {unkeyed_result:?}"
-        );
-        drop(conn_no_key);
-
-        // 7. Reopen WITH the key and confirm data + cr-sqlite state survived.
-        let conn2 = Connection::open(&db_path).unwrap();
-        conn2.pragma_update(None, "key", key).unwrap();
-        let val: String = conn2
-            .query_row("SELECT val FROM spike WHERE id = 1", [], |row| row.get(0))
-            .expect("data should survive close/reopen with the same key");
-        assert_eq!(val, "hello");
-
-        let _ = std::fs::remove_dir_all(&temp);
-    }
-
-    #[test]
-    fn real_crsqlite_extension_loads_without_degraded_warning() {
-        let expected_platform_dir = crsqlite_platform_dir().expect("supported test architecture");
-        let extension =
-            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
-        assert!(extension.exists(), "test requires {}", extension.display());
-        assert!(
-            extension.to_string_lossy().contains(expected_platform_dir),
-            "{} should use {expected_platform_dir}",
-            extension.display(),
-        );
-        assert!(
-            extension_matches_current_arch(&extension),
-            "{} must match the current target architecture",
-            extension.display(),
-        );
-
-        let temp =
-            std::env::temp_dir().join(format!("pharmacare-valid-extension-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&temp);
-
-        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
-            .expect("real cr-sqlite extension should initialize");
-        assert_eq!(state.startup_warning, None);
-        let site_id: Vec<u8> = state
-            .conn
-            .lock()
-            .unwrap()
-            .query_row("SELECT crsql_site_id()", [], |row| row.get(0))
-            .unwrap();
-        assert!(!site_id.is_empty());
-
-        drop(state);
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn invalid_extension_fails_desktop_startup() {
-        let temp = std::env::temp_dir().join(format!(
-            "pharmacare-invalid-extension-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&temp);
-        std::fs::create_dir_all(&temp).unwrap();
-        let invalid = temp.join("crsqlite.invalid");
-        std::fs::write(&invalid, b"not a shared library").unwrap();
-
-        let err = init_db(Some(temp.clone()), Some(invalid), TEST_KEY)
-            .err()
-            .expect("invalid cr-sqlite extension must fail startup");
-        assert!(err.contains("Cannot load cr-sqlite extension"));
-
-        let _ = std::fs::remove_dir_all(temp);
-    }
-
-    #[test]
-    fn missing_extension_fails_desktop_startup() {
-        let temp = std::env::temp_dir().join(format!(
-            "pharmacare-missing-extension-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&temp);
-
-        let err = init_db(Some(temp.clone()), None, TEST_KEY)
-            .err()
-            .expect("missing cr-sqlite extension must fail startup");
-        assert!(err.contains("CR-SQLite extension is required"));
-
-        let _ = std::fs::remove_dir_all(temp);
     }
 
     #[test]
@@ -741,11 +477,9 @@ mod startup_tests {
 
     #[test]
     fn fresh_install_creates_encrypted_db() {
-        let extension =
-            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
         let temp = fresh_temp_dir("fresh-install-encrypted");
 
-        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+        let state = init_db(Some(temp.clone()), TEST_KEY)
             .expect("fresh install should initialize");
         assert_eq!(state.startup_warning, None);
         drop(state);
@@ -797,8 +531,6 @@ mod startup_tests {
 
     #[test]
     fn plaintext_db_migrates_to_encrypted_in_place() {
-        let extension =
-            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
         let temp = fresh_temp_dir("plaintext-migrates");
         let db_path = temp.join("laso.db");
 
@@ -818,7 +550,7 @@ mod startup_tests {
             "seed DB must be plaintext SQLite before migration"
         );
 
-        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+        let state = init_db(Some(temp.clone()), TEST_KEY)
             .expect("plaintext DB should migrate and initialize");
 
         assert!(
@@ -858,8 +590,6 @@ mod startup_tests {
 
     #[test]
     fn killed_mid_migration_self_heals_on_next_launch() {
-        let extension =
-            resolve_extension_path(None).expect("test requires a packaged cr-sqlite extension");
         let temp = fresh_temp_dir("killed-mid-migration");
         let db_path = temp.join("laso.db");
 
@@ -888,7 +618,7 @@ mod startup_tests {
 
         // Next launch: init_db must detect and repair this without any
         // data loss, in a single call.
-        let state = init_db(Some(temp.clone()), Some(extension), TEST_KEY)
+        let state = init_db(Some(temp.clone()), TEST_KEY)
             .expect("self-heal should succeed and initialize normally");
 
         assert!(db_path.exists(), "laso.db should exist again after self-heal");
@@ -928,7 +658,6 @@ mod startup_tests {
         // is what finally cleans up the backup.
         let state2 = init_db(
             Some(temp.clone()),
-            Some(resolve_extension_path(None).unwrap()),
             TEST_KEY,
         )
         .expect("follow-up launch should succeed");
@@ -1163,21 +892,6 @@ mod startup_tests {
             .unwrap();
         assert_eq!(count, 1);
         assert_eq!(quantity, 1);
-    }
-
-    fn extension_matches_current_arch(path: &Path) -> bool {
-        let Ok(bytes) = std::fs::read(path) else {
-            return false;
-        };
-        if bytes.len() < 20 || &bytes[0..4] != b"\x7fELF" {
-            return true;
-        }
-        let machine = u16::from_le_bytes([bytes[18], bytes[19]]);
-        match std::env::consts::ARCH {
-            "x86_64" => machine == 62,
-            "aarch64" => machine == 183,
-            _ => true,
-        }
     }
 }
 

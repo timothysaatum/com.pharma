@@ -31,6 +31,7 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
+import { inventoryApi } from "@/api/inventory";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { statsApi } from "@/api/stats";
 import { isBackendKnownUnreachable, isBackendReachable, isOfflineError, parseApiError } from "@/api/client";

@@ -29,6 +29,6 @@ tauri-plugin-process = "2"
 tokio = { version = "1", features = ["full"] }
 keyring = "4.1.2"
 
-rusqlite = { version = "0.32", features = ["bundled-sqlcipher", "load_extension"] }
+rusqlite = { version = "0.32", features = ["bundled-sqlcipher"] }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"

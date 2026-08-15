@@ -42,41 +42,15 @@ jobs:
           - name: Linux x64
             platform: ubuntu-22.04
             args: ''
-            crsqlite_asset: crsqlite-linux-x86_64.zip
-            crsqlite_platform: linux-x86_64
-            host_crsqlite_asset: ''
-            host_crsqlite_platform: ''
-            test_crsqlite: true
           - name: Windows x64
             platform: windows-latest
             args: ''
-            crsqlite_asset: crsqlite-win-x86_64.zip
-            crsqlite_platform: windows-x86_64
-            host_crsqlite_asset: ''
-            host_crsqlite_platform: ''
-            # A successful compile does not prove that the packaged native DLL
-            # can be loaded on Windows. This smoke test prevents releases that
-            # immediately exit during database startup.
-            test_crsqlite: true
           - name: macOS Apple Silicon
             platform: macos-latest
             args: '--target aarch64-apple-darwin'  # Apple Silicon
-            crsqlite_asset: crsqlite-darwin-aarch64.zip
-            crsqlite_platform: darwin-aarch64
-            host_crsqlite_asset: ''
-            host_crsqlite_platform: ''
-            test_crsqlite: true
           - name: macOS Intel
             platform: macos-latest
             args: '--target x86_64-apple-darwin'   # Intel Mac
-            crsqlite_asset: crsqlite-darwin-x86_64.zip
-            crsqlite_platform: darwin-x86_64
-            # macos-latest currently runs Rust tests on an Apple Silicon host,
-            # even when the packaged app target is Intel. Install the host
-            # dylib as well so cargo test --lib can load real cr-sqlite.
-            host_crsqlite_asset: crsqlite-darwin-aarch64.zip
-            host_crsqlite_platform: darwin-aarch64
-            test_crsqlite: false
 
     runs-on: ${{ matrix.platform }}
 
@@ -112,21 +86,6 @@ jobs:
         working-directory: ui.laso
         run: pnpm install --frozen-lockfile
 
-      - name: Install target cr-sqlite extension
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download v0.16.3 --repo vlcn-io/cr-sqlite --pattern "${{ matrix.crsqlite_asset }}" --dir ui.laso/src-tauri/crsqlite-download
-          node ui.laso/scripts/install-crsqlite-extension.mjs "ui.laso/src-tauri/crsqlite-download/${{ matrix.crsqlite_asset }}" crsqlite "${{ matrix.crsqlite_platform }}"
-
-      - name: Install host cr-sqlite extension for Rust tests
-        if: matrix.host_crsqlite_asset != ''
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release download v0.16.3 --repo vlcn-io/cr-sqlite --pattern "${{ matrix.host_crsqlite_asset }}" --dir ui.laso/src-tauri/crsqlite-download-host
-          node ui.laso/scripts/install-crsqlite-extension.mjs "ui.laso/src-tauri/crsqlite-download-host/${{ matrix.host_crsqlite_asset }}" crsqlite "${{ matrix.host_crsqlite_platform }}"
-
       - name: Validate production API URL
         run: node -e "if (!process.env.VITE_API_URL?.startsWith('https://')) throw new Error('VITE_API_URL must be an HTTPS URL')"
 
@@ -141,11 +100,6 @@ jobs:
       - name: Test Rust commands
         working-directory: ui.laso/src-tauri
         run: cargo test --locked --lib
-
-      - name: Test cr-sqlite compatibility
-        if: matrix.test_crsqlite
-        working-directory: ui.laso/src-tauri
-        run: cargo test --locked --test crsqlite_compat
 
       - name: Audit Rust dependencies
         if: matrix.platform == 'ubuntu-22.04'
