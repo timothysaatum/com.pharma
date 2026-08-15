@@ -90,16 +90,31 @@ def upgrade() -> None:
         )
     else:
         # SQLite — use batch mode
-        with op.batch_alter_table("branch_inventory") as batch_op:
-            batch_op.drop_constraint("uq_branch_drug", type_="unique")
-        with op.batch_alter_table("drug_batches") as batch_op:
-            batch_op.drop_constraint("uq_branch_drug_batch", type_="unique")
-        with op.batch_alter_table("sales") as batch_op:
-            batch_op.drop_constraint("uq_sale_branch_number", type_="unique")
-        with op.batch_alter_table("purchase_orders") as batch_op:
-            batch_op.drop_constraint("uq_po_branch_number", type_="unique")
-        with op.batch_alter_table("prescriptions") as batch_op:
-            batch_op.drop_constraint("uq_prescription_org_number", type_="unique")
+        try:
+            with op.batch_alter_table("branch_inventory") as batch_op:
+                batch_op.drop_constraint("uq_branch_drug", type_="unique")
+        except Exception:
+            pass
+        try:
+            with op.batch_alter_table("drug_batches") as batch_op:
+                batch_op.drop_constraint("uq_branch_drug_batch", type_="unique")
+        except Exception:
+            pass
+        try:
+            with op.batch_alter_table("sales") as batch_op:
+                batch_op.drop_constraint("uq_sale_branch_number", type_="unique")
+        except Exception:
+            pass
+        try:
+            with op.batch_alter_table("purchase_orders") as batch_op:
+                batch_op.drop_constraint("uq_po_branch_number", type_="unique")
+        except Exception:
+            pass
+        try:
+            with op.batch_alter_table("prescriptions") as batch_op:
+                batch_op.drop_constraint("uq_prescription_org_number", type_="unique")
+        except Exception:
+            pass
 
         op.create_table(
             "crr_renumber_audit",

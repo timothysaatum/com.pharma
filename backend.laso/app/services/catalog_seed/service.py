@@ -9,7 +9,9 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.inventory.branch_inventory import BranchInventory
+from datetime import date, timedelta
+
+from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
 from app.models.inventory.inventory_model import Drug, DrugCategory
 from app.models.pharmacy.pharmacy_model import Branch, Organization
 from app.services.catalog_seed.catalog import CATALOG, CATEGORIES, DrugSeed
@@ -251,29 +253,72 @@ class CatalogSeedService:
                 )
             ).all()
         )
-        inventory_keys = {(row.branch_id, row.drug_id) for row in existing_inventory}
+        existing_inventory_map = {(row.branch_id, row.drug_id): row for row in existing_inventory}
         inventory_created = 0
         inventory_existing = 0
         entries_by_sku = {drug_seed.sku: drug_seed for drug_seed in CATALOG}
+
+        existing_batches = list(
+            (
+                await db.scalars(
+                    select(DrugBatch).where(
+                        DrugBatch.branch_id.in_(branch_ids_for_query),
+                        DrugBatch.drug_id.in_(drug_ids),
+                    )
+                )
+            ).all()
+        )
+        existing_batches_map = {(row.branch_id, row.drug_id): row for row in existing_batches}
+        future_expiry = date.today() + timedelta(days=730)
+
         for branch in branches:
             for sku, drug in seeded_drugs.items():
                 drug_seed = entries_by_sku[sku]
                 key = (branch.id, drug.id)
-                if key in inventory_keys:
+                if key in existing_inventory_map:
+                    inv_obj = existing_inventory_map[key]
+                    changed = False
+                    changed |= _set_if_changed(inv_obj, "location", drug_seed.location)
+                    if changed:
+                        inv_obj.mark_as_pending_sync()
                     inventory_existing += 1
-                    continue
-                inventory = BranchInventory(
-                    id=_stable_id(organization_id, f"inventory:{branch.id}", sku),
-                    branch_id=branch.id,
-                    drug_id=drug.id,
-                    quantity=drug_seed.opening_quantity,
-                    reserved_quantity=0,
-                    location=drug_seed.location,
-                    selling_price=None,
-                )
-                inventory.mark_as_pending_sync()
-                db.add(inventory)
-                inventory_created += 1
+                else:
+                    inventory = BranchInventory(
+                        id=_stable_id(organization_id, f"inventory:{branch.id}", sku),
+                        branch_id=branch.id,
+                        drug_id=drug.id,
+                        quantity=drug_seed.opening_quantity,
+                        reserved_quantity=0,
+                        location=drug_seed.location,
+                        selling_price=None,
+                    )
+                    inventory.mark_as_pending_sync()
+                    db.add(inventory)
+                    inventory_created += 1
+
+                # Seed/update DrugBatch for FEFO allocation & batch sum parity
+                if key in existing_batches_map:
+                    batch_obj = existing_batches_map[key]
+                    batch_changed = False
+                    batch_changed |= _set_if_changed(batch_obj, "expiry_date", future_expiry)
+                    if batch_changed:
+                        batch_obj.mark_as_pending_sync()
+                else:
+                    batch_id = _stable_id(organization_id, f"batch:{branch.id}", sku)
+                    batch = DrugBatch(
+                        id=batch_id,
+                        branch_id=branch.id,
+                        drug_id=drug.id,
+                        batch_number=f"DEMO-{sku}-01",
+                        quantity=drug_seed.opening_quantity,
+                        remaining_quantity=drug_seed.opening_quantity,
+                        expiry_date=future_expiry,
+                        cost_price=float(drug_seed.cost_price),
+                        selling_price=float(drug_seed.unit_price),
+                        supplier=DEMO_SUPPLIER,
+                    )
+                    batch.mark_as_pending_sync()
+                    db.add(batch)
 
         await db.flush()
         return CatalogSeedResult(

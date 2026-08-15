@@ -360,6 +360,8 @@ CATALOG: tuple[DrugSeed, ...] = (
         _d("18.00"),
         _d("10.00"),
         unit_of_measure="box",
+        opening_quantity=220,
+        location="Shelf G-02",
     ),
     DrugSeed(
         "DEMO-ORS-SACHET",

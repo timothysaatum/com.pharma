@@ -40,6 +40,8 @@ def _existing_check_constraints(bind: sa.Connection, table: str) -> set[str]:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        return
 
     sales_checks = _existing_check_constraints(bind, "sales")
     if "check_sale_status" in sales_checks:
@@ -69,6 +71,8 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        return
 
     if "check_selling_price_nonnegative" in _existing_check_constraints(bind, "branch_inventory"):
         op.drop_constraint("check_selling_price_nonnegative", "branch_inventory", type_="check")

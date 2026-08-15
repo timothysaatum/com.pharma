@@ -279,6 +279,7 @@ class SyncEngine {
             if (LEGACY_SYNC_TABLES.length > 0) {
                 await this.pull(pushResult.nextPullTimestamp ?? undefined);
             }
+            await setLastSyncAt(new Date().toISOString(), undefined, this.branchId ?? undefined);
             await this.loadPersistedQueueState();
             this.networkRetryAttempt = 0;
             await this.scheduleNextQueuedRetry();

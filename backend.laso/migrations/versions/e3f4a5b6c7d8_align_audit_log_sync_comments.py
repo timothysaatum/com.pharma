@@ -25,10 +25,14 @@ COMMENTS = {
 
 
 def upgrade() -> None:
+    if op.get_bind().dialect.name == "sqlite":
+        return
     for column, comment in COMMENTS.items():
         op.alter_column("audit_logs", column, comment=comment)
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name == "sqlite":
+        return
     for column in COMMENTS:
         op.alter_column("audit_logs", column, comment=None)

@@ -108,12 +108,34 @@ export default function POSPage() {
     const [stockQuantities, setStockQuantities] = useState<Record<string, number>>({});
     const stockRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+    const resolveSellableQuantity = useCallback(async (branchId: string, drugId: string) => {
+        let info = await localRead.getSellableQuantity(branchId, drugId);
+        if (info.notStocked && navigator.onLine && isBackendReachable()) {
+            try {
+                const res = await inventoryApi.getBranchInventory(branchId, { search: drugId });
+                const item = res.items.find((i) => i.drug_id === drugId);
+                if (item) {
+                    const qty = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity ?? 0;
+                    info = {
+                        sellable: qty,
+                        totalValidBatch: qty,
+                        notStocked: false,
+                        noBatchData: false,
+                    };
+                }
+            } catch {
+                // Ignore network error; fallback to local info
+            }
+        }
+        return info;
+    }, []);
+
     const refreshStock = useCallback(async (branchId: string, items: Array<{ drug: Drug; quantity: number }>) => {
         try {
             const sq: Record<string, number> = {};
             const errors: Record<string, string> = {};
             for (const item of items) {
-                const info = await localRead.getSellableQuantity(branchId, item.drug.id);
+                const info = await resolveSellableQuantity(branchId, item.drug.id);
                 if (info.notStocked) {
                     errors[item.drug.id] = `${item.drug.name} is not stocked at the active branch.`;
                     sq[item.drug.id] = 0;
@@ -224,7 +246,7 @@ export default function POSPage() {
         // Pre-checkout stock validation — re-query for latest accuracy
         try {
             for (const item of cart.state.items) {
-                const info = await localRead.getSellableQuantity(activeBranchId, item.drug.id);
+                const info = await resolveSellableQuantity(activeBranchId, item.drug.id);
                 if (info.notStocked) {
                     setCheckoutError(`${item.drug.name} is not stocked at the active branch and cannot be sold.`);
                     checkoutInFlightRef.current = false;
