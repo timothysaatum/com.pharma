@@ -91,6 +91,24 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
       await _drugCategoryUpdated(db, envelope);
       break;
 
+    // ── Drug Batch ──────────────────────────────────────────────────────
+    case "drug_batch_created":
+    case "drug_batch_updated":
+      await _drugBatchUpserted(db, envelope);
+      break;
+
+    // ── Branch Inventory ────────────────────────────────────────────────
+    case "branch_inventory_created":
+    case "branch_inventory_updated":
+      await _branchInventoryUpserted(db, envelope);
+      break;
+
+    // ── Purchase Order ──────────────────────────────────────────────────
+    case "purchase_order_created":
+    case "purchase_order_updated":
+      await _purchaseOrderUpserted(db, envelope);
+      break;
+
     default:
       console.warn(`[localProjectors] No projector for event_type=${envelope.event_type}`);
   }
@@ -601,6 +619,172 @@ async function _drugCategoryUpdated(db: Db, e: EventEnvelope): Promise<void> {
       Number(p.level ?? 0),
       p.updated_at != null ? String(p.updated_at) : (e.authored_at ?? new Date().toISOString()),
       String(e.aggregate_id),
+    ]
+  );
+}
+
+// ── Drug Batch projectors ───────────────────────────────────────────────────
+
+async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  const remainingQuantity = Number(p.remaining_quantity ?? 0);
+  const branchId = String(p.branch_id ?? e.branch_id);
+  const drugId = String(p.drug_id ?? "");
+
+  if (e.event_type === "drug_batch_updated") {
+    const existing = await db.select<{ remaining_quantity: number }[]>(
+      "SELECT remaining_quantity FROM drug_batches WHERE id = $1",
+      [String(e.aggregate_id)]
+    );
+    if (existing.length > 0) {
+      const delta = remainingQuantity - existing[0].remaining_quantity;
+      if (delta !== 0) {
+        await db.execute(
+          `UPDATE branch_inventory
+           SET quantity = quantity + $1, updated_at = $2
+           WHERE branch_id = $3 AND drug_id = $4`,
+          [delta, now, branchId, drugId]
+        );
+      }
+    }
+  } else if (e.event_type === "drug_batch_created") {
+    const res = await db.execute(
+      `UPDATE branch_inventory
+       SET quantity = quantity + $1, updated_at = $2
+       WHERE branch_id = $3 AND drug_id = $4`,
+      [remainingQuantity, now, branchId, drugId]
+    );
+    if (res.rowsAffected === 0) {
+      await db.execute(
+        `INSERT INTO branch_inventory
+           (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+            sync_status, sync_version, synced_at, updated_at, created_at)
+         VALUES ($1,$2,$3,$4,0,NULL,NULL,'synced',1,NULL,$5,$5)`,
+        [crypto.randomUUID(), branchId, drugId, remainingQuantity, now]
+      );
+    }
+  }
+
+  await db.execute(
+    `INSERT INTO drug_batches
+       (id, branch_id, drug_id, batch_number, quantity, remaining_quantity,
+        manufacturing_date, expiry_date, cost_price, selling_price,
+        supplier, purchase_order_id,
+        sync_status, sync_version, synced_at, updated_at, created_at)
+     VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'synced',1,NULL,$13,$14)
+     ON CONFLICT(id) DO UPDATE SET
+       batch_number=excluded.batch_number,
+       quantity=excluded.quantity,
+       remaining_quantity=excluded.remaining_quantity,
+       manufacturing_date=excluded.manufacturing_date,
+       expiry_date=excluded.expiry_date,
+       cost_price=excluded.cost_price,
+       selling_price=excluded.selling_price,
+       supplier=excluded.supplier,
+       purchase_order_id=excluded.purchase_order_id,
+       updated_at=excluded.updated_at,
+       sync_status='synced'`,
+    [
+      String(e.aggregate_id),
+      branchId,
+      drugId,
+      String(p.batch_number ?? ""),
+      Number(p.quantity ?? 0),
+      remainingQuantity,
+      p.manufacturing_date != null ? String(p.manufacturing_date) : null,
+      String(p.expiry_date ?? ""),
+      p.cost_price != null ? Number(p.cost_price) : null,
+      p.selling_price != null ? Number(p.selling_price) : null,
+      p.supplier != null ? String(p.supplier) : null,
+      p.purchase_order_id != null ? String(p.purchase_order_id) : null,
+      now,
+      p.received_date != null ? String(p.received_date) : now
+    ]
+  );
+}
+
+// ── Branch Inventory projectors ─────────────────────────────────────────────
+
+async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  
+  if (e.event_type === "branch_inventory_created") {
+    await db.execute(
+      `INSERT OR IGNORE INTO branch_inventory
+         (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+          sync_status, sync_version, synced_at, updated_at, created_at)
+       VALUES ($1,$2,$3,0,0,$4,$5,'synced',1,NULL,$6,$6)`,
+      [
+        String(e.aggregate_id),
+        String(p.branch_id ?? e.branch_id),
+        String(p.drug_id ?? ""),
+        p.shelf_location != null ? String(p.shelf_location) : null,
+        p.branch_selling_price != null ? Number(p.branch_selling_price) : null,
+        now
+      ]
+    );
+  } else if (e.event_type === "branch_inventory_updated") {
+    await db.execute(
+      `UPDATE branch_inventory SET
+         location = $1, selling_price = $2, updated_at = $3, sync_status = 'synced'
+       WHERE id = $4`,
+      [
+        p.shelf_location != null ? String(p.shelf_location) : null,
+        p.branch_selling_price != null ? Number(p.branch_selling_price) : null,
+        now,
+        String(e.aggregate_id)
+      ]
+    );
+  }
+}
+
+// ── Purchase Order projectors ───────────────────────────────────────────────
+
+async function _purchaseOrderUpserted(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  
+  await db.execute(
+    `INSERT INTO purchase_orders
+       (id, organization_id, branch_id, po_number, supplier_id,
+        subtotal, tax_amount, shipping_cost, total_amount, status,
+        ordered_by, approved_by, approved_at, expected_delivery_date, received_date,
+        notes, items_json,
+        sync_status, sync_version, synced_at, updated_at, created_at)
+     VALUES
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'synced',1,NULL,$18,$19)
+     ON CONFLICT(id) DO UPDATE SET
+       po_number=excluded.po_number,
+       supplier_id=excluded.supplier_id,
+       status=excluded.status,
+       received_date=excluded.received_date,
+       notes=excluded.notes,
+       items_json=excluded.items_json,
+       updated_at=excluded.updated_at,
+       sync_status='synced'`,
+    [
+      String(e.aggregate_id),
+      String(p.org_id ?? e.org_id),
+      String(p.branch_id ?? e.branch_id),
+      String(p.po_number ?? ""),
+      String(p.supplier_name ?? p.supplier_id ?? "unknown"),
+      Number(p.subtotal ?? 0),
+      Number(p.tax_amount ?? 0),
+      Number(p.shipping_cost ?? 0),
+      Number(p.total_amount ?? 0),
+      String(p.status ?? "draft"),
+      String(p.ordered_by ?? e.authored_by),
+      p.approved_by != null ? String(p.approved_by) : null,
+      p.approved_at != null ? String(p.approved_at) : null,
+      p.expected_delivery_date != null ? String(p.expected_delivery_date) : null,
+      p.received_at != null ? String(p.received_at) : null,
+      p.notes != null ? String(p.notes) : null,
+      JSON.stringify(p.items ?? []),
+      now,
+      p.ordered_at != null ? String(p.ordered_at) : now
     ]
   );
 }

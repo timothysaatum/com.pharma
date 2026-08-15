@@ -41,7 +41,7 @@ const getPendingFailuresMock = vi.fn().mockResolvedValue([]);
 const getPermanentlyRejectedCrrRowsMock = vi.fn().mockResolvedValue([]);
 const getPendingCountMock = vi.fn().mockResolvedValue(0);
 const isCrrTableMock = vi.fn().mockResolvedValue(false);
-const getCrrSiteIdMock = vi.fn().mockResolvedValue("site-local");
+const getDeviceIdMock = vi.fn().mockResolvedValue("site-local");
 const getPendingSalesMock = vi.fn().mockResolvedValue([]);
 
 vi.mock("@/lib/localDb", () => ({
@@ -62,7 +62,7 @@ vi.mock("@/lib/localDb", () => ({
   suppressPermanentlyRejectedCrrRow: vi.fn().mockResolvedValue(undefined),
   getPendingCount: getPendingCountMock,
   isCrrTable: isCrrTableMock,
-  getCrrSiteId: getCrrSiteIdMock,
+  getDeviceId: getDeviceIdMock,
   getCrrPushChanges: vi.fn().mockResolvedValue([]),
   applyCrrPullChanges: vi.fn().mockResolvedValue(undefined),
   applyCustomerMergeDirectives: vi.fn().mockResolvedValue(undefined),

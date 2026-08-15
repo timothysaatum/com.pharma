@@ -526,10 +526,7 @@ pub fn init_db(
                 )
             })?;
         }
-        if let Ok(site_id) = conn.query_row("SELECT crsql_site_id()", [], |row| row.get::<_, Vec<u8>>(0)) {
-            let site_id_hex: String = site_id.iter().map(|byte| format!("{byte:02x}")).collect();
-            println!("[db] cr-sqlite loaded, site_id={site_id_hex}");
-        }
+
     } else {
         println!("[db] cr-sqlite extension not found — running without CRDT support");
     }

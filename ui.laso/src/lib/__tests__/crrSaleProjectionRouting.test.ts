@@ -69,7 +69,7 @@ describe("offline sale CRR projection routing", () => {
   });
 
   it("re-wraps a b64-transport site_id into a blob bind parameter, not a text one", async () => {
-    // Regression coverage for a real bug: getCrrSiteId() reads
+    // Regression coverage for a real bug: getDeviceId() reads
     // `crsql_site_id()`, a genuine BLOB column. The Tauri IPC read path
     // (db.rs::row_to_json) serializes any BLOB as a "b64:..." STRING, so
     // the siteId this function receives is that string, not raw bytes.

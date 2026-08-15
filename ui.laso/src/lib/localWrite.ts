@@ -98,30 +98,6 @@ export const SALE_COLUMNS = new Set([
     "created_at",
 ]);
 
-const PURCHASE_ORDER_COLUMNS = new Set([
-    "id",
-    "organization_id",
-    "branch_id",
-    "po_number",
-    "supplier_id",
-    "subtotal",
-    "tax_amount",
-    "shipping_cost",
-    "total_amount",
-    "status",
-    "ordered_by",
-    "approved_by",
-    "approved_at",
-    "expected_delivery_date",
-    "received_date",
-    "notes",
-    "items_json",
-    "sync_status",
-    "sync_version",
-    "synced_at",
-    "updated_at",
-    "created_at",
-]);
 
 const PRESCRIPTION_COLUMNS = new Set([
     "id",
@@ -475,6 +451,175 @@ async function buildStockAdjustedEnvelope(
     };
 }
 
+async function buildDrugBatchEnvelope(
+    batch: Omit<DrugBatch, "sync_status" | "sync_version"> & { id: string },
+    operation: "create" | "update",
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+    const eventType = operation === "create" ? "drug_batch_created" : "drug_batch_updated";
+
+    const payload: Record<string, unknown> = {
+        id: batch.id,
+        drug_id: batch.drug_id,
+        branch_id: batch.branch_id,
+        org_id: (batch as any).org_id ?? (batch as any).organization_id ?? "",
+        batch_number: batch.batch_number,
+        quantity: batch.quantity,
+        remaining_quantity: batch.remaining_quantity,
+        cost_price: batch.cost_price ?? null,
+        selling_price: batch.selling_price ?? null,
+        expiry_date: batch.expiry_date ?? null,
+        received_date: (batch as any).received_date ?? (batch as any).created_at ?? now,
+        supplier: batch.supplier ?? null,
+        purchase_order_id: batch.purchase_order_id ?? null,
+        notes: (batch as any).notes ?? null,
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: batch.id, aggregate_type: "drug_batch",
+            event_type: eventType, schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: batch.branch_id, // fallback
+            branch_id: batch.branch_id, org_id: payload.org_id as string,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: batch.id,
+        aggregate_type: "drug_batch",
+        event_type: eventType,
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: batch.branch_id,
+        branch_id: batch.branch_id,
+        org_id: payload.org_id as string,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
+async function buildBranchInventoryEnvelope(
+    branchInventory: Omit<BranchInventory, "sync_status" | "sync_version"> & { id: string },
+    operation: "create" | "update",
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+    const eventType = operation === "create" ? "branch_inventory_created" : "branch_inventory_updated";
+
+    const payload: Record<string, unknown> = {
+        id: branchInventory.id,
+        branch_id: branchInventory.branch_id,
+        drug_id: branchInventory.drug_id,
+        org_id: (branchInventory as any).org_id ?? (branchInventory as any).organization_id ?? "",
+        branch_selling_price: branchInventory.selling_price ?? null,
+        shelf_location: branchInventory.location ?? null,
+        is_active: (branchInventory as any).is_active ?? true,
+        reorder_level: (branchInventory as any).reorder_level ?? null,
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: branchInventory.id, aggregate_type: "branch_inventory",
+            event_type: eventType, schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: branchInventory.branch_id,
+            branch_id: branchInventory.branch_id, org_id: payload.org_id as string,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: branchInventory.id,
+        aggregate_type: "branch_inventory",
+        event_type: eventType,
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: branchInventory.branch_id,
+        branch_id: branchInventory.branch_id,
+        org_id: payload.org_id as string,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
+async function buildPurchaseOrderEnvelope(
+    po: Omit<PurchaseOrder, "sync_status" | "sync_version"> & { id: string },
+    operation: "create" | "update",
+    now: string,
+    hashPrev: string,
+): Promise<OutboxEvent> {
+    const eventId = generateUlid();
+    const eventType = operation === "create" ? "purchase_order_created" : "purchase_order_updated";
+
+    // Reconstruct items if they are passed in or stored differently. The instruction says "include items array"
+    // Since PO has items_json, we can parse it if it exists, or use items if passed. Wait, PO object might just have items_json or maybe it's passed as object? 
+    let items: any[] = [];
+    if ((po as any).items) {
+        items = (po as any).items;
+    } else if ((po as any).items_json) {
+        try { items = JSON.parse((po as any).items_json as string); } catch (e) {}
+    }
+
+    const payload: Record<string, unknown> = {
+        id: po.id,
+        branch_id: po.branch_id,
+        org_id: po.organization_id,
+        supplier_name: (po as any).supplier_name ?? null,
+        status: po.status ?? "draft",
+        ordered_at: (po as any).ordered_at ?? po.created_at ?? now,
+        received_at: po.received_date ?? null,
+        notes: po.notes ?? null,
+        items: items,
+    };
+
+    const hashSelf = await computeHashSelf(
+        {
+            event_id: eventId, aggregate_id: po.id, aggregate_type: "purchase_order",
+            event_type: eventType, schema_version: 1, payload,
+            dependencies: [], authored_at: now, authored_by: po.ordered_by,
+            branch_id: po.branch_id, org_id: po.organization_id,
+        },
+        hashPrev,
+    );
+
+    return {
+        event_id: eventId,
+        aggregate_id: po.id,
+        aggregate_type: "purchase_order",
+        event_type: eventType,
+        schema_version: 1,
+        payload,
+        dependencies: [],
+        authored_at: now,
+        authored_by: po.ordered_by,
+        branch_id: po.branch_id,
+        org_id: po.organization_id,
+        hash_prev: hashPrev,
+        hash_self: hashSelf,
+        status: "pending",
+        attempts: 0,
+        error_code: null,
+        error_message: null,
+    };
+}
+
 export function nextSyncVersion(
     current: number | undefined,
     operation: "create" | "update"
@@ -672,12 +817,9 @@ export const writeLocal = {
         operation: "create" | "update" = "create",
     ): Promise<void> => {
         const { days_until_expiry, is_expired, is_expiring_soon, ...batchData } = batch;
-        await upsertAndEnqueue(
-            "drug_batches",
-            batchData as Record<string, unknown>,
-            operation,
-            { sync_protocol_version: 2 }
-        );
+        const now = new Date().toISOString();
+        await appendOutboxEvent((hashPrev) => buildDrugBatchEnvelope(batch, operation, now, hashPrev));
+        await upsertLocal("drug_batches", batchData as Record<string, unknown>);
     },
 
     /**
@@ -697,12 +839,9 @@ export const writeLocal = {
         branchInventory: Omit<BranchInventory, "sync_status" | "sync_version"> & { id: string },
         operation: "create" | "update" = "create",
     ): Promise<void> => {
-        await upsertAndEnqueue(
-            "branch_inventory",
-            branchInventory as Record<string, unknown>,
-            operation,
-            { sync_protocol_version: 2 }
-        );
+        const now = new Date().toISOString();
+        await appendOutboxEvent((hashPrev) => buildBranchInventoryEnvelope(branchInventory, operation, now, hashPrev));
+        await upsertLocal("branch_inventory", branchInventory as Record<string, unknown>);
     },
 
     /**
@@ -787,20 +926,7 @@ export const writeLocal = {
             return;
         }
 
-        // Enqueue the updated row
-        const [row] = await db.select<Record<string, unknown>[]>(
-            "SELECT * FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2",
-            [branchId, drugId]
-        );
-        if (row && enqueueForSync) {
-            await enqueue(
-                "branch_inventory",
-                row.id as string,
-                "update",
-                (row.sync_version as number) ?? 1,
-                row
-            );
-        }
+
     },
 
     /**
@@ -844,12 +970,9 @@ export const writeLocal = {
             ...poData,
             items_json: JSON.stringify(items ?? []),
         };
-        await upsertAndEnqueue(
-            "purchase_orders",
-            payload as Record<string, unknown>,
-            operation,
-            { items: items ?? [] }
-        );
+        const now = new Date().toISOString();
+        await appendOutboxEvent((hashPrev) => buildPurchaseOrderEnvelope(po, operation, now, hashPrev));
+        await upsertLocal("purchase_orders", payload as Record<string, unknown>);
     },
 
 

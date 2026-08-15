@@ -24,7 +24,10 @@ export type AggregateType =
   | "stock"
   | "stock_transfer"
   | "drug"
-  | "drug_category";
+  | "drug_category"
+  | "drug_batch"
+  | "branch_inventory"
+  | "purchase_order";
 
 export type EventStatus =
   | "accepted"

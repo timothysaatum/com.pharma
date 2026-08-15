@@ -2746,17 +2746,25 @@ export async function markCrrRenumberAuditsUploaded(eventIds: string[]): Promise
   }
 }
 
-let _crr_site_id: string | null = null;
+let _device_id: string | null = null;
 
-/** Get the local cr-sqlite site ID (cached after first call). */
-export async function getCrrSiteId(): Promise<string> {
-  if (_crr_site_id) return _crr_site_id;
+/** Get the stable local device ID (cached after first call). */
+export async function getDeviceId(): Promise<string> {
+  if (_device_id) return _device_id;
   const db = await getDb();
-  const rows = await db.select<{ "crsql_site_id()": string }[]>(
-    "SELECT crsql_site_id()"
+  const rows = await db.select<{ value: string }[]>(
+    "SELECT value FROM sync_meta WHERE key = 'device_id'"
   );
-  _crr_site_id = rows?.[0]?.["crsql_site_id()"] ?? "";
-  return _crr_site_id;
+  if (rows && rows.length > 0 && rows[0].value) {
+    _device_id = rows[0].value;
+  } else {
+    _device_id = crypto.randomUUID();
+    await db.execute(
+      "INSERT INTO sync_meta (key, value) VALUES ('device_id', $1)",
+      [_device_id]
+    );
+  }
+  return _device_id;
 }
 
 export interface CrrChangeRow {
@@ -2857,7 +2865,7 @@ export async function getCrrPushChanges(
   sinceDbVersion = 0,
 ): Promise<CrrChangeRow[]> {
   const db = await getDb();
-  const siteId = await getCrrSiteId();
+  const siteId = await getDeviceId();
   if (!siteId) return [];
   return getCrrPushChangesFromDb(db, siteId, sinceDbVersion);
 }
@@ -2877,8 +2885,7 @@ export async function getCrrPushChangesFromDb(
   // wedging the push cursor forever (see the bug report this fixes: an
   // offline customer + prescription created moments apart never synced).
   // `db_version` is the true chronological ordering across transactions.
-  // `siteId` comes from getCrrSiteId(), which reads it via `SELECT
-  // crsql_site_id()` — a real BLOB column. The Tauri IPC read path
+  // `siteId` comes from getDeviceId(). The Tauri IPC read path
   // (db.rs::row_to_json) serializes any BLOB as a "b64:..." STRING, so
   // `siteId` here is that string, not raw bytes. Binding it directly as a
   // query parameter sends it to Rust as JSON string -> Value::Text (see
