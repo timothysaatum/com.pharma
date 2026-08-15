@@ -49,9 +49,6 @@ vi.mock("@/lib/localRead", () => ({
   },
 }));
 
-vi.mock("@/lib/localDb", () => ({
-  cacheBranchScopedDrugs: vi.fn(),
-}));
 
 vi.mock("@/lib/withTimeout", () => ({
   withTimeout: async (primary: () => Promise<unknown>) => ({

@@ -852,50 +852,6 @@ export const writeLocal = {
         );
     },
 
-    cachePurchaseOrders: async (orders: PurchaseOrder[]): Promise<void> => {
-        if (orders.length === 0) return;
-
-        const db = await getDb();
-        for (const order of orders) {
-            const existing = await db.select<{ sync_status: string; po_number: string }[]>(
-                "SELECT sync_status, po_number FROM purchase_orders WHERE id = $1 LIMIT 1",
-                [order.id]
-            );
-            const localStatus = existing[0]?.sync_status;
-            const isOfflineDraft = existing[0]?.po_number?.startsWith("OFFLINE-PO-") ?? false;
-            if ((localStatus === "pending" || localStatus === "conflict") && isOfflineDraft) {
-                continue;
-            }
-
-            const payload = pickColumns(
-                {
-                    ...order,
-                    items_json: "[]",
-                    sync_status: "synced",
-                    synced_at: order.synced_at ?? new Date().toISOString(),
-                } as Record<string, unknown>,
-                PURCHASE_ORDER_COLUMNS
-            );
-            const cols = Object.keys(payload);
-            const vals = cols.map((c) => {
-                const v = payload[c];
-                if (typeof v === "boolean") return v ? 1 : 0;
-                if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
-                return v ?? null;
-            });
-            const placeholders = cols.map((_, i) => `$${i + 1}`).join(", ");
-            const updates = cols
-                .filter((c) => c !== "id")
-                .map((c) => `${c} = excluded.${c}`)
-                .join(", ");
-
-            await db.execute(
-                `INSERT INTO purchase_orders (${cols.join(", ")}) VALUES (${placeholders})
-                 ON CONFLICT(id) DO UPDATE SET ${updates}`,
-                vals
-            );
-        }
-    },
 
     cachePrescriptions: async (prescriptions: Prescription[]): Promise<void> => {
         if (prescriptions.length === 0) return;

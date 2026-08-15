@@ -17,7 +17,6 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, Plus, X, ShieldAlert, Package } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
 import { localRead } from "@/lib/localRead";
-import { cacheBranchInventoryRows } from "@/lib/localDb";
 import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { parseApiError } from "@/api/client";
@@ -206,12 +205,6 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                     sq[item.drug_id] = vbq;
                 }
                 setStockQuantities((prev) => ({ ...prev, ...sq }));
-                
-                if (!append) {
-                    cacheBranchInventoryRows(result.items).catch((e: unknown) =>
-                        console.error("[DrugSearchPanel] cacheBranchInventoryRows:", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
-                    );
-                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;

@@ -12,7 +12,6 @@ import { drugApi } from "@/api/drugs";
 import { branchApi } from "@/api/branches";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
-import { cacheBranchInventoryRows } from "@/lib/localDb";
 import { isBackendReachable, isOfflineError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -1004,9 +1003,6 @@ export default function InventoryPage() {
                     setTotal(result.total);
                     setInventoryFromCache(true);
                     setInventoryCachedAt(new Date().toISOString());
-                    cacheBranchInventoryRows(result.items).catch((e: unknown) =>
-                        console.error("[InventoryPage] cacheBranchInventoryRows (cache):", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
-                    );
                 }
                 return;
             }
@@ -1045,11 +1041,6 @@ export default function InventoryPage() {
                 setTotal(timeoutResult.data.total);
                 setInventoryFromCache(timeoutResult.isFromCache);
                 setInventoryCachedAt(timeoutResult.cached_at);
-                if (!timeoutResult.isFromCache) {
-                    cacheBranchInventoryRows(timeoutResult.data.items).catch((e: unknown) =>
-                        console.error("[InventoryPage] cacheBranchInventoryRows (server):", typeof e === "object" && e !== null ? JSON.stringify(e) : String(e))
-                    );
-                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;

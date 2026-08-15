@@ -1175,43 +1175,15 @@ export const localRead = {
     noBatchData: boolean;
   }> {
     const db = await getDb();
-
-    const invRows = await db.select<Array<{ quantity: number, sellable_quantity: number }>>(
-      `SELECT quantity, sellable_quantity FROM branch_inventory
-       WHERE branch_id = $1 AND drug_id = $2
-       LIMIT 1`,
+    const rows = await db.select<Array<{ quantity: number; sellable_quantity: number }>>(
+      `SELECT quantity, sellable_quantity FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
       [branchId, drugId]
     );
-    const notStocked = invRows.length === 0;
-    
-    if (notStocked) {
-        return { sellable: 0, totalValidBatch: 0, notStocked: true, noBatchData: false };
+    if (rows.length === 0) {
+      return { sellable: 0, totalValidBatch: 0, notStocked: true, noBatchData: false };
     }
-
-    const inventoryQuantity = Number(invRows[0]?.quantity ?? 0);
-    const sellableQuantity = Number(invRows[0]?.sellable_quantity ?? 0);
-
-    // Does this device hold ANY batch rows for the drug, expired or not?
-    // `drug_batches` is only ever populated by a full sync, whereas
-    // `branch_inventory` is also written by the online inventory cache. So a
-    // device that has not completed a sync has stock rows but zero batch rows —
-    // indistinguishable, by the expiry query alone, from "every batch expired".
-    // Treating that as unsellable blocked legitimate sales at a stocked branch.
-    let noBatchData = false;
-    let sellable = Math.max(0, sellableQuantity);
-    
-    if (sellableQuantity === 0) {
-        const anyBatchRows = await db.select<Array<{ n: number }>>(
-          `SELECT COUNT(*) AS n FROM drug_batches WHERE branch_id = $1 AND drug_id = $2`,
-          [branchId, drugId]
-        );
-        noBatchData = Number(anyBatchRows[0]?.n ?? 0) === 0;
-        if (noBatchData) {
-            sellable = Math.max(0, inventoryQuantity);
-        }
-    }
-
-    return { sellable, totalValidBatch: sellableQuantity, notStocked, noBatchData };
+    const sellable = Math.max(0, Number(rows[0].sellable_quantity ?? 0));
+    return { sellable, totalValidBatch: sellable, notStocked: false, noBatchData: false };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {

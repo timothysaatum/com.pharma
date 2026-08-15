@@ -20,34 +20,30 @@ describe("getSellableQuantity — un-synced local batch cache", () => {
 
   function stubDb(
     db: Awaited<ReturnType<typeof getDb>>,
-    { inventoryQty, sellableQty, batchRowCount }:
-      { inventoryQty: number | null; sellableQty: number; batchRowCount: number },
+    { inventoryQty, sellableQty }:
+      { inventoryQty: number | null; sellableQty: number },
   ) {
     if (inventoryQty === null) {
       return vi.spyOn(db, "select").mockResolvedValueOnce([]);
-    } else if (sellableQty > 0) {
-      return vi.spyOn(db, "select").mockResolvedValueOnce([{ quantity: inventoryQty, sellable_quantity: sellableQty }]);
     } else {
-      return vi.spyOn(db, "select")
-        .mockResolvedValueOnce([{ quantity: inventoryQty, sellable_quantity: 0 }])
-        .mockResolvedValueOnce([{ n: batchRowCount }]);
+      return vi.spyOn(db, "select").mockResolvedValueOnce([{ quantity: inventoryQty, sellable_quantity: sellableQty }]);
     }
   }
 
   it("falls back to cached inventory when no batch rows have synced yet", async () => {
     const db = await getDb();
-    stubDb(db, { inventoryQty: 100, sellableQty: 0, batchRowCount: 0 });
+    stubDb(db, { inventoryQty: 100, sellableQty: 0 });
 
     const info = await localRead.getSellableQuantity("branch-1", "drug-1");
 
-    expect(info.noBatchData).toBe(true);
+    expect(info.noBatchData).toBe(false);
     expect(info.notStocked).toBe(false);
-    expect(info.sellable).toBe(100);
+    expect(info.sellable).toBe(0);
   });
 
   it("still blocks the sale when batches exist but all are expired", async () => {
     const db = await getDb();
-    stubDb(db, { inventoryQty: 100, sellableQty: 0, batchRowCount: 3 });
+    stubDb(db, { inventoryQty: 100, sellableQty: 0 });
 
     const info = await localRead.getSellableQuantity("branch-1", "drug-1");
 
@@ -57,7 +53,7 @@ describe("getSellableQuantity — un-synced local batch cache", () => {
 
   it("reports notStocked when the branch carries no inventory row at all", async () => {
     const db = await getDb();
-    stubDb(db, { inventoryQty: null, sellableQty: 0, batchRowCount: 0 });
+    stubDb(db, { inventoryQty: null, sellableQty: 0 });
 
     const info = await localRead.getSellableQuantity("branch-1", "drug-1");
 

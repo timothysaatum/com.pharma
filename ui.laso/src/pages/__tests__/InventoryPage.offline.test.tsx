@@ -141,9 +141,7 @@ vi.mock("@/lib/localWrite", () => ({
     },
 }));
 
-vi.mock("@/lib/localDb", () => ({
-    cacheBranchInventoryRows: vi.fn().mockResolvedValue(undefined),
-}));
+vi.mock("@/lib/localDb", () => ({}));
 
 const isOfflineErrorMock = vi.fn((_err: unknown) => true);
 

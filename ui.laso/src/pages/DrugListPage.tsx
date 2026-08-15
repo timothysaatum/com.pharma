@@ -7,7 +7,6 @@ import {
 } from "lucide-react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
-import { cacheBranchScopedDrugs } from "@/lib/localDb";
 import { isBackendReachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { canUser } from "@/hooks/usePermissions";
@@ -178,9 +177,6 @@ export default function DrugListPage() {
                 setTotalPages(timeoutResult.data.total_pages);
                 setTotal(timeoutResult.data.total);
                 setDrugsFromCache(timeoutResult.isFromCache);
-                if (!timeoutResult.isFromCache && activeBranchId) {
-                    void cacheBranchScopedDrugs(activeBranchId, timeoutResult.data.items);
-                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
