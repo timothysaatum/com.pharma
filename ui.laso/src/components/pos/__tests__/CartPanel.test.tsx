@@ -264,3 +264,24 @@ describe("CartPanel customer search", () => {
     expect(apiClient.get).not.toHaveBeenCalled();
   });
 });
+
+describe("CartPanel stock quantity resolution", () => {
+  it("displays resolved stock quantity from stockQuantities map", () => {
+    renderCartPanel({
+      stockQuantities: { [item.drug.id]: 220 },
+    });
+    expect(screen.getByText("/220")).toBeTruthy();
+  });
+
+  it("falls back to drug valid_batch_quantity / available_quantity if not in stockQuantities", () => {
+    const drugWithStock = {
+      ...item.drug,
+      valid_batch_quantity: 220,
+    };
+    renderCartPanel({
+      items: [{ ...item, drug: drugWithStock as any }],
+      stockQuantities: {},
+    });
+    expect(screen.getByText("/220")).toBeTruthy();
+  });
+});

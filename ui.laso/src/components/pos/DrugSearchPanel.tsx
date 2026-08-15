@@ -24,7 +24,7 @@ import { useAuthStore } from "@/stores/authStore";
 import type { BranchInventoryWithDetails, Drug, DrugType } from "@/types";
 
 interface DrugSearchPanelProps {
-    onAdd: (drug: Drug) => void;
+    onAdd: (drug: Drug, availableStock?: number) => void;
     disabledDrugIds?: Set<string>;
 }
 
@@ -270,7 +270,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
         } else if (e.key === "Enter" && focusedIndex >= 0) {
             e.preventDefault();
             const drug = drugs[focusedIndex];
-            if (drug && !isOutOfStock(drug) && !disabledDrugIds?.has(drug.id)) onAdd(drug);
+            if (drug && !isOutOfStock(drug) && !disabledDrugIds?.has(drug.id)) onAdd(drug, stockQuantities[drug.id]);
         }
     };
 
@@ -350,7 +350,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                             return (
                                 <button
                                     key={drug.id}
-                                    onClick={() => canAdd && onAdd(drug)}
+                                    onClick={() => canAdd && onAdd(drug, stockQty)}
                                     disabled={!canAdd}
                                     className={`w-full flex items-center justify-between p-3 rounded-xl text-left transition-all ${isFocused
                                             ? "bg-brand-50 ring-1 ring-brand-300"

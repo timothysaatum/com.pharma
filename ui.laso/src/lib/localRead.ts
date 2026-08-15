@@ -1185,7 +1185,9 @@ export const localRead = {
     let unleasedPool = 0;
     let notStocked = true;
     if (rows.length > 0) {
-      unleasedPool = Math.max(0, Number(rows[0].sellable_quantity ?? rows[0].quantity ?? 0));
+      const sq = Number(rows[0].sellable_quantity);
+      const q = Number(rows[0].quantity);
+      unleasedPool = Math.max(0, !isNaN(sq) && sq > 0 ? sq : (!isNaN(q) ? q : 0));
       notStocked = false;
     }
     

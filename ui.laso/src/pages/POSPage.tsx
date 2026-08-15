@@ -112,7 +112,7 @@ export default function POSPage() {
         let info = await localRead.getSellableQuantity(branchId, drugId);
         if (info.notStocked && navigator.onLine && isBackendReachable()) {
             try {
-                const res = await inventoryApi.getBranchInventory(branchId, { search: drugId });
+                const res = await inventoryApi.getBranchInventory(branchId, { drug_id: drugId });
                 const item = res.items.find((i) => i.drug_id === drugId);
                 if (item) {
                     const qty = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity ?? 0;
@@ -590,6 +590,22 @@ export default function POSPage() {
         }
     }, [cart, activeBranchId, isOffline, user]);
 
+    const handleAddToCart = useCallback((drug: Drug, availableStock?: number) => {
+        cart.addItem(drug);
+        const drugAny = drug as unknown as Record<string, unknown>;
+        const stock = (typeof availableStock === "number" && !isNaN(availableStock))
+            ? availableStock
+            : (typeof drugAny.available_quantity === "number" ? drugAny.available_quantity : undefined)
+            ?? (typeof drugAny.valid_batch_quantity === "number" ? drugAny.valid_batch_quantity : undefined)
+            ?? (typeof drugAny.quantity === "number" ? drugAny.quantity : undefined);
+
+        if (typeof stock === "number" && Number.isFinite(stock)) {
+            const nextSq = { ...stockQuantities, [drug.id]: stock };
+            setStockQuantities(nextSq);
+            cart.setStockQuantities(nextSq, cart.state.stockErrors);
+        }
+    }, [cart, stockQuantities]);
+
     const handleNewSale = useCallback(() => {
         setSuccessResult(null);
         setCheckoutError(null);
@@ -643,7 +659,7 @@ export default function POSPage() {
                 {/* Left: Drug search — takes remaining space */}
                 <div className="flex-1 border-r border-slate-200 flex flex-col min-h-0">
                     <DrugSearchPanel
-                        onAdd={cart.addItem}
+                        onAdd={handleAddToCart}
                         disabledDrugIds={cartDrugIds}
                     />
                 </div>
