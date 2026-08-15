@@ -21,6 +21,7 @@ from app.models.inventory.branch_inventory import (
     StockAdjustment
 )
 from app.models.inventory.ledger import InventoryMovement
+from app.models.inventory.stock_lease import StockLease
 
 # 6. Customers
 from app.models.customer.customer_model import Customer
@@ -71,6 +72,7 @@ __all__ = [
     'DrugBatch',
     'StockAdjustment',
     'InventoryMovement',
+    'StockLease',
     
     # Customers
     'Customer',

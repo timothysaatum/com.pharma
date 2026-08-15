@@ -1175,15 +1175,50 @@ export const localRead = {
     noBatchData: boolean;
   }> {
     const db = await getDb();
+    
+    // 1. Get the unleased pool from branch_inventory
     const rows = await db.select<Array<{ quantity: number; sellable_quantity: number }>>(
       `SELECT quantity, sellable_quantity FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
       [branchId, drugId]
     );
-    if (rows.length === 0) {
-      return { sellable: 0, totalValidBatch: 0, notStocked: true, noBatchData: false };
+    
+    let unleasedPool = 0;
+    let notStocked = true;
+    if (rows.length > 0) {
+      unleasedPool = Math.max(0, Number(rows[0].sellable_quantity ?? 0));
+      notStocked = false;
     }
-    const sellable = Math.max(0, Number(rows[0].sellable_quantity ?? 0));
-    return { sellable, totalValidBatch: sellable, notStocked: false, noBatchData: false };
+    
+    // 2. Get the active lease for this terminal
+    let terminalId = "";
+    if (typeof localStorage !== "undefined") {
+      terminalId = localStorage.getItem("laso_terminal_id") || "UNKNOWN";
+    }
+    
+    const nowUtc = new Date().toISOString();
+    let leaseRemaining = 0;
+    try {
+      const leaseRows = await db.select<Array<{ leased_quantity: number; consumed_quantity: number }>>(
+        `SELECT leased_quantity, consumed_quantity FROM stock_leases 
+         WHERE branch_id = $1 AND drug_id = $2 AND terminal_id = $3 
+           AND status = 'active' AND expires_at > $4`,
+        [branchId, drugId, terminalId, nowUtc]
+      );
+      
+      for (const lease of leaseRows) {
+        leaseRemaining += Math.max(0, Number(lease.leased_quantity) - Number(lease.consumed_quantity));
+      }
+    } catch (err) {
+      // If table doesn't exist yet, ignore
+    }
+
+    const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
+    
+    // If online, we can sell from the lease PLUS the unleased pool (which we could lease on demand).
+    // If offline, we can ONLY sell from what we have already leased.
+    const sellable = isOnline ? (leaseRemaining + unleasedPool) : leaseRemaining;
+
+    return { sellable, totalValidBatch: sellable, notStocked, noBatchData: false };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {

@@ -173,7 +173,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 27;
+const MAX_KNOWN_SCHEMA_VERSION = 28;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -256,6 +256,7 @@ async function runMigrations(db: Database): Promise<void> {
       if (user_version < 25) await migrate_v25(db);
       if (user_version < 26) await migrate_v26(db);
       if (user_version < 27) await migrate_v27(db);
+      if (user_version < 28) await migrate_v28(db);
       await ensureAuditLogSchema(db);
   } catch (e) {
       const msg = (e && typeof e === "object" && "message" in e)

@@ -617,3 +617,33 @@ async def get_inventory_valuation(
     )
     
     return valuation
+
+from app.schemas.lease_schemas import LeaseAcquireRequest, LeaseAcquireResponse, LeaseResponse
+from app.services.inventory.lease_service import LeaseService
+
+@router.post("/branch/{branch_id}/leases/acquire", response_model=LeaseAcquireResponse)
+async def acquire_leases(
+    branch_id: uuid.UUID,
+    request: LeaseAcquireRequest,
+    current_user: User = Depends(require_permission("process_sales")),
+    db: AsyncSession = Depends(get_db)
+):
+    """
+    Acquire or renew offline stock leases for a terminal.
+    """
+    _ensure_branch_access(current_user, branch_id)
+    if request.branch_id != branch_id:
+        raise HTTPException(status_code=400, detail="Path branch_id and body branch_id must match")
+        
+    items = [(item.drug_id, item.requested_quantity) for item in request.items]
+    leases = await LeaseService.grant_or_renew_lease(
+        db=db,
+        branch_id=branch_id,
+        terminal_id=request.terminal_id,
+        items=items,
+        ttl_seconds=request.ttl_seconds
+    )
+    
+    return LeaseAcquireResponse(
+        leases=[LeaseResponse.model_validate(lease, from_attributes=True) for lease in leases]
+    )
