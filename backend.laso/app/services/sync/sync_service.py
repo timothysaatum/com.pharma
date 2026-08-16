@@ -55,11 +55,9 @@ import uuid
 from sqlalchemy import and_, delete, or_, select, text
 from sqlalchemy.exc import DBAPIError, OperationalError as SA_OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from sqlalchemy.orm import selectinload, sessionmaker
 from dateutil.parser import isoparse
 from pydantic import ValidationError
-
-from app.db.session import AsyncSessionLocal
 from app.models.customer.customer_model import Customer
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch, StockAdjustment
 from app.models.inventory.inventory_model import Drug, DrugCategory
@@ -534,12 +532,23 @@ class SyncService:
         # as not-first-statement.  Open a fresh read session so the sync snapshot
         # can still choose its isolation level before issuing any query.
         if db.in_transaction() and SyncService._supports_repeatable_read(db):
-            async with AsyncSessionLocal() as snapshot_db:
-                return await SyncService._pull_with_snapshot(
-                    snapshot_db,
-                    request,
-                    organization_id,
+            bind = db.bind
+            if bind is not None and hasattr(bind, "sync_engine"):
+                session_factory = sessionmaker(
+                    bind, class_=AsyncSession, expire_on_commit=False
                 )
+                async with session_factory() as snapshot_db:
+                    return await SyncService._pull_with_snapshot(
+                        snapshot_db,
+                        request,
+                        organization_id,
+                    )
+            return await SyncService._pull_with_snapshot(
+                db,
+                request,
+                organization_id,
+                skip_isolation=True,
+            )
 
         return await SyncService._pull_with_snapshot(db, request, organization_id)
 
@@ -1935,6 +1944,12 @@ class SyncService:
                     }
                     _parse_datetime_fields(item_safe)
                     item_safe["sale_id"] = sale.id
+                    if item_safe.get("batch_id"):
+                        batch_exists = await db.scalar(
+                            select(DrugBatch.id).where(DrugBatch.id == item_safe["batch_id"])
+                        )
+                        if not batch_exists:
+                            item_safe["batch_id"] = None
 
                     sale_item = SaleItem(**item_safe)
                     db.add(sale_item)

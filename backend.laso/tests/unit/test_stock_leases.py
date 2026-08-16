@@ -33,7 +33,7 @@ async def test_grant_lease_up_to_available(db, setup_test_data):
         cost_price=10.0,
         selling_price=15.0
     )
-    await InventoryService.create_batch(db, batch_data, test_branch.organization_id)
+    await InventoryService.create_batch(db, batch_data, user.id)
 
     # Now we have 100 available stock. Request 50.
     leases = await LeaseService.grant_or_renew_lease(
@@ -85,7 +85,7 @@ async def test_lease_reduces_available_for_others(db, setup_test_data):
         cost_price=10.0,
         selling_price=15.0
     )
-    await InventoryService.create_batch(db, batch_data, test_branch.organization_id)
+    await InventoryService.create_batch(db, batch_data, user.id)
 
     # Terminal A gets 70
     await LeaseService.grant_or_renew_lease(
@@ -132,7 +132,7 @@ async def test_lease_extension_and_expiry(db, setup_test_data):
         cost_price=10.0,
         selling_price=15.0
     )
-    await InventoryService.create_batch(db, batch_data, test_branch.organization_id)
+    await InventoryService.create_batch(db, batch_data, user.id)
 
     leases = await LeaseService.grant_or_renew_lease(
         db,

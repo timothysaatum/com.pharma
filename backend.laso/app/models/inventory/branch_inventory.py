@@ -244,10 +244,10 @@ class StockAdjustment(Base, TimestampMixin):
     
     reason: Mapped[Optional[str]] = mapped_column(Text)
     
-    adjusted_by: Mapped[uuid.UUID] = mapped_column(
+    adjusted_by: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey('users.id', ondelete='RESTRICT'),
-        nullable=False,
+        ForeignKey('users.id', ondelete='SET NULL'),
+        nullable=True,
         index=True
     )
     

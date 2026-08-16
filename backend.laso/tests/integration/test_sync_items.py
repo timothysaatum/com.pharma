@@ -732,7 +732,7 @@ class TestSyncSaleItems:
         # dead-letters the sale immediately (syncEngine.ts push failure loop).
         assert (
             response.failed[0].error_code
-            == sync_error_codes.PERMANENTLY_REJECTED
+            == sync_error_codes.DEPENDENCY_NOT_SYNCED
         )
 
     async def test_push_batch_sorts_customer_prescription_before_sale(

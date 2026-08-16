@@ -13,6 +13,7 @@ import pytest_asyncio
 import uuid
 from decimal import Decimal
 from datetime import date, datetime, timedelta
+from sqlalchemy.pool import NullPool
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -34,7 +35,7 @@ async def db():
             }
         }
 
-    engine = create_async_engine(DATABASE_URL_TEST, **engine_kwargs)
+    engine = create_async_engine(DATABASE_URL_TEST, poolclass=NullPool, **engine_kwargs)
     postgres_only_indexes = []
     if DATABASE_URL_TEST.startswith("postgresql"):
         for table in Base.metadata.tables.values():

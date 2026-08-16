@@ -1266,8 +1266,7 @@ class InventoryService:
             # Record audit trail for the purchase receipt
             # Use a dummy system user ID if no specific user is associated with PO receipt
             # Or assume the caller will handle it if we want to be strict.
-            # For now, we try to get the 'ordered_by' from PO if available.
-            adjusted_by = created_by or uuid.UUID(int=0)  # Default system UUID
+            adjusted_by = created_by
             # Try to find who received it if PO exists
             if batch_data.purchase_order_id:
                 po = await db.get(PurchaseOrder, batch_data.purchase_order_id)
@@ -1317,8 +1316,7 @@ class InventoryService:
                 source_id=batch_data.purchase_order_id or batch.id,
                 source_line_id=batch.id,
                 reference_number=batch_data.batch_number,
-                reason=f"Purchase receipt: Batch {batch_data.batch_number}",
-                created_by=adjusted_by if adjusted_by.int != 0 else None,
+                created_by=adjusted_by if (adjusted_by and adjusted_by.int != 0) else None,
             )
 
         await db.commit()

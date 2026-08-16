@@ -26,16 +26,36 @@ from app.services.sales.sales_service import SalesService
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_user(org_id: uuid.UUID, is_admin: bool = True) -> SimpleNamespace:
-    perms = ["manage_organization"] if is_admin else []
-    return SimpleNamespace(
+from app.models.user.user_model import User
+from app.models.core.mixins import pwd_context
+from datetime import timezone
+
+async def _make_user(db: AsyncSession, org_id: uuid.UUID, is_admin: bool = True) -> User:
+    username = f"test_{uuid.uuid4().hex[:8]}"
+    user = User(
         id=uuid.uuid4(),
         organization_id=org_id,
+        username=username,
+        email=f"{username}@example.com",
+        password_hash=pwd_context.hash("Password123!"),
+        full_name="Test User",
+        assigned_branches="[]",
+        is_active=True,
+        is_deleted=False,
         is_super_admin=False,
-        has_permission=lambda p: p in perms,
-        assigned_branches=[],
-        username="test_user",
+        failed_login_attempts=0,
+        two_factor_enabled=False,
+        must_change_password=False,
+        sync_version=1,
+        sync_status="synced",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
     )
+    db.add(user)
+    await db.commit()
+    perms = ["manage_organization"] if is_admin else []
+    user.has_permission = lambda p: p in perms
+    return user
 
 
 # ---------------------------------------------------------------------------
@@ -52,7 +72,7 @@ async def test_get_settings_returns_defaults(db: AsyncSession):
     db.add(org)
     await db.commit()
 
-    user = _make_user(org.id, is_admin=True)
+    user = await _make_user(db, org.id, is_admin=True)
     response = await get_organization_settings(org.id, db=db, current_user=user)
     assert response.enable_loyalty_program is False
     assert response.currency is None
@@ -67,7 +87,7 @@ async def test_patch_enable_loyalty_persists_and_audits(db: AsyncSession):
     db.add(org)
     await db.commit()
 
-    user = _make_user(org.id, is_admin=True)
+    user = await _make_user(db, org.id, is_admin=True)
 
     # Patch
     from app.schemas.organization_onboarding_schemas import OrganizationSettingsUpdate
@@ -108,7 +128,7 @@ async def test_patch_only_updates_provided_fields(db: AsyncSession):
     db.add(org)
     await db.commit()
 
-    user = _make_user(org.id, is_admin=True)
+    user = await _make_user(db, org.id, is_admin=True)
 
     from app.schemas.organization_onboarding_schemas import OrganizationSettingsUpdate
     update_data = OrganizationSettingsUpdate(enable_loyalty_program=True)
@@ -138,7 +158,7 @@ async def test_patch_cross_org_raises_403_for_different_org_admin(db: AsyncSessi
     from fastapi import HTTPException
     from app.schemas.organization_onboarding_schemas import OrganizationSettingsUpdate
 
-    user_a = _make_user(org_a.id, is_admin=True)
+    user_a = await _make_user(db, org_a.id, is_admin=True)
     update_data = OrganizationSettingsUpdate(enable_loyalty_program=True)
 
     with pytest.raises(HTTPException) as exc:
@@ -160,7 +180,7 @@ async def test_get_cross_org_raises_403(db: AsyncSession):
 
     from fastapi import HTTPException
 
-    user_a = _make_user(org_a.id, is_admin=True)
+    user_a = await _make_user(db, org_a.id, is_admin=True)
 
     with pytest.raises(HTTPException) as exc:
         await get_organization_settings(org_b.id, db=db, current_user=user_a)
