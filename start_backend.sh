@@ -44,6 +44,8 @@ if [[ -f "$PROJECT_DIR/.venv/bin/activate" ]]; then
     source "$PROJECT_DIR/.venv/bin/activate"
 elif [[ -f "$BACKEND_DIR/.venv/bin/activate" ]]; then
     source "$BACKEND_DIR/.venv/bin/activate"
+elif [[ -f "/home/ubuntu/lasoenv/bin/activate" ]]; then
+    source "/home/ubuntu/lasoenv/bin/activate"
 fi
 
 PYTHON_BIN="$(command -v python || command -v python3)"

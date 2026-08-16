@@ -135,6 +135,11 @@ test.describe('Sync Data Consistency & Multi-Directional E2E Tests', () => {
   test('3. Offline client customer registration appends outbox and pushes to PostgreSQL on sync', async ({ page }) => {
     await page.goto('/customers');
     await page.waitForLoadState('domcontentloaded');
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { getDb } = await import('/src/lib/localDb.ts');
+      await getDb();
+    });
     await expect(page.locator('button:has-text("Register Customer")').first()).toBeVisible({ timeout: 15000 });
 
     // Open modal while page bundle is loaded

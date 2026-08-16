@@ -137,7 +137,7 @@ function RequireSetupAccess({ children }: { children: React.ReactNode }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-let _hasInitialSyncPassed = false;
+let _hasInitialSyncPassed = syncEngine.status !== "syncing";
 
 if (typeof window !== "undefined") {
   window.addEventListener("auth:logout", () => {

@@ -53,34 +53,34 @@ function deriveSetupState(user: User): SetupState {
         return "needs_pw_change";
     }
 
-
-    // Super admins are platform operators — they must onboard an org first,
-    // unless they already have branches assigned (org already set up).
-    if (user.is_super_admin && (user.assigned_branches?.length ?? 0) === 0) {
+    // Super admins without organization context must onboard an org first
+    if (user.is_super_admin && !user.organization_id) {
         return "needs_onboard";
     }
 
-    // Use effective permissions (includes hierarchy inheritance).
-    // The login endpoint doesn't compute _effective_permissions, so
-    // effectivePerms may be an empty default object rather than undefined.
-    // Fall back to role-level permissions when the computed field is empty.
-    const computed = user.effective_permissions?.effective_permissions;
-    const effectivePerms = (computed && computed.length > 0)
-        ? computed
-        : user.roles.flatMap(r => r.permissions);
-
-    const hasOrgManagePerm =
-        effectivePerms.includes("manage_organization") ||
-        effectivePerms.includes("manage_branches") ||
-        effectivePerms.includes("*");
-
-    if (hasOrgManagePerm && (user.assigned_branches?.length ?? 0) === 0) {
-        return "needs_branch";
-    }
-
+    // Users with assigned branches are ready to operate
     if ((user.assigned_branches?.length ?? 0) > 0) {
         return "ready";
     }
+
+    // Organization administrators and operators with an organization are ready
+    if (user.organization_id) {
+        const computed = user.effective_permissions?.effective_permissions;
+        const effectivePerms = (computed && computed.length > 0)
+            ? computed
+            : (user.roles || []).flatMap(r => r.permissions || []);
+
+        const hasOrgManagePerm =
+            user.is_super_admin ||
+            effectivePerms.includes("manage_organization") ||
+            effectivePerms.includes("manage_branches") ||
+            effectivePerms.includes("*");
+
+        if (hasOrgManagePerm) {
+            return "ready";
+        }
+    }
+
     return "needs_branch";
 }
 
@@ -92,7 +92,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     setupState: null,
 
     initialize: async () => {
-        set({ isLoading: true });
+        const current = get();
+        if (!current.isAuthenticated || !current.user) {
+            set({ isLoading: true });
+        }
         try {
             const [token, user, branchId] = await Promise.all([
                 authStorage.getAccessToken(),
@@ -105,7 +108,12 @@ export const useAuthStore = create<AuthState>((set, get) => ({
 
                 // Only restore the saved branch when the user is actually ready.
                 // If they're in a setup state, the saved branchId is stale / irrelevant.
-                const activeBranchId = setupState === "ready" ? branchId : null;
+                let activeBranchId = setupState === "ready" ? branchId : null;
+
+                if (!activeBranchId && (user.assigned_branches?.length ?? 0) === 1) {
+                    activeBranchId = String(user.assigned_branches[0]);
+                    await authStorage.setActiveBranch(activeBranchId);
+                }
 
                 set({ user, isAuthenticated: true, activeBranchId, setupState });
 
@@ -120,13 +128,13 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 if (navigator.onLine) {
                     void authApi.me()
                         .then(async (freshUser) => {
-                            const current = get();
-                            if (!current.isAuthenticated || current.user?.id !== user.id) {
+                            const cur = get();
+                            if (!cur.isAuthenticated || cur.user?.id !== user.id) {
                                 return;
                             }
 
                             const freshSetupState = deriveSetupState(freshUser);
-                            let freshBranchId = current.activeBranchId;
+                            let freshBranchId = cur.activeBranchId;
 
                             if (freshSetupState !== "ready") {
                                 freshBranchId = null;

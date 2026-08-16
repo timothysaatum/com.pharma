@@ -28,6 +28,11 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
   test('1. Sync attempts while offline handle network errors gracefully and retain outbox', async ({ page }) => {
     await page.goto('/customers');
     await page.waitForLoadState('domcontentloaded');
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { getDb } = await import('/src/lib/localDb.ts');
+      await getDb();
+    });
 
     // Register a customer locally
     const registerBtn = page.locator('button:has-text("Register Customer")').first();

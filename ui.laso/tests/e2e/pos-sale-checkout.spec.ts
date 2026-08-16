@@ -134,6 +134,12 @@ test.describe('POS Sale Checkout End-to-End Tests', () => {
     await page.waitForLoadState('domcontentloaded');
     await expect(page.locator('input[placeholder*="Search drug"]').first()).toBeVisible({ timeout: 20000 });
 
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { getDb } = await import('/src/lib/localDb.ts');
+      await getDb();
+    });
+
     // Seed drug, branch_inventory, drug_batches, and price_contracts in local SQLite
     bridge.execute(
       `INSERT INTO drugs (id, organization_id, name, drug_type, unit_price, requires_prescription, is_active, is_deleted, created_at, updated_at)

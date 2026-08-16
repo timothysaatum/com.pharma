@@ -42,7 +42,13 @@ class SyncEngine {
     private retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     private listeners: StatusListener[] = [];
     private _status: SyncStatus = "idle";
-    private _lastSyncAt: string | null = null;
+    private _lastSyncAt: string | null = (() => {
+        try {
+            return localStorage.getItem("last_sync_at") || null;
+        } catch {
+            return null;
+        }
+    })();
     private _isSyncing = false;
     private networkRetryAttempt = 0;
     private _dbInitError: string | null = null;
@@ -94,14 +100,17 @@ class SyncEngine {
 
         // Immediately restore last known sync timestamp from localStorage cache
         try {
-            const cached = localStorage.getItem(`last_sync_at:${branchId}`);
+            const cached = localStorage.getItem(`last_sync_at:${branchId}`) || localStorage.getItem("last_sync_at");
             if (cached) this._lastSyncAt = cached;
         } catch {}
 
         getLastSyncAt(undefined, branchId).then((last) => {
             if (last && this.branchId === branchId) {
                 this._lastSyncAt = last;
-                try { localStorage.setItem(`last_sync_at:${branchId}`, last); } catch {}
+                try {
+                    localStorage.setItem("last_sync_at", last);
+                    localStorage.setItem(`last_sync_at:${branchId}`, last);
+                } catch {}
                 this.notify();
             }
         }).catch(() => {});

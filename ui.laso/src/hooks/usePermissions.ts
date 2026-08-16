@@ -11,8 +11,8 @@ function userHasPermission(user: User, permission: string): boolean {
         return effective.includes(permission) || effective.includes("*");
     }
     // Fallback: check assigned roles directly
-    return user.roles.some(role =>
-        role.permissions.includes(permission) || role.permissions.includes("*")
+    return (user.roles || []).some(role =>
+        (role.permissions || []).includes(permission) || (role.permissions || []).includes("*")
     );
 }
 

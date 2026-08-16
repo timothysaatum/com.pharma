@@ -70,7 +70,10 @@ export const NAV_ITEMS: NavItem[] = [
 
 
 export function AppShell({ children }: { children?: React.ReactNode }) {
-    const { user, logout, activeBranchId, setActiveBranch } = useAuthStore();
+    const user = useAuthStore((s) => s.user);
+    const logout = useAuthStore((s) => s.logout);
+    const activeBranchId = useAuthStore((s) => s.activeBranchId);
+    const setActiveBranch = useAuthStore((s) => s.setActiveBranch);
     const navigate = useNavigate();
     const [collapsed, setCollapsed] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
@@ -194,6 +197,11 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
             return;
         }
         let cancelled = false;
+        try {
+            const cached = localStorage.getItem(`cache.branch_name.${activeBranchId}`);
+            if (cached) setBranchName(cached);
+        } catch {}
+
         branchApi
             .getById(activeBranchId)
             .then((b) => {
@@ -331,7 +339,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                             <div className="flex-1 min-w-0">
                                 <p className="text-[10px] font-bold text-white/30 uppercase tracking-widest leading-none mb-1">Active Branch</p>
                                 <p className="text-xs text-white/70 truncate font-semibold">
-                                    {branchName === undefined ? "Loading…" : branchName ?? "Select Branch"}
+                                    {branchName ?? (activeBranchId ? "Loading…" : "Select Branch")}
                                 </p>
                             </div>
                             {branches.length > 0 && (

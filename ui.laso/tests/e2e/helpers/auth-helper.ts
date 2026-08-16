@@ -64,6 +64,8 @@ export async function setupAuthenticatedState(
     localStorage.setItem('session.organization_id', JSON.stringify(orgId));
     localStorage.setItem('auth.active_branch_id', JSON.stringify(branchId));
     localStorage.setItem('auth.active_organization_id', JSON.stringify(orgId));
+    localStorage.setItem(`cache.branch_name.${branchId}`, 'Downtown Main Branch');
+    localStorage.setItem(`cache.org_name.${orgId}`, 'Demo Pharmacy Org');
   }, { token, user, branchId, orgId });
 
   return { token, user, branchId, orgId };

@@ -33,7 +33,7 @@ vi.mock("@/api/organization", () => ({
 describe("AppShell Layout Route Client-Side Navigation", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (useAuthStore as unknown as ReturnType<typeof vi.fn>).mockReturnValue({
+    const mockState = {
       user: {
         id: "usr-1",
         full_name: "Test Admin",
@@ -45,6 +45,9 @@ describe("AppShell Layout Route Client-Side Navigation", () => {
       logout: vi.fn(),
       activeBranchId: "b-1",
       setActiveBranch: vi.fn(),
+    };
+    (useAuthStore as unknown as ReturnType<typeof vi.fn>).mockImplementation((selector?: (state: typeof mockState) => any) => {
+      return selector ? selector(mockState) : mockState;
     });
   });
 

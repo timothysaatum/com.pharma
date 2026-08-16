@@ -255,6 +255,12 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
     await page.waitForLoadState('domcontentloaded');
     await expect(page.locator('button:has-text("Register Customer")').first()).toBeVisible({ timeout: 15000 });
 
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { getDb } = await import('/src/lib/localDb.ts');
+      await getDb();
+    });
+
     // Insert an invalid event directly into outbox with invalid hash_self to trigger permanent rejection
     const badEventId = '01K03CORRVPT00000000000000';
     const badCustId = '88888888-8888-8888-8888-888888888888';
