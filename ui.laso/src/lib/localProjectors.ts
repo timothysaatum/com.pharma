@@ -649,20 +649,26 @@ async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
       }
     }
   } else if (e.event_type === "drug_batch_created") {
-    const res = await db.execute(
-      `UPDATE branch_inventory
-       SET quantity = quantity + $1, updated_at = $2
-       WHERE branch_id = $3 AND drug_id = $4`,
-      [remainingQuantity, now, branchId, drugId]
+    const existingBatch = await db.select<{ id: string }[]>(
+      "SELECT id FROM drug_batches WHERE id = $1",
+      [String(e.aggregate_id)]
     );
-    if (res.rowsAffected === 0) {
-      await db.execute(
-        `INSERT INTO branch_inventory
-           (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
-            sync_status, sync_version, synced_at, updated_at, created_at)
-         VALUES ($1,$2,$3,$4,0,NULL,NULL,'synced',1,NULL,$5,$5)`,
-        [crypto.randomUUID(), branchId, drugId, remainingQuantity, now]
+    if (existingBatch.length === 0) {
+      const res = await db.execute(
+        `UPDATE branch_inventory
+         SET quantity = quantity + $1, updated_at = $2
+         WHERE branch_id = $3 AND drug_id = $4`,
+        [remainingQuantity, now, branchId, drugId]
       );
+      if (res.rowsAffected === 0) {
+        await db.execute(
+          `INSERT INTO branch_inventory
+             (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+              sync_status, sync_version, synced_at, updated_at, created_at)
+           VALUES ($1,$2,$3,$4,0,NULL,NULL,'synced',1,NULL,$5,$5)`,
+          [crypto.randomUUID(), branchId, drugId, remainingQuantity, now]
+        );
+      }
     }
   }
 

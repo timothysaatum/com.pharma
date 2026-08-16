@@ -171,7 +171,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 29;
+const MAX_KNOWN_SCHEMA_VERSION = 30;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -216,54 +216,99 @@ export async function guardAgainstSchemaDowngrade(_db: Database, user_version: n
   }
 }
 
+let _migrationRunningPromise: Promise<void> | null = null;
+
 async function runMigrations(db: Database): Promise<void> {
-  // If MockDb, user_version check will return empty or throw, so we guard.
-  try {
-      const rows = await db.select<{ user_version: number }[]>(
-        "PRAGMA user_version"
-      );
-      const user_version = rows?.[0]?.user_version ?? 0;
-
-      await repairIncompleteV15Migration(db, user_version);
-      await guardAgainstSchemaDowngrade(db, user_version);
-
-      if (user_version < 1) await migrate_v1(db);
-      if (user_version < 2) await migrate_v2(db);
-      if (user_version < 3) await migrate_v3(db);
-      if (user_version < 4) await migrate_v4(db);
-      if (user_version < 5) await migrate_v5(db);
-      if (user_version < 6) await migrate_v6(db);
-      if (user_version < 7) await migrate_v7(db);
-      if (user_version < 8) await migrate_v8(db);
-      if (user_version < 9) await migrate_v9(db);
-      if (user_version < 10) await migrate_v10(db);
-      if (user_version < 11) await migrate_v11(db);
-      if (user_version < 12) await migrate_v12(db);
-      if (user_version < 13) await migrate_v13(db);
-      if (user_version < 14) await migrate_v14(db);
-      if (user_version < 15) await migrate_v15(db);
-      if (user_version < 16) await migrate_v16(db);
-      if (user_version < 17) await migrate_v17(db);
-      if (user_version < 18) await migrate_v18(db);
-      if (user_version < 19) await migrate_v19(db);
-      if (user_version < 20) await migrate_v20(db);
-      if (user_version < 21) await migrate_v21(db);
-      if (user_version < 22) await migrate_v22(db);
-      if (user_version < 23) await migrate_v23(db);
-      if (user_version < 24) await migrate_v24(db);
-      if (user_version < 25) await migrate_v25(db);
-      if (user_version < 26) await migrate_v26(db);
-      if (user_version < 27) await migrate_v27(db);
-      if (user_version < 28) await migrate_v28(db);
-      if (user_version < 29) await migrate_v29(db);
-      await ensureAuditLogSchema(db);
-  } catch (e) {
-      const msg = (e && typeof e === "object" && "message" in e)
-        ? (e as { message: unknown }).message
-        : String(e);
-      console.error("[localDb] Migration failed:", msg);
-      throw e;
+  if (_migrationRunningPromise) {
+    return _migrationRunningPromise;
   }
+
+  _migrationRunningPromise = (async () => {
+    let lockAcquired = false;
+    // If MockDb, user_version check will return empty or throw, so we guard.
+    try {
+        const initialRows = await db.select<{ user_version: number }[]>(
+          "PRAGMA user_version"
+        );
+        let user_version = initialRows?.[0]?.user_version ?? 0;
+
+        if (user_version >= MAX_KNOWN_SCHEMA_VERSION) {
+          return;
+        }
+
+        try {
+          await db.execute("CREATE TABLE IF NOT EXISTS _migration_lock (id INTEGER PRIMARY KEY)");
+          for (let attempt = 0; attempt < 50; attempt++) {
+            try {
+              await db.execute("INSERT INTO _migration_lock (id) VALUES (1)");
+              lockAcquired = true;
+              break;
+            } catch {
+              await new Promise((r) => setTimeout(r, 100));
+              const checkRows = await db.select<{ user_version: number }[]>("PRAGMA user_version");
+              if ((checkRows?.[0]?.user_version ?? 0) >= MAX_KNOWN_SCHEMA_VERSION) {
+                return;
+              }
+            }
+          }
+        } catch {}
+
+        const rows = await db.select<{ user_version: number }[]>(
+          "PRAGMA user_version"
+        );
+        user_version = rows?.[0]?.user_version ?? 0;
+
+        await repairIncompleteV15Migration(db, user_version);
+        await guardAgainstSchemaDowngrade(db, user_version);
+
+        if (user_version < 1) await migrate_v1(db);
+        if (user_version < 2) await migrate_v2(db);
+        if (user_version < 3) await migrate_v3(db);
+        if (user_version < 4) await migrate_v4(db);
+        if (user_version < 5) await migrate_v5(db);
+        if (user_version < 6) await migrate_v6(db);
+        if (user_version < 7) await migrate_v7(db);
+        if (user_version < 8) await migrate_v8(db);
+        if (user_version < 9) await migrate_v9(db);
+        if (user_version < 10) await migrate_v10(db);
+        if (user_version < 11) await migrate_v11(db);
+        if (user_version < 12) await migrate_v12(db);
+        if (user_version < 13) await migrate_v13(db);
+        if (user_version < 14) await migrate_v14(db);
+        if (user_version < 15) await migrate_v15(db);
+        if (user_version < 16) await migrate_v16(db);
+        if (user_version < 17) await migrate_v17(db);
+        if (user_version < 18) await migrate_v18(db);
+        if (user_version < 19) await migrate_v19(db);
+        if (user_version < 20) await migrate_v20(db);
+        if (user_version < 21) await migrate_v21(db);
+        if (user_version < 22) await migrate_v22(db);
+        if (user_version < 23) await migrate_v23(db);
+        if (user_version < 24) await migrate_v24(db);
+        if (user_version < 25) await migrate_v25(db);
+        if (user_version < 26) await migrate_v26(db);
+        if (user_version < 27) await migrate_v27(db);
+        if (user_version < 28) await migrate_v28(db);
+        if (user_version < 29) await migrate_v29(db);
+        if (user_version < 30) await migrate_v30(db);
+        await ensureAuditLogSchema(db);
+    } catch (e) {
+        const msg = (e && typeof e === "object" && "message" in e)
+          ? (e as { message: unknown }).message
+          : String(e);
+        console.error("[localDb] Migration failed:", msg);
+        throw e;
+    } finally {
+        if (lockAcquired) {
+          try {
+            await db.execute("DELETE FROM _migration_lock WHERE id = 1");
+          } catch {}
+        }
+        _migrationRunningPromise = null;
+    }
+  })();
+
+  return _migrationRunningPromise;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -784,6 +829,7 @@ export async function migrate_v16(db: Database): Promise<void> {
     ddl: string,
     selectCols: string,
   ): Promise<void> {
+    await db.execute(`DROP TABLE IF EXISTS ${newName}`);
     await db.execute(ddl);
     const exists = await tableExists(db, oldName);
     if (exists) {
@@ -831,6 +877,7 @@ export async function migrate_v16(db: Database): Promise<void> {
     scopeColumn: string,
     businessKeyColumn: string,
   ): Promise<void> {
+    await db.execute(`DROP TABLE IF EXISTS ${newName}`);
     await db.execute(ddl);
 
     const rows = await db.select<BusinessKeyRow[]>(`
@@ -905,7 +952,7 @@ export async function migrate_v16(db: Database): Promise<void> {
   // Add DEFAULTs, no UNIQUE to remove
   await recreateTable(
     "drug_batches", "drug_batches_crr",
-    `CREATE TABLE drug_batches_crr (
+    `CREATE TABLE IF NOT EXISTS drug_batches_crr (
       id                  TEXT NOT NULL PRIMARY KEY,
       branch_id           TEXT NOT NULL DEFAULT '',
       drug_id             TEXT NOT NULL DEFAULT '',
@@ -933,7 +980,7 @@ export async function migrate_v16(db: Database): Promise<void> {
   // Add DEFAULTs, no UNIQUE to remove
   await recreateTable(
     "customers", "customers_crr",
-    `CREATE TABLE customers_crr (
+    `CREATE TABLE IF NOT EXISTS customers_crr (
       id                      TEXT NOT NULL PRIMARY KEY,
       organization_id         TEXT NOT NULL DEFAULT '',
       customer_type           TEXT NOT NULL DEFAULT 'walk_in',
@@ -971,7 +1018,7 @@ export async function migrate_v16(db: Database): Promise<void> {
 
   await copyKeepingBoth(
     "prescriptions", "prescriptions_crr",
-    `CREATE TABLE prescriptions_crr (
+    `CREATE TABLE IF NOT EXISTS prescriptions_crr (
     id                    TEXT NOT NULL PRIMARY KEY,
     organization_id       TEXT NOT NULL DEFAULT '',
     branch_id             TEXT NOT NULL DEFAULT '',
@@ -1008,7 +1055,7 @@ export async function migrate_v16(db: Database): Promise<void> {
   // Add DEFAULTs, no UNIQUE to remove (client-side)
   await recreateTable(
     "purchase_orders", "purchase_orders_crr",
-    `CREATE TABLE purchase_orders_crr (
+    `CREATE TABLE IF NOT EXISTS purchase_orders_crr (
       id                    TEXT NOT NULL PRIMARY KEY,
       organization_id       TEXT NOT NULL DEFAULT '',
       branch_id             TEXT NOT NULL DEFAULT '',
@@ -1066,7 +1113,7 @@ export async function migrate_v16(db: Database): Promise<void> {
 
   await copyKeepingBoth(
     "sales", "sales_crr",
-    `CREATE TABLE sales_crr (
+    `CREATE TABLE IF NOT EXISTS sales_crr (
     id                            TEXT NOT NULL PRIMARY KEY,
     organization_id               TEXT NOT NULL DEFAULT '',
     branch_id                     TEXT NOT NULL DEFAULT '',
@@ -2421,6 +2468,64 @@ async function migrate_v29(db: Database): Promise<void> {
     await db.execute("DROP TABLE IF EXISTS sync_queue");
   } catch {}
   await db.execute("PRAGMA user_version = 29");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v30 — drop orphaned CR-SQLite triggers and reset pull cursor
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function migrate_v30(db: Database): Promise<void> {
+  // Discover and drop all orphaned CR-SQLite triggers from legacy migrations.
+  // These triggers reference native C functions (such as crsql_internal_sync_bit) that
+  // no longer exist in the standard rusqlite/SQLCipher runtime.
+  try {
+    const triggers = await db.select<{ name: string; sql: string }[]>(
+      "SELECT name, sql FROM sqlite_master WHERE type = 'trigger'"
+    );
+    for (const trig of triggers) {
+      const name = trig.name || "";
+      const sql = trig.sql || "";
+      const isLegacyCrr =
+        name.includes("__crsql_") ||
+        name.startsWith("crsql_") ||
+        sql.includes("crsql_internal_sync_bit") ||
+        sql.includes("crsql_after_") ||
+        sql.includes("crsql_changes") ||
+        sql.includes("crsql_clock");
+      if (isLegacyCrr) {
+        await db.execute(`DROP TRIGGER IF EXISTS "${name}"`);
+      }
+    }
+  } catch (err) {
+    console.warn("[localDb] Failed inspecting/dropping legacy CR-SQLite triggers:", err);
+  }
+
+  // Ensure all CR-SQLite shadow tables are definitively dropped
+  for (const t of [
+    "crsql_changes",
+    "crsql_clock",
+    "crsql_pack_columns",
+    "suppressed_crr_changes",
+    "crr_audit_uploads",
+    "customer_merge_directives",
+  ]) {
+    try {
+      await db.execute(`DROP TABLE IF EXISTS ${t}`);
+    } catch {}
+  }
+
+  // Reset pull cursor so previously failed/skipped events (e.g. drug_created,
+  // drug_updated, drug_category_created) are re-pulled and projected cleanly.
+  try {
+    await db.execute(
+      "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
+      ["event_pull_seq", "0"]
+    );
+  } catch (err) {
+    console.warn("[localDb] Failed resetting event_pull_seq in v30 migration:", err);
+  }
+
+  await db.execute("PRAGMA user_version = 30");
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

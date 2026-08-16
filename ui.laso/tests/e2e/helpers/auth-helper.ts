@@ -28,16 +28,25 @@ export async function setupAuthenticatedState(
   username = 'admin',
   password = 'Password123!'
 ) {
-  // Call backend login directly to get valid JWT and user payload
-  const res = await page.request.post('http://127.0.0.1:8000/api/v1/auth/login', {
-    data: {
-      username,
-      password,
-    },
-  });
-  
-  if (!res.ok()) {
-    throw new Error(`Auth login failed: ${res.status()} ${await res.text()}`);
+  // Call backend login directly to get valid JWT and user payload (with retry for transient ECONNRESET)
+  let res;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      res = await page.request.post('http://127.0.0.1:8000/api/v1/auth/login', {
+        data: {
+          username,
+          password,
+        },
+      });
+      if (res.ok()) break;
+    } catch (err) {
+      if (attempt === 2) throw err;
+      await new Promise(r => setTimeout(r, 200 * (attempt + 1)));
+    }
+  }
+
+  if (!res || !res.ok()) {
+    throw new Error(`Auth login failed: ${res ? res.status() : 'no response'}`);
   }
   
   const data = await res.json();

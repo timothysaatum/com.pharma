@@ -360,6 +360,8 @@ class SyncEngine {
         // Page through server events. Cap at 50 pages per cycle.
         for (let page = 0; page < 50; page++) {
             const response = await syncApi.pullEvents(afterSeq);
+            let contiguousSeq = afterSeq;
+            let hadProjectionError = false;
 
             for (const envelope of response.events) {
                 let authored = false;
@@ -368,20 +370,43 @@ class SyncEngine {
                 } catch {
                     // DB error during authorship check — treat as foreign and apply.
                 }
-                if (authored) continue;
+
+                if (authored) {
+                    if (envelope.seq != null && envelope.seq > contiguousSeq) {
+                        contiguousSeq = envelope.seq;
+                        await setEventPullSeq(contiguousSeq);
+                    }
+                    continue;
+                }
+
                 try {
                     await applyEventLocally(envelope);
+                    if (envelope.seq != null && envelope.seq > contiguousSeq) {
+                        contiguousSeq = envelope.seq;
+                        await setEventPullSeq(contiguousSeq);
+                    }
                 } catch (err) {
                     console.warn(
                         `[SyncEngine] localProjector failed for event ${envelope.event_id} (${envelope.event_type}):`,
                         err
                     );
+                    hadProjectionError = true;
+                    break;
                 }
             }
 
+            if (hadProjectionError) {
+                // Halt pull loop on projector failure without advancing beyond the last successful contiguous seq
+                afterSeq = contiguousSeq;
+                break;
+            }
+
             if (response.events.length > 0) {
-                afterSeq = response.next_after_seq;
-                await setEventPullSeq(afterSeq);
+                if (response.next_after_seq > contiguousSeq) {
+                    contiguousSeq = response.next_after_seq;
+                    await setEventPullSeq(contiguousSeq);
+                }
+                afterSeq = contiguousSeq;
             }
 
             if (!response.has_more) break;
