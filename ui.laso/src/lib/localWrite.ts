@@ -182,6 +182,9 @@ export function buildLocalSalePayload(
         total_amount: sanitizeNumber((saleData as Record<string, unknown>).total_amount),
         items_json: JSON.stringify(items),
         items_count: items.reduce((sum, item) => sum + (item?.quantity ?? 0), 0),
+        insurance_verified: (saleData as Record<string, unknown>).insurance_verified ? 1 : 0,
+        receipt_printed: (saleData as Record<string, unknown>).receipt_printed ? 1 : 0,
+        receipt_emailed: (saleData as Record<string, unknown>).receipt_emailed ? 1 : 0,
         sync_status: "pending",
         sync_version: 1,
         updated_at: now,
@@ -233,15 +236,27 @@ export async function buildSaleCreatedEnvelope(
         amount_paid: Number(sale.amount_paid ?? 0),
         change_amount: Number((sale as Record<string, unknown>).change_amount ?? 0),
         prescription_id: sale.prescription_id ?? null,
-        items: (items ?? []).map((item) => ({
-            drug_id: item.drug_id,
-            batch_id: item.batch_id ?? null,
-            drug_name: item.drug_name ?? null,
-            quantity: item.quantity,
-            unit_price: item.unit_price,
-            discount_amount: item.discount_amount ?? 0,
-            subtotal: item.subtotal,
-        })),
+        status: (sale as Record<string, unknown>).status ?? "completed",
+        sync_version: 2,
+        sync_protocol_version: 2,
+        items: (items ?? []).map((item) => {
+            const unitPrice = Number(item.unit_price ?? 0);
+            const qty = Number(item.quantity ?? 0);
+            const discountAmt = Number(item.discount_amount ?? 0);
+            const subtotal = Number(item.subtotal ?? (unitPrice * qty));
+            return {
+                item_id: (item as Record<string, unknown>).id ?? crypto.randomUUID(),
+                drug_id: item.drug_id,
+                batch_id: item.batch_id ?? null,
+                drug_name: item.drug_name ?? "Unknown Drug",
+                drug_sku: item.drug_sku ?? null,
+                quantity: qty,
+                unit_price: unitPrice,
+                discount_amount: discountAmt,
+                subtotal: subtotal,
+                total_price: subtotal - discountAmt,
+            };
+        }),
     };
 
     const hashSelf = await computeHashSelf(

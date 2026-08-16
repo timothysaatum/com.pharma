@@ -1410,6 +1410,7 @@ export async function tableExists(db: Database, name: string): Promise<boolean> 
 /// NULL primary key, remove any forbidden UNIQUE indexes, and clear tracking
 /// flags so ensureCrrTablesEnabled starts fresh.
 async function migrate_v22(db: Database): Promise<void> {
+  await db.execute("PRAGMA foreign_keys = OFF");
   await db.execute("BEGIN IMMEDIATE");
   try {
     const CRR_TABLES = [
@@ -1528,17 +1529,15 @@ async function migrate_v22(db: Database): Promise<void> {
             prescriber_phone      TEXT,
             prescriber_address    TEXT,
             issue_date            TEXT NOT NULL DEFAULT '',
-            expiry_date           TEXT NOT NULL DEFAULT '',
-            medications           TEXT NOT NULL DEFAULT '[]',
+            expiry_date           TEXT,
             diagnosis             TEXT,
             notes                 TEXT,
-            special_instructions  TEXT,
+            medications           TEXT NOT NULL DEFAULT '[]',
             refills_allowed       INTEGER NOT NULL DEFAULT 0,
             refills_remaining     INTEGER NOT NULL DEFAULT 0,
             last_refill_date      TEXT,
             status                TEXT NOT NULL DEFAULT 'active',
-            verified_by           TEXT,
-            verified_at           TEXT,
+            is_deleted            INTEGER NOT NULL DEFAULT 0,
             sync_status           TEXT NOT NULL DEFAULT 'synced',
             sync_version          INTEGER NOT NULL DEFAULT 1,
             synced_at             TEXT,
@@ -1547,9 +1546,9 @@ async function migrate_v22(db: Database): Promise<void> {
           )`,
           cols: `id, organization_id, branch_id, prescription_number, customer_id,
             prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
-            issue_date, expiry_date, medications, diagnosis, notes, special_instructions,
-            refills_allowed, refills_remaining, last_refill_date, status, verified_by,
-            verified_at, sync_status, sync_version, synced_at, updated_at, created_at`,
+            issue_date, expiry_date, diagnosis, notes, medications, refills_allowed,
+            refills_remaining, last_refill_date, status, is_deleted, sync_status,
+            sync_version, synced_at, updated_at, created_at`,
         },
         purchase_orders: {
           ddl: `CREATE TABLE purchase_orders_v22 (
@@ -1557,7 +1556,7 @@ async function migrate_v22(db: Database): Promise<void> {
             organization_id       TEXT NOT NULL DEFAULT '',
             branch_id             TEXT NOT NULL DEFAULT '',
             po_number             TEXT NOT NULL DEFAULT '',
-            supplier_id           TEXT NOT NULL DEFAULT '',
+            supplier_id           TEXT,
             subtotal              REAL NOT NULL DEFAULT 0,
             tax_amount            REAL NOT NULL DEFAULT 0,
             shipping_cost         REAL NOT NULL DEFAULT 0,
@@ -1816,19 +1815,13 @@ async function migrate_v22(db: Database): Promise<void> {
       await db.execute(`ALTER TABLE ${tmpName} RENAME TO ${table}`);
     }
 
-    // Clear CRR tracking flags so ensureCrrTablesEnabled re-detects from scratch
-    for (const table of CRR_TABLES) {
-      await db.execute(
-        "DELETE FROM sync_meta WHERE key = $1",
-        [`crr_enabled_${table}`]
-      );
-    }
-
     await db.execute("PRAGMA user_version = 22");
     await db.execute("COMMIT");
+    await db.execute("PRAGMA foreign_keys = ON;");
     console.log("[localDb] Migration v22 complete — CRR tables rebuilt with NOT NULL PKs");
   } catch (error) {
     try { await db.execute("ROLLBACK"); } catch { }
+    try { await db.execute("PRAGMA foreign_keys = ON;"); } catch { }
     console.error("[localDb] Migration v22 failed:", error);
     throw error;
   }

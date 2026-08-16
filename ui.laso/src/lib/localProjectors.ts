@@ -278,7 +278,7 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
   for (const bc of batchChanges) {
     await db.execute(
       `UPDATE drug_batches
-          SET quantity_remaining = MAX(0, quantity_remaining - $1)
+          SET remaining_quantity = MAX(0, remaining_quantity - $1)
         WHERE id = $2`,
       [Number(bc.quantity_used ?? 0), String(bc.batch_id)]
     );
@@ -309,7 +309,7 @@ async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
   for (const bc of batchChanges) {
     await db.execute(
       `UPDATE drug_batches
-          SET quantity_remaining = quantity_remaining + $1
+          SET remaining_quantity = remaining_quantity + $1
         WHERE id = $2`,
       [Number(bc.quantity_used ?? 0), String(bc.batch_id)]
     );
@@ -422,7 +422,7 @@ async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
   for (const bc of batchChanges) {
     await db.execute(
       `UPDATE drug_batches
-          SET quantity_remaining = MAX(0, quantity_remaining + $1)
+          SET remaining_quantity = MAX(0, remaining_quantity + $1)
         WHERE id = $2`,
       [Number(bc.quantity_change ?? 0), String(bc.batch_id)]
     );
@@ -462,7 +462,7 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
     const batchQty = Number(bc.quantity ?? 0);
     await db.execute(
       `UPDATE drug_batches
-          SET quantity_remaining = MAX(0, quantity_remaining - $1)
+          SET remaining_quantity = MAX(0, remaining_quantity - $1)
         WHERE id = $2`,
       [batchQty, String(bc.batch_id)]
     );

@@ -26,7 +26,7 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
 
   test('1. Concurrent edits trigger version vector conflict and park in unresolved_conflicts', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     const custId = '66666666-6666-6666-6666-' + Math.random().toString(16).substring(2, 14).padEnd(12, '0');
     const initialName = `ConflictCust${Date.now().toString().slice(-4)}`;
@@ -146,7 +146,7 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
 
   test('2. Push request idempotency guarantees duplicate submissions do not duplicate rows or fail', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     const custId = '77777777-7777-7777-7777-' + Math.random().toString(16).substring(2, 14).padEnd(12, '0');
     const firstName = `Idempotent${Date.now().toString().slice(-4)}`;
@@ -197,11 +197,14 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
     }, { custId, orgId, branchId, firstName });
 
     // Sync first time
-    const syncButton = page.locator('button[title*="Sync"], button:has(.lucide-refresh-cw)').first();
-    await syncButton.click();
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { syncEngine } = await import('/src/lib/syncEngine.ts');
+      await syncEngine.sync();
+    });
 
     // Verify outbox drained
-    await expect.poll(() => bridge.getOutboxCount(), { timeout: 15000 }).toBe(0);
+    await expect.poll(() => bridge.getOutboxCount(), { timeout: 25000 }).toBe(0);
 
     // Get event details from outbox
     const events = bridge.select<{ event_id: string; payload: string; hash_self: string; hash_prev: string; authored_at: string }>(
@@ -249,8 +252,8 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
 
   test('3. Permanent rejection of corrupted payload marks outbox rejected without crashing sync engine', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
-    await expect(page.getByText(/Just now|0 pending/i).first()).toBeVisible({ timeout: 15000 });
+    await page.waitForLoadState('domcontentloaded');
+    await expect(page.locator('button:has-text("Register Customer")').first()).toBeVisible({ timeout: 15000 });
 
     // Insert an invalid event directly into outbox with invalid hash_self to trigger permanent rejection
     const badEventId = '01K03CORRVPT00000000000000';

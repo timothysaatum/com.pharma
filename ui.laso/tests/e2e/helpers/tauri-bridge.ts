@@ -21,6 +21,7 @@ function rewriteSqlAndValues(sql: string, values: unknown[] = []): { normSql: st
 
 export class TauriSqliteBridge {
   public db: DatabaseSync;
+  public inTx = false;
   public queryLog: Array<{ type: string; sql: string; values?: unknown[]; timestamp: number }> = [];
   public secureStore: Map<string, any> = new Map();
 
@@ -37,6 +38,7 @@ export class TauriSqliteBridge {
     }
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA foreign_keys = ON;');
+    this.inTx = false;
     this.queryLog = [];
     this.secureStore.clear();
   }
@@ -44,10 +46,23 @@ export class TauriSqliteBridge {
   public execute(sql: string, values: unknown[] = []) {
     this.queryLog.push({ type: 'execute', sql, values, timestamp: Date.now() });
     const { normSql, normValues } = rewriteSqlAndValues(sql, values);
+    const upper = normSql.trim().toUpperCase();
+    if (upper.startsWith('BEGIN')) {
+      if (this.inTx) {
+        return { rowsAffected: 0, lastInsertId: 0 };
+      }
+      this.inTx = true;
+    } else if (upper.startsWith('COMMIT') || upper.startsWith('ROLLBACK')) {
+      if (!this.inTx) {
+        return { rowsAffected: 0, lastInsertId: 0 };
+      }
+      this.inTx = false;
+    }
     try {
       const res = this.db.prepare(normSql).run(...normValues);
       return { rowsAffected: Number(res.changes), lastInsertId: Number(res.lastInsertRowid) };
     } catch (err: any) {
+      if (upper.startsWith('BEGIN')) this.inTx = false;
       console.error(`[BRIDGE EXECUTE ERROR] SQL: "${sql}" | Norm: "${normSql}" | Values:`, values, `| Error:`, err.message);
       throw err;
     }
@@ -66,7 +81,11 @@ export class TauriSqliteBridge {
 
   public execute_transaction(statements: Array<{ sql: string; values?: unknown[]; expected_rows?: number; error_message?: string }>) {
     this.queryLog.push({ type: 'transaction', sql: statements.map(s => s.sql).join('; '), timestamp: Date.now() });
-    this.db.exec('BEGIN IMMEDIATE TRANSACTION;');
+    const needsBegin = !this.inTx;
+    if (needsBegin) {
+      this.inTx = true;
+      this.db.exec('BEGIN IMMEDIATE TRANSACTION;');
+    }
     const results = [];
     try {
       for (const st of statements) {
@@ -77,10 +96,16 @@ export class TauriSqliteBridge {
         }
         results.push({ rowsAffected: Number(res.changes), lastInsertId: Number(res.lastInsertRowid) });
       }
-      this.db.exec('COMMIT;');
+      if (needsBegin && this.inTx) {
+        this.db.exec('COMMIT;');
+        this.inTx = false;
+      }
       return results;
     } catch (err) {
-      this.db.exec('ROLLBACK;');
+      if (needsBegin && this.inTx) {
+        try { this.db.exec('ROLLBACK;'); } catch {}
+        this.inTx = false;
+      }
       throw err;
     }
   }

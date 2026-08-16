@@ -57,6 +57,77 @@ export class BackendDatabase {
     );
   }
 
+  async seedDefaultPriceContract(orgId: string) {
+    const contractId = '33333333-3333-3333-3333-333333333333';
+    await this.query(
+      `INSERT INTO price_contracts (
+        id, organization_id, contract_code, contract_name, contract_type,
+        is_default_contract, discount_type, discount_percentage,
+        applies_to_prescription_only, applies_to_otc, excluded_drug_categories, excluded_drug_ids,
+        applies_to_all_branches, applicable_branch_ids, effective_from,
+        requires_verification, allowed_user_roles, requires_approval, requires_preauthorization,
+        status, is_active, total_transactions, total_discount_given,
+        created_by, created_at, updated_at, sync_version, sync_status, is_deleted
+      ) VALUES (
+        $1, $2, 'STD-001', 'Standard Retail', 'standard',
+        TRUE, 'percentage', 0.0,
+        FALSE, TRUE, '[]', '[]',
+        TRUE, '[]', NOW(),
+        FALSE, '["admin", "manager", "cashier", "pharmacist"]', FALSE, FALSE,
+        'active', TRUE, 0, 0.0,
+        '44444444-4444-4444-4444-444444444444', NOW(), NOW(), 1, 'synced', FALSE
+      ) ON CONFLICT (id) DO UPDATE SET is_active = TRUE, is_deleted = FALSE`,
+      [contractId, orgId]
+    );
+    return contractId;
+  }
+
+  async seedDrugAndStock(params: {
+    org_id: string;
+    branch_id: string;
+    drug_id: string;
+    name: string;
+    unit_price: number;
+    quantity: number;
+    batch_number?: string;
+  }) {
+    const crypto = await import('crypto');
+    const batchId = crypto.randomUUID();
+    const batchNumber = params.batch_number || `BATCH-${Date.now().toString().slice(-4)}`;
+
+    // 1. Insert drug in PG
+    await this.query(
+      `INSERT INTO drugs (
+        id, organization_id, name, drug_type, unit_price, tax_rate, reorder_level, reorder_quantity,
+        unit_of_measure, version_vector, requires_prescription,
+        is_active, is_deleted, created_at, updated_at, sync_version, sync_status
+      ) VALUES ($1, $2, $3, 'otc', $4, 0.0, 0, 0, 'unit', '{}', FALSE, TRUE, FALSE, NOW(), NOW(), 1, 'synced')
+      ON CONFLICT (id) DO UPDATE SET unit_price = $4, is_active = TRUE, is_deleted = FALSE`,
+      [params.drug_id, params.org_id, params.name, params.unit_price]
+    );
+
+    // 2. Insert branch_inventory in PG
+    await this.query(
+      `INSERT INTO branch_inventory (
+        id, branch_id, drug_id, quantity, reserved_quantity, selling_price, version_id, created_at, updated_at, sync_version, sync_status
+      ) VALUES (gen_random_uuid(), $1, $2, $3, 0, $4, 1, NOW(), NOW(), 1, 'synced')
+      ON CONFLICT (id) DO NOTHING`,
+      [params.branch_id, params.drug_id, params.quantity, params.unit_price]
+    );
+
+    // 3. Insert drug_batch in PG
+    await this.query(
+      `INSERT INTO drug_batches (
+        id, branch_id, drug_id, batch_number, quantity, remaining_quantity,
+        expiry_date, selling_price, cost_price, version_id, created_at, updated_at, sync_version, sync_status
+      ) VALUES ($1, $2, $3, $4, $5, $5, '2028-12-31', $6, 5.00, 1, NOW(), NOW(), 1, 'synced')
+      ON CONFLICT (id) DO NOTHING`,
+      [batchId, params.branch_id, params.drug_id, batchNumber, params.quantity, params.unit_price]
+    );
+
+    return { drug_id: params.drug_id, batch_id: batchId, batch_number: batchNumber };
+  }
+
   async getCustomers(orgId: string) {
     return this.query(
       'SELECT id, name, phone, email, customer_type FROM customers WHERE organization_id = $1 ORDER BY created_at DESC',

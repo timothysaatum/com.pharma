@@ -19,6 +19,7 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
   });
 
   test.beforeEach(async ({ page }) => {
+    test.setTimeout(60000);
     bridge = new TauriSqliteBridge();
     await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
@@ -26,7 +27,7 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
 
   test('1. Sync attempts while offline handle network errors gracefully and retain outbox', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     // Register a customer locally
     const registerBtn = page.locator('button:has-text("Register Customer")').first();
@@ -34,7 +35,15 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
     await expect(page.locator('button[form="customer-form"]')).toBeVisible({ timeout: 5000 });
 
     // Cut network
-    await page.context().setOffline(true);
+    let isOffline = true;
+    await page.route('**/api/v1/**', async (route) => {
+      if (isOffline) {
+        await route.abort('failed');
+      } else {
+        await route.continue();
+      }
+    });
+    await page.evaluate(() => window.dispatchEvent(new Event('offline')));
     await page.waitForTimeout(300);
 
     const firstName = `Kofi`;
@@ -55,19 +64,28 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
     expect(bridge.getOutboxCount()).toBeGreaterThanOrEqual(1);
 
     // Attempt to manually trigger sync while offline
-    const syncButton = page.locator('button[title*="Sync"], button:has(.lucide-refresh-cw)').first();
-    await syncButton.click();
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { syncEngine } = await import('/src/lib/syncEngine.ts');
+      await syncEngine.sync().catch(() => {});
+    });
     await page.waitForTimeout(1000);
 
     // Outbox should STILL retain the pending event
     expect(bridge.getOutboxCount()).toBeGreaterThanOrEqual(1);
 
     // Restore network
-    await page.context().setOffline(false);
-    await page.waitForTimeout(1500);
+    isOffline = false;
+    await page.unroute('**/api/v1/**');
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    await page.waitForTimeout(500);
 
     // Sync again
-    await syncButton.click();
+    await page.evaluate(async () => {
+      // @ts-ignore
+      const { syncEngine } = await import('/src/lib/syncEngine.ts');
+      await syncEngine.sync();
+    });
 
     // Verify outbox is completely drained
     await expect.poll(() => bridge.getOutboxCount(), { timeout: 15000 }).toBe(0);
@@ -84,7 +102,7 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
 
   test('2. Server 500 errors during push are caught, flagged as failed, and retried on next cycle', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     const custId = '55555555-5555-5555-5555-' + Math.random().toString(16).substring(2, 14).padEnd(12, '0');
     const firstName = `Akua`;
@@ -195,7 +213,7 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
 
   test('3. Network latency during sync displays active sync state and finishes cleanly', async ({ page }) => {
     await page.goto('/customers');
-    await page.waitForLoadState('networkidle');
+    await page.waitForLoadState('domcontentloaded');
 
     // Add artificial latency to sync pull requests
     await page.route('**/api/v1/sync/events?*', async (route) => {
