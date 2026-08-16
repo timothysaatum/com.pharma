@@ -277,6 +277,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                         </span>
                     )}
                     <button
+                        type="button"
                         onClick={() => setCollapsed((c) => !c)}
                         className={`w-7 h-7 flex items-center justify-center rounded-lg text-white/50 hover:text-white hover:bg-white/10 transition-colors flex-shrink-0 ${collapsed ? "mx-auto" : ""
                             }`}
@@ -289,6 +290,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                 {!collapsed && (activeBranchId || branches.length > 0) && (
                     <div className="relative mx-3 mt-3" ref={dropdownRef}>
                         <button
+                            type="button"
                             onClick={() => branches.length > 0 && setIsBranchSwitcherOpen(!isBranchSwitcherOpen)}
                             className={`w-full px-2.5 py-2 rounded-lg bg-white/5 border border-white/10 flex items-center gap-2 transition-colors ${branches.length > 0 ? "hover:bg-white/10 cursor-pointer text-left" : "cursor-default"
                                 }`}
@@ -312,6 +314,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                                 <div className="max-h-64 overflow-y-auto">
                                     {branches.map((b) => (
                                         <button
+                                            type="button"
                                             key={b.id}
                                             onClick={() => {
                                                 setActiveBranch(b.id);
@@ -395,6 +398,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                                 </p>
                             </div>
                             <button
+                                type="button"
                                 onClick={handleLogout}
                                 disabled={loggingOut}
                                 title="Log out"
@@ -405,6 +409,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                         </div>
                     ) : (
                         <button
+                            type="button"
                             onClick={handleLogout}
                             disabled={loggingOut}
                             title="Log out"
@@ -430,6 +435,7 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                             <strong>Security recommendation:</strong> Enable multi-factor authentication (MFA) for maximum account protection.
                         </span>
                         <button
+                            type="button"
                             onClick={() => navigate("/settings/security")}
                             className="font-semibold text-amber-700 hover:text-amber-900 underline underline-offset-2 whitespace-nowrap"
                         >

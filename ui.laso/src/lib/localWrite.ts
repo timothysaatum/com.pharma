@@ -245,7 +245,7 @@ export async function buildSaleCreatedEnvelope(
             const discountAmt = Number(item.discount_amount ?? 0);
             const subtotal = Number(item.subtotal ?? (unitPrice * qty));
             return {
-                item_id: (item as Record<string, unknown>).id ?? crypto.randomUUID(),
+                item_id: (item as unknown as Record<string, unknown>).id ?? crypto.randomUUID(),
                 drug_id: item.drug_id,
                 batch_id: item.batch_id ?? null,
                 drug_name: item.drug_name ?? "Unknown Drug",

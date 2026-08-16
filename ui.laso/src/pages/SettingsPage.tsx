@@ -96,6 +96,7 @@ export default function SettingsPage() {
                         const isActive = tab.id === activeTab;
                         return (
                             <button
+                                type="button"
                                 key={tab.id}
                                 onClick={() => selectTab(tab.id)}
                                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors ${isActive

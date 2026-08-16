@@ -70,6 +70,7 @@ export default function AdminPage() {
       <div className="flex gap-2 border-b border-gray-200 px-4 bg-white flex-shrink-0">
         {ADMIN_TABS.map(tab => (
           <button
+            type="button"
             key={tab}
             onClick={() => selectTab(tab)}
             className={`py-2 px-4 font-medium transition-colors whitespace-nowrap ${

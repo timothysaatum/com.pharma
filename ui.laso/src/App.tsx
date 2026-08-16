@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
-import { lazy, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
@@ -8,20 +8,20 @@ import { AppShell } from "@/components/layout/AppShell";
 import { UpdateManager } from "@/components/layout/UpdateManager";
 import { getHomePath } from "@/lib/routes";
 
-const OnboardingPage = lazy(() => import("@/pages/OnboardingPage"));
-const LoginPage = lazy(() => import("@/pages/LoginPage"));
-const SetupRequiredPage = lazy(() => import("@/pages/SetupRequiredPage"));
-const POSPage = lazy(() => import("@/pages/POSPage"));
-const CustomersPage = lazy(() => import("@/pages/CustomersPage"));
-const SalesHistoryPage = lazy(() => import("@/pages/SalesHistoryPage"));
-const PrescriptionsPage = lazy(() => import("@/pages/PrescriptionsPage"));
-const SettingsPage = lazy(() => import("@/pages/SettingsPage"));
-const UsersPage = lazy(() => import("@/pages/UsersPage"));
-const ReportsPage = lazy(() => import("@/pages/ReportsPage"));
-const AdminPage = lazy(() => import("@/pages/AdminPage"));
-const AuditLogPage = lazy(() => import("@/pages/AuditLogPage"));
-const ChangePasswordPage = lazy(() => import("@/pages/ChangePasswordPage"));
-const ConflictsPage = lazy(() => import("@/pages/ConflictsPage"));
+import OnboardingPage from "@/pages/OnboardingPage";
+import LoginPage from "@/pages/LoginPage";
+import SetupRequiredPage from "@/pages/SetupRequiredPage";
+import POSPage from "@/pages/POSPage";
+import CustomersPage from "@/pages/CustomersPage";
+import SalesHistoryPage from "@/pages/SalesHistoryPage";
+import PrescriptionsPage from "@/pages/PrescriptionsPage";
+import SettingsPage from "@/pages/SettingsPage";
+import UsersPage from "@/pages/UsersPage";
+import ReportsPage from "@/pages/ReportsPage";
+import AdminPage from "@/pages/AdminPage";
+import AuditLogPage from "@/pages/AuditLogPage";
+import ChangePasswordPage from "@/pages/ChangePasswordPage";
+import ConflictsPage from "@/pages/ConflictsPage";
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -355,19 +355,18 @@ function AppRoutes() {
             }
           />
           <Route path="/conflicts" element={<ConflictsPage />} />
+          <Route path="/drugs" element={<Navigate to="/admin/drugs" replace />} />
+          <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
+          <Route path="/purchases" element={<Navigate to="/admin/purchases" replace />} />
+          <Route path="/contracts" element={<Navigate to="/admin/contracts" replace />} />
+          <Route path="/admin/prescriptions" element={<Navigate to="/prescriptions" replace />} />
+          <Route path="/organization-stats" element={<Navigate to="/settings/organization" replace />} />
+          <Route path="/branches" element={<Navigate to="/settings/branches" replace />} />
+          <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />
+          <Route path="/dashboard" element={<Navigate to={getHomePath(user)} replace />} />
         </Route>
 
-        <Route path="/drugs" element={<Navigate to="/admin/drugs" replace />} />
-        <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
-        <Route path="/purchases" element={<Navigate to="/admin/purchases" replace />} />
-        <Route path="/contracts" element={<Navigate to="/admin/contracts" replace />} />
-        <Route path="/admin/prescriptions" element={<Navigate to="/prescriptions" replace />} />
-        <Route path="/organization-stats" element={<Navigate to="/settings/organization" replace />} />
-        <Route path="/branches" element={<Navigate to="/settings/branches" replace />} />
-        <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />
-
-        {/* ── Redirects ── */}
-        <Route path="/dashboard" element={<Navigate to={getHomePath(user)} replace />} />
+        {/* ── Root & Catch-all redirects ── */}
         <Route
           path="/"
           element={<Navigate to={isReady ? getHomePath(user) : "/login"} replace />}
