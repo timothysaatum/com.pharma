@@ -12,11 +12,13 @@ from app.core.security import hash_password
 from app.models.pharmacy.pharmacy_model import Organization, Branch
 from app.models.user.user_model import User, Role, UserRole
 from app.models.inventory.inventory_model import Drug, DrugCategory
+from app.core.config import get_settings
 from app.models.inventory.branch_inventory import BranchInventory, DrugBatch
 from app.models.sales.sales_model import Supplier
 from app.models.customer.customer_model import Customer
 
-DATABASE_URL = "postgresql+asyncpg://postgres:postgres@localhost:5432/laso_db"
+settings = get_settings()
+DATABASE_URL = settings.DATABASE_URL
 
 async def seed():
     engine = create_async_engine(DATABASE_URL)
