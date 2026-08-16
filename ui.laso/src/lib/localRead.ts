@@ -1176,15 +1176,17 @@ export const localRead = {
     const db = await getDb();
     
     // 1. Get the unleased pool from branch_inventory
-    const rows = await db.select<Array<{ quantity: number }>>(
-      `SELECT quantity FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
+    const rows = await db.select<Array<{ quantity?: number; sellable_quantity?: number }>>(
+      `SELECT * FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
       [branchId, drugId]
     );
     
     let unleasedPool = 0;
     let notStocked = true;
     if (rows.length > 0) {
-      const q = Number(rows[0].quantity);
+      const row = rows[0];
+      const rawVal = row.sellable_quantity !== undefined ? row.sellable_quantity : row.quantity;
+      const q = Number(rawVal);
       unleasedPool = Math.max(0, !isNaN(q) ? q : 0);
       notStocked = false;
     }
