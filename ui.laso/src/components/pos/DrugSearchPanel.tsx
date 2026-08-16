@@ -17,7 +17,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, Plus, X, ShieldAlert, Package } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
 import { localRead } from "@/lib/localRead";
-import { isBackendReachable, isOfflineError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
@@ -150,7 +150,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
             const pageSize = 30;
             const signal = append ? undefined : abortRef.current?.signal;
 
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.getBranchInventory(
                     activeBranchId,
                     {

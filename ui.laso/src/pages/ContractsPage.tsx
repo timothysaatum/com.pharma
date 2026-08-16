@@ -21,13 +21,13 @@ import {
 } from "lucide-react";
 import { contractsApi, type ContractResponse, type ContractListParams } from "@/api/contracts";
 import { localRead } from "@/lib/localRead";
-import { isOfflineError } from "@/api/client";
+import { isOfflineError, isBackendKnownUnreachable, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
-import { parseApiError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { ContractForm } from "@/components/contracts/ContractForm";
 import { SuspendContractModal } from "@/components/contracts/SuspendContractModal";
 import { DuplicateContractModal } from "@/components/contracts/DuplicateContractModal";
+import { withTimeout } from "@/lib/withTimeout";
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -111,8 +111,59 @@ export default function ContractsPage() {
         };
 
         try {
-            const res = await contractsApi.list(params, ctrl.signal);
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
+                const result = await localRead.searchContracts(
+                    {
+                        search: debouncedSearch || undefined,
+                        contract_type: filterType || undefined,
+                        status: filterStatus || undefined,
+                        organization_id: user?.organization_id,
+                    },
+                    page,
+                    20
+                );
+                if (!ctrl.signal.aborted) {
+                    setContracts(result.items);
+                    setTotal(result.total);
+                    setTotalPages(result.total_pages);
+                    setStatsBar({
+                        active: result.items.filter((c) => c.status === "active").length,
+                        suspended: result.items.filter((c) => c.status === "suspended").length,
+                        expired: result.items.filter((c) => c.status === "expired").length,
+                    });
+                }
+                return;
+            }
+
+            const timeoutResult = await withTimeout(
+                () => contractsApi.list(params, ctrl.signal),
+                async () => {
+                    const result = await localRead.searchContracts(
+                        {
+                            search: debouncedSearch || undefined,
+                            contract_type: filterType || undefined,
+                            status: filterStatus || undefined,
+                            organization_id: user?.organization_id,
+                        },
+                        page,
+                        20
+                    );
+                    return {
+                        contracts: result.items,
+                        total: result.total,
+                        page: result.page,
+                        page_size: result.page_size,
+                        total_pages: result.total_pages,
+                        total_active_contracts: result.items.filter((c) => c.status === "active").length,
+                        total_suspended_contracts: result.items.filter((c) => c.status === "suspended").length,
+                        total_expired_contracts: result.items.filter((c) => c.status === "expired").length,
+                    };
+                },
+                { timeoutMs: 12000, dataKey: `contracts:${user?.organization_id}:${page}:${debouncedSearch}:${filterType}` }
+            );
+
             if (!ctrl.signal.aborted) {
+                const res = timeoutResult.data;
                 setContracts(res.contracts);
                 setTotal(res.total);
                 setTotalPages(res.total_pages);
@@ -124,33 +175,6 @@ export default function ContractsPage() {
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
-            if (!ctrl.signal.aborted && isOfflineError(err)) {
-                try {
-                    const result = await localRead.searchContracts(
-                        {
-                            search: debouncedSearch || undefined,
-                            contract_type: filterType || undefined,
-                            status: filterStatus || undefined,
-                            organization_id: user?.organization_id,
-                        },
-                        page,
-                        20
-                    );
-                    if (!ctrl.signal.aborted) {
-                        setContracts(result.items);
-                        setTotal(result.total);
-                        setTotalPages(result.total_pages);
-                        setStatsBar({
-                            active: result.items.filter((c) => c.status === "active").length,
-                            suspended: result.items.filter((c) => c.status === "suspended").length,
-                            expired: result.items.filter((c) => c.status === "expired").length,
-                        });
-                    }
-                } catch (localErr) {
-                    if (!ctrl.signal.aborted) setError(parseApiError(localErr));
-                }
-                return;
-            }
             if (!ctrl.signal.aborted) setError(parseApiError(err));
         } finally {
             // Clear the loader unless a NEWER fetch already owns it. Keying off

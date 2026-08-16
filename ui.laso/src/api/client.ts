@@ -30,15 +30,23 @@ function emitBackendConnectivityChange(): void {
 }
 
 export function isBackendReachable(): boolean {
-    if (!backendReachable && navigator.onLine && backendOfflineSince !== null) {
-        return Date.now() - backendOfflineSince > 15_000;
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return false;
     }
     return backendReachable;
 }
 
-/** True when the backend has been proven unreachable (no optimistic timeout). */
+/** True when the backend has been proven unreachable or client is offline. */
 export function isBackendKnownUnreachable(): boolean {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+        return true;
+    }
     return !backendReachable;
+}
+
+/** Convenient unified helper for offline / unreachable state. */
+export function isOfflineOrUnreachable(): boolean {
+    return isBackendKnownUnreachable();
 }
 
 export function markBackendOffline(): void {

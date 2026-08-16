@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { auditApi, type AuditLogEntry } from "@/api/audit";
-import { isOfflineError, isBackendReachable, parseApiError } from "@/api/client";
+import { isOfflineError, isBackendKnownUnreachable, parseApiError } from "@/api/client";
 import { getDb } from "@/lib/localDb";
 import { cn } from "@/lib/utils";
 
@@ -330,7 +330,7 @@ export default function AuditLogPage() {
         setLoading(true);
         setError(null);
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 setIsOffline(true);
                 const db = await getDb();
                 const rawRows = await db.select<Record<string, unknown>[]>(

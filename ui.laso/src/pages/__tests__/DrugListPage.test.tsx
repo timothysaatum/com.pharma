@@ -40,6 +40,8 @@ vi.mock("@/hooks/useCategories", () => ({
 
 vi.mock("@/api/client", () => ({
   isBackendReachable: () => true,
+  isBackendKnownUnreachable: () => false,
+  isOfflineOrUnreachable: () => false,
   parseApiError: () => "Request failed",
 }));
 

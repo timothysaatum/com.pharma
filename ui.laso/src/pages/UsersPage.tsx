@@ -17,7 +17,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { usersApi } from "@/api/users";
 import { branchApi } from "@/api/branches";
 import { rolesApi } from "@/api/roles";
-import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
 import type { UserResponse, BranchListItem, Role } from "@/types";
@@ -798,6 +798,16 @@ export default function UsersPage() {
             return;
         }
 
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
+            offlineCache.getBranches().then((cached) => {
+                if (cached) setBranches(cached);
+            });
+            if (currentUser?.roles) {
+                setRoles(currentUser.roles);
+            }
+            return;
+        }
+
         Promise.all([
             branchApi.listMine(),
             rolesApi.getRoles()
@@ -810,7 +820,7 @@ export default function UsersPage() {
                 setBranches((await offlineCache.getBranches()) ?? []);
             }
         });
-    }, []);
+    }, [currentUser]);
 
     // ── Fetch users ─────────────────────────────────────────
     const fetchUsers = useCallback(async () => {
@@ -820,7 +830,7 @@ export default function UsersPage() {
 
         setIsLoading(true);
         try {
-            if (!isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const cached = await offlineCache.getUsers();
                 const source = cached?.items ?? (currentUser ? [currentUser] : []);
                 const filtered = source.filter((item) => {

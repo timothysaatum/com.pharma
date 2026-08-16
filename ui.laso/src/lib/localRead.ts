@@ -925,7 +925,7 @@ export const localRead = {
       )`);
     }
     if (params.low_stock_only) {
-      qualifiers.push(`(bi.sellable_quantity - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)`);
+      qualifiers.push(`(bi.quantity - bi.reserved_quantity) <= COALESCE(d.reorder_level, 0)`);
     }
     if (params.drug_type) {
       values.push(params.drug_type);
@@ -936,7 +936,7 @@ export const localRead = {
       }
     }
     if (!params.include_zero_stock) {
-      qualifiers.push(`bi.sellable_quantity > 0`);
+      qualifiers.push(`bi.quantity > 0`);
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
@@ -955,7 +955,7 @@ export const localRead = {
          d.organization_id as organization_id, d.generic_name as drug_generic_name,
          d.strength as drug_strength, d.tax_rate as drug_tax_rate,
          d.unit_price as drug_unit_price, d.reorder_level as drug_reorder_level,
-         bi.sellable_quantity AS valid_batch_quantity
+         bi.quantity AS valid_batch_quantity
        FROM branch_inventory bi
        LEFT JOIN drugs d ON d.id = bi.drug_id
        ${where}
@@ -1176,17 +1176,16 @@ export const localRead = {
     const db = await getDb();
     
     // 1. Get the unleased pool from branch_inventory
-    const rows = await db.select<Array<{ quantity: number; sellable_quantity: number }>>(
-      `SELECT quantity, sellable_quantity FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
+    const rows = await db.select<Array<{ quantity: number }>>(
+      `SELECT quantity FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1`,
       [branchId, drugId]
     );
     
     let unleasedPool = 0;
     let notStocked = true;
     if (rows.length > 0) {
-      const sq = Number(rows[0].sellable_quantity);
       const q = Number(rows[0].quantity);
-      unleasedPool = Math.max(0, !isNaN(sq) && sq > 0 ? sq : (!isNaN(q) ? q : 0));
+      unleasedPool = Math.max(0, !isNaN(q) ? q : 0);
       notStocked = false;
     }
     
@@ -1226,7 +1225,7 @@ export const localRead = {
     const db = await getDb();
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT bi.branch_id, bi.drug_id, 
-         COALESCE(bi.sellable_quantity, 0) AS quantity,
+         COALESCE(bi.quantity, 0) AS quantity,
          coalesce(d.name, '') as drug_name, d.sku,
          coalesce(d.cost_price, 0) as cost_price, coalesce(bi.selling_price, d.unit_price, 0) as branch_selling_price,
          coalesce(d.unit_price, 0) as selling_price
@@ -1344,6 +1343,7 @@ async searchPrescriptions(
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
+    console.log(`[LocalRead] searchPrescriptions: where=${where}, values=`, values);
     const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM prescriptions p ${where}`, values);
     const total = totalRows[0]?.total ?? 0;
 
@@ -1358,6 +1358,7 @@ async searchPrescriptions(
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, page_size, offset]
     );
+    console.log(`[LocalRead] searchPrescriptions: found ${total} total, returning ${rows.length} rows`);
 
     return buildPagination(rows.map(toPrescription), page, page_size, total);
   },

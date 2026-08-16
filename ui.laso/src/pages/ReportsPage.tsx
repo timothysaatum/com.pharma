@@ -11,7 +11,7 @@ import { format, subDays } from 'date-fns';
 import { reportsApi } from '../api/reports';
 import { branchApi } from '@/api/branches';
 import { contractsApi } from '@/api/contracts';
-import { isOfflineError } from '@/api/client';
+import { isOfflineError, isBackendKnownUnreachable } from '@/api/client';
 import { localRead } from '@/lib/localRead';
 import { offlineCache } from '@/lib/storage';
 import { DataFreshnessIndicator } from '@/components/DataFreshnessIndicator';
@@ -77,11 +77,94 @@ export default function ReportsPage() {
   const [branches, setBranches] = useState<{ id: string; name: string }[]>([]);
   const [contracts, setContracts] = useState<{ id: string; name: string; code: string }[]>([]);
 
+  // Helper for aggregating local sales
+  const aggregateLocalSales = async () => {
+    setDailySalesFromCache(true);
+    // fetch all sales from local DB within date range
+    const localPageSize = 1000;
+    const local = await localRead.searchSales({
+      start_date: filters.startDate,
+      end_date: filters.endDate,
+      branch_id: filters.branchId,
+    }, 1, localPageSize);
+
+    // Enrich local sales with items count and branch name
+    const rows: DailySalesRow[] = [];
+    for (const s of local.items) {
+      try {
+        const details = await localRead.getSaleById(s.id);
+        const itemsCount =
+          details?.items_count ??
+          details?.items?.reduce((sum, item) => sum + (item?.quantity ?? 0), 0) ??
+          0;
+        let branchName: string | null = null;
+        if (s.branch_id) {
+          branchName = await offlineCache.getBranchName(s.branch_id);
+        }
+
+        rows.push({
+          sale_date: (s.created_at || '').slice(0, 10),
+          branch_id: s.branch_id ?? null,
+          branch_name: branchName,
+          price_contract_id: s.price_contract_id ?? null,
+          contract_name: s.contract_name ?? null,
+          cashier_id: s.cashier_id ?? null,
+          cashier_name: null,
+          transaction_count: 1,
+          gross_revenue: s.total_amount ?? 0,
+          total_discount: s.discount_amount ?? 0,
+          total_tax: s.tax_amount ?? 0,
+          net_revenue: s.total_amount ?? 0,
+          total_items: itemsCount,
+          refund_count: 0,
+        });
+      } catch (e) {
+        // skip problematic rows
+      }
+    }
+
+    // aggregate by date
+    const grouped: Record<string, DailySalesRow> = {};
+    for (const r of rows) {
+      const key = r.sale_date;
+      if (!grouped[key]) {
+        grouped[key] = { ...r };
+      } else {
+        grouped[key].transaction_count += r.transaction_count;
+        grouped[key].gross_revenue += r.gross_revenue;
+        grouped[key].total_discount += r.total_discount;
+        grouped[key].total_tax += r.total_tax;
+        grouped[key].net_revenue += r.net_revenue;
+        grouped[key].total_items += r.total_items;
+        grouped[key].refund_count += r.refund_count;
+      }
+    }
+
+    const allRows = Object.keys(grouped).sort().reverse().map((k) => grouped[k]);
+    const page = filters.page || 1;
+    const pageSize = filters.page_size || 50;
+    const start = (page - 1) * pageSize;
+    const paginatedRows = allRows.slice(start, start + pageSize);
+
+    return {
+      items: paginatedRows,
+      total: allRows.length,
+      page,
+      page_size: pageSize,
+      total_pages: Math.ceil(allRows.length / pageSize),
+      has_next: start + pageSize < allRows.length,
+      has_prev: page > 1,
+    };
+  };
+
   // Daily Sales Query
   const { data: dailySalesPaginated, isFetching: dailySalesLoading, refetch: refetchDailySales } = useQuery<PaginatedResponse<DailySalesRow>>({
     queryKey: ['reports', 'daily-sales', filters],
     queryFn: async () => {
       setDailySalesFromCache(false);
+      if (!navigator.onLine || isBackendKnownUnreachable()) {
+        return await aggregateLocalSales();
+      }
       try {
         return await reportsApi.getDailySalesSummary({
           startDate: filters.startDate,
@@ -94,83 +177,8 @@ export default function ReportsPage() {
         });
       } catch (err) {
         // If offline, fall back to local DB aggregation
-        if (isOfflineError(err)) {
-          setDailySalesFromCache(true);
-          // fetch all sales from local DB within date range
-          const localPageSize = 1000;
-          const local = await localRead.searchSales({
-            start_date: filters.startDate,
-            end_date: filters.endDate,
-            branch_id: filters.branchId,
-          }, 1, localPageSize);
-
-          // Enrich local sales with items count and branch name
-          const rows: DailySalesRow[] = [];
-          for (const s of local.items) {
-            try {
-              const details = await localRead.getSaleById(s.id);
-              const itemsCount =
-                details?.items_count ??
-                details?.items?.reduce((sum, item) => sum + (item?.quantity ?? 0), 0) ??
-                0;
-              let branchName: string | null = null;
-              if (s.branch_id) {
-                branchName = await offlineCache.getBranchName(s.branch_id);
-              }
-
-              rows.push({
-                sale_date: (s.created_at || '').slice(0, 10),
-                branch_id: s.branch_id ?? null,
-                branch_name: branchName,
-                price_contract_id: s.price_contract_id ?? null,
-                contract_name: s.contract_name ?? null,
-                cashier_id: s.cashier_id ?? null,
-                cashier_name: null,
-                transaction_count: 1,
-                gross_revenue: s.total_amount ?? 0,
-                total_discount: s.discount_amount ?? 0,
-                total_tax: s.tax_amount ?? 0,
-                net_revenue: s.total_amount ?? 0,
-                total_items: itemsCount,
-                refund_count: 0,
-              });
-            } catch (e) {
-              // skip problematic rows
-            }
-          }
-
-          // aggregate by date
-          const grouped: Record<string, DailySalesRow> = {};
-          for (const r of rows) {
-            const key = r.sale_date;
-            if (!grouped[key]) {
-              grouped[key] = { ...r };
-            } else {
-              grouped[key].transaction_count += r.transaction_count;
-              grouped[key].gross_revenue += r.gross_revenue;
-              grouped[key].total_discount += r.total_discount;
-              grouped[key].total_tax += r.total_tax;
-              grouped[key].net_revenue += r.net_revenue;
-              grouped[key].total_items += r.total_items;
-              grouped[key].refund_count += r.refund_count;
-            }
-          }
-
-          const allRows = Object.keys(grouped).sort().reverse().map((k) => grouped[k]);
-          const page = filters.page || 1;
-          const pageSize = filters.page_size || 50;
-          const start = (page - 1) * pageSize;
-          const paginatedRows = allRows.slice(start, start + pageSize);
-
-          return {
-            items: paginatedRows,
-            total: allRows.length,
-            page,
-            page_size: pageSize,
-            total_pages: Math.ceil(allRows.length / pageSize),
-            has_next: start + pageSize < allRows.length,
-            has_prev: page > 1,
-          };
+        if (isOfflineError(err) || isBackendKnownUnreachable()) {
+          return await aggregateLocalSales();
         }
 
         // rethrow other errors
@@ -232,6 +240,17 @@ export default function ReportsPage() {
     let cancelled = false;
     async function load() {
       try {
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
+          const [cachedBranches, localContracts] = await Promise.all([
+            offlineCache.getBranches({ allowExpired: true }).catch(() => []),
+            localRead.searchContracts({}, 1, 100).catch(() => ({ items: [] })),
+          ]);
+          if (!cancelled) {
+            setBranches((cachedBranches ?? []).map((b: any) => ({ id: b.id, name: b.name })));
+            setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.name, code: c.code })));
+          }
+          return;
+        }
         const [branchRes, contractRes] = await Promise.all([
           branchApi.list({ page: 1, page_size: 100 }),
           contractsApi.list({ page: 1, page_size: 100 }),
@@ -241,7 +260,14 @@ export default function ReportsPage() {
           setContracts((contractRes as any).contracts?.map((c: any) => ({ id: c.id, name: c.contract_name, code: c.contract_code })) ?? []);
         }
       } catch {
-        // non-critical — filters will just show "All"
+        const [cachedBranches, localContracts] = await Promise.all([
+          offlineCache.getBranches({ allowExpired: true }).catch(() => []),
+          localRead.searchContracts({}, 1, 100).catch(() => ({ items: [] })),
+        ]);
+        if (!cancelled) {
+          setBranches((cachedBranches ?? []).map((b: any) => ({ id: b.id, name: b.name })));
+          setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.name, code: c.code })));
+        }
       } finally {
         // Filter metadata is optional; reports remain usable if it cannot load.
       }

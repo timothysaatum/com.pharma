@@ -107,6 +107,15 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
     case "purchase_order_created":
     case "purchase_order_updated":
       await _purchaseOrderUpserted(db, envelope);
+    // ── Price Contract ──────────────────────────────────────────────────
+    case "price_contract_created":
+      await _priceContractCreated(db, envelope);
+      break;
+    case "price_contract_updated":
+      await _priceContractUpdated(db, envelope);
+      break;
+    case "price_contract_deleted":
+      await _priceContractDeleted(db, envelope);
       break;
 
     default:
@@ -182,10 +191,11 @@ async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {
     }
   }
   if (fields.length === 0) return;
+  const now = e.authored_at ?? new Date().toISOString();
   const setClauses = fields.map((_, i) => `${fields[i][0]} = $${i + 1}`).join(", ");
   await db.execute(
     `UPDATE customers SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
-    [...fields.map((f) => f[1]), e.authored_at, String(e.aggregate_id)]
+    [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
   // Persist the authoritative vector so future offline edits read the correct base.
   if (Object.keys(incomingVector).length > 0) {
@@ -194,9 +204,10 @@ async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {
 }
 
 async function _customerDeleted(db: Db, e: EventEnvelope): Promise<void> {
+  const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
     "UPDATE customers SET is_deleted = 1, is_active = 0, updated_at = $1 WHERE id = $2",
-    [e.authored_at, String(e.aggregate_id)]
+    [now, String(e.aggregate_id)]
   );
 }
 
@@ -217,7 +228,7 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
 
   // Write the sale row.
   await db.execute(
-    `INSERT INTO sales
+    `INSERT OR IGNORE INTO sales
        (id, organization_id, branch_id, sale_number, customer_id, customer_name,
         subtotal, discount_amount, tax_amount, total_amount,
         price_contract_id, contract_name, contract_discount_percentage,
@@ -300,9 +311,10 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
 
 async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
     `UPDATE sales SET status = 'voided', updated_at = $1 WHERE id = $2`,
-    [e.authored_at, String(e.aggregate_id)]
+    [now, String(e.aggregate_id)]
   );
   // Restore stock.
   const batchChanges = (p.batch_changes ?? []) as Array<Record<string, unknown>>;
@@ -332,27 +344,32 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
   await db.execute(
     `INSERT OR IGNORE INTO prescriptions
        (id, organization_id, branch_id, customer_id,
-        prescription_number, prescriber_name, prescriber_license,
-        diagnosis, notes, status, refills_remaining, refills_used,
-        items_json,
+        prescription_number, prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
+        issue_date, expiry_date, diagnosis, notes, medications,
+        refills_allowed, refills_remaining, status,
         sync_status, sync_version, synced_at, updated_at, created_at)
      VALUES
-       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,
-        'synced',1,NULL,$14,$14)`,
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+        'synced',1,NULL,$18,$19)`,
     [
       String(e.aggregate_id),
       String(p.organization_id ?? e.org_id),
       String(p.branch_id ?? e.branch_id),
-      p.customer_id != null ? String(p.customer_id) : null,
-      p.prescription_number != null ? String(p.prescription_number) : null,
-      p.prescriber_name != null ? String(p.prescriber_name) : null,
-      p.prescriber_license != null ? String(p.prescriber_license) : null,
+      p.customer_id != null ? String(p.customer_id) : "",
+      p.prescription_number != null ? String(p.prescription_number) : `RX-${String(e.aggregate_id).slice(0, 8)}`,
+      p.prescriber_name != null ? String(p.prescriber_name) : "Unknown Prescriber",
+      p.prescriber_license != null ? String(p.prescriber_license) : "",
+      p.prescriber_phone != null ? String(p.prescriber_phone) : null,
+      p.prescriber_address != null ? String(p.prescriber_address) : null,
+      p.issue_date != null ? String(p.issue_date) : now.slice(0, 10),
+      p.expiry_date != null ? String(p.expiry_date) : new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10),
       p.diagnosis != null ? String(p.diagnosis) : null,
       p.notes != null ? String(p.notes) : null,
-      String(p.status ?? "active"),
-      Number(p.refills_remaining ?? 0),
-      0,
       JSON.stringify(p.medications ?? []),
+      Number(p.refills_allowed ?? 0),
+      Number(p.refills_remaining ?? 0),
+      String(p.status ?? "active"),
+      now,
       now,
     ]
   );
@@ -361,13 +378,13 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
 async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const UPDATABLE = [
-    "prescriber_name", "prescriber_license", "diagnosis", "notes",
-    "status", "refills_remaining",
+    "prescriber_name", "prescriber_license", "prescriber_phone", "prescriber_address",
+    "issue_date", "expiry_date", "diagnosis", "notes",
+    "status", "refills_allowed", "refills_remaining",
   ];
   const fields: [string, unknown][] = [];
-  // medications → items_json column (payload key differs from SQLite column name)
   if ("medications" in p) {
-    fields.push(["items_json", JSON.stringify(p.medications)]);
+    fields.push(["medications", JSON.stringify(p.medications)]);
   }
   for (const key of UPDATABLE) {
     if (key in p) {
@@ -375,28 +392,126 @@ async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
     }
   }
   if (fields.length === 0) return;
+  const now = e.authored_at ?? new Date().toISOString();
   const setClauses = fields.map((f, i) => `${f[0]} = $${i + 1}`).join(", ");
   await db.execute(
     `UPDATE prescriptions SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
-    [...fields.map((f) => f[1]), e.authored_at, String(e.aggregate_id)]
+    [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
 }
 
 async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
+  const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
     "UPDATE prescriptions SET status = 'cancelled', updated_at = $1 WHERE id = $2",
-    [e.authored_at, String(e.aggregate_id)]
+    [now, String(e.aggregate_id)]
   );
 }
 
 async function _prescriptionRefillUsed(db: Db, e: EventEnvelope): Promise<void> {
+  const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
     `UPDATE prescriptions
         SET refills_remaining = MAX(0, refills_remaining - 1),
-            refills_used = refills_used + 1,
             updated_at = $1
       WHERE id = $2`,
-    [e.authored_at, String(e.aggregate_id)]
+    [now, String(e.aggregate_id)]
+  );
+}
+
+// ── Price Contract projectors ──────────────────────────────────────────────
+
+async function _priceContractCreated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = e.authored_at ?? new Date().toISOString();
+  await db.execute(
+    `INSERT OR IGNORE INTO price_contracts (
+      id, organization_id, contract_code, contract_name, contract_type,
+      is_default_contract, discount_type, discount_percentage,
+      applies_to_prescription_only, applies_to_otc, applies_to_all_branches,
+      applicable_branch_ids, effective_from, effective_to,
+      requires_verification, requires_approval, daily_usage_limit,
+      per_customer_usage_limit, insurance_provider_id, requires_preauthorization,
+      minimum_purchase_amount, maximum_purchase_amount, status, is_active,
+      copay_amount, copay_percentage, is_deleted,
+      sync_status, sync_version, synced_at, updated_at, created_at
+    ) VALUES (
+      $1, $2, $3, $4, $5,
+      $6, $7, $8,
+      $9, $10, $11,
+      $12, $13, $14,
+      $15, $16, $17,
+      $18, $19, $20,
+      $21, $22, $23, $24,
+      $25, $26, 0,
+      'synced', 1, NULL, $27, $27
+    )`,
+    [
+      String(e.aggregate_id),
+      String(p.organization_id ?? e.org_id),
+      String(p.contract_code ?? "DEFAULT"),
+      String(p.contract_name ?? "Standard"),
+      String(p.contract_type ?? "individual"),
+      p.is_default_contract ? 1 : 0,
+      String(p.discount_type ?? "percentage"),
+      Number(p.discount_percentage ?? 0),
+      p.applies_to_prescription_only ? 1 : 0,
+      p.applies_to_otc !== false ? 1 : 0,
+      p.applies_to_all_branches !== false ? 1 : 0,
+      JSON.stringify(p.applicable_branch_ids ?? []),
+      String(p.effective_from ?? now),
+      p.effective_to != null ? String(p.effective_to) : null,
+      p.requires_verification ? 1 : 0,
+      p.requires_approval ? 1 : 0,
+      p.daily_usage_limit != null ? Number(p.daily_usage_limit) : null,
+      p.per_customer_usage_limit != null ? Number(p.per_customer_usage_limit) : null,
+      p.insurance_provider_id != null ? String(p.insurance_provider_id) : null,
+      p.requires_preauthorization ? 1 : 0,
+      p.minimum_purchase_amount != null ? Number(p.minimum_purchase_amount) : null,
+      p.maximum_purchase_amount != null ? Number(p.maximum_purchase_amount) : null,
+      String(p.status ?? "active"),
+      p.is_active !== false ? 1 : 0,
+      p.copay_amount != null ? Number(p.copay_amount) : null,
+      p.copay_percentage != null ? Number(p.copay_percentage) : null,
+      now,
+    ]
+  );
+}
+
+async function _priceContractUpdated(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const UPDATABLE = [
+    "contract_code", "contract_name", "contract_type", "discount_type",
+    "discount_percentage", "applies_to_prescription_only", "applies_to_otc",
+    "applies_to_all_branches", "effective_from", "effective_to",
+    "requires_verification", "requires_approval", "daily_usage_limit",
+    "per_customer_usage_limit", "insurance_provider_id", "requires_preauthorization",
+    "minimum_purchase_amount", "maximum_purchase_amount", "status", "is_active",
+    "copay_amount", "copay_percentage",
+  ];
+  const fields: [string, unknown][] = [];
+  if ("applicable_branch_ids" in p) {
+    fields.push(["applicable_branch_ids", JSON.stringify(p.applicable_branch_ids)]);
+  }
+  for (const key of UPDATABLE) {
+    if (key in p) {
+      fields.push([key, p[key]]);
+    }
+  }
+  if (fields.length === 0) return;
+  const now = e.authored_at ?? new Date().toISOString();
+  const setClauses = fields.map((f, i) => `${f[0]} = $${i + 1}`).join(", ");
+  await db.execute(
+    `UPDATE price_contracts SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
+    [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
+  );
+}
+
+async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
+  const now = e.authored_at ?? new Date().toISOString();
+  await db.execute(
+    "UPDATE price_contracts SET is_deleted = 1, is_active = 0, updated_at = $1 WHERE id = $2",
+    [now, String(e.aggregate_id)]
   );
 }
 
@@ -716,33 +831,35 @@ async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
 async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const now = e.authored_at ?? new Date().toISOString();
-  
-  if (e.event_type === "branch_inventory_created") {
+  const branchId = String(p.branch_id ?? e.branch_id);
+  const drugId = String(p.drug_id ?? e.aggregate_id);
+  const qty = p.quantity != null ? Number(p.quantity) : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
+  const sellingPrice = p.selling_price != null ? Number(p.selling_price) : (p.branch_selling_price != null ? Number(p.branch_selling_price) : null);
+  const location = p.location != null ? String(p.location) : (p.shelf_location != null ? String(p.shelf_location) : null);
+
+  const existing = await db.select<{ id: string }[]>(
+    "SELECT id FROM branch_inventory WHERE (id = $1) OR (branch_id = $2 AND drug_id = $3)",
+    [String(e.aggregate_id), branchId, drugId]
+  );
+
+  if (existing.length > 0) {
+    await db.execute(
+      `UPDATE branch_inventory SET
+         quantity = $1,
+         location = COALESCE($2, location),
+         selling_price = COALESCE($3, selling_price),
+         updated_at = $4,
+         sync_status = 'synced'
+       WHERE id = $5`,
+      [qty, location, sellingPrice, now, existing[0].id]
+    );
+  } else {
     await db.execute(
       `INSERT OR IGNORE INTO branch_inventory
          (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
           sync_status, sync_version, synced_at, updated_at, created_at)
-       VALUES ($1,$2,$3,0,0,$4,$5,'synced',1,NULL,$6,$6)`,
-      [
-        String(e.aggregate_id),
-        String(p.branch_id ?? e.branch_id),
-        String(p.drug_id ?? ""),
-        p.shelf_location != null ? String(p.shelf_location) : null,
-        p.branch_selling_price != null ? Number(p.branch_selling_price) : null,
-        now
-      ]
-    );
-  } else if (e.event_type === "branch_inventory_updated") {
-    await db.execute(
-      `UPDATE branch_inventory SET
-         location = $1, selling_price = $2, updated_at = $3, sync_status = 'synced'
-       WHERE id = $4`,
-      [
-        p.shelf_location != null ? String(p.shelf_location) : null,
-        p.branch_selling_price != null ? Number(p.branch_selling_price) : null,
-        now,
-        String(e.aggregate_id)
-      ]
+       VALUES ($1, $2, $3, $4, 0, $5, $6, 'synced', 1, NULL, $7, $7)`,
+      [String(e.aggregate_id), branchId, drugId, qty, location, sellingPrice, now]
     );
   }
 }

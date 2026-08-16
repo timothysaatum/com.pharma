@@ -15,6 +15,7 @@ import { APP_NAME } from "@/lib/appConfig";
 import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { SyncIndicator } from "@/components/layout/SyncIndicator";
 import { usePermissions } from "@/hooks/usePermissions";
+import { isBackendKnownUnreachable } from "@/api/client";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -149,6 +150,10 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                 }
             }
 
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
+                return;
+            }
+
             try {
                 const fresh = canSeeAllBranches
                     ? (await branchApi.list({ is_active: true, page_size: 100 })).items
@@ -201,6 +206,16 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
             const cached = localStorage.getItem(`cache.branch_name.${activeBranchId}`);
             if (cached) setBranchName(cached);
         } catch {}
+
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
+            offlineCache.getBranchName(activeBranchId).then((cachedName) => {
+                if (!cancelled && cachedName) {
+                    setBranchName(cachedName);
+                    try { localStorage.setItem(`cache.branch_name.${activeBranchId}`, cachedName); } catch {}
+                }
+            });
+            return () => { cancelled = true; };
+        }
 
         branchApi
             .getById(activeBranchId)

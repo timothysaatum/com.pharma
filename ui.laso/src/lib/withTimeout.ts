@@ -14,6 +14,7 @@
  */
 
 import { dataFreshnessStore } from "@/stores/dataFreshnessStore";
+import { isBackendKnownUnreachable } from "@/api/client";
 
 export interface TimeoutOptions {
     timeoutMs?: number;
@@ -33,6 +34,26 @@ export async function withTimeout<T>(
     options: TimeoutOptions = {}
 ): Promise<TimeoutResult<T>> {
     const { timeoutMs = 20000, dataKey = "" } = options;
+
+    if (isBackendKnownUnreachable()) {
+        const cachedData = await cacheFn();
+        if (dataKey) {
+            dataFreshnessStore.setState((state) => ({
+                freshData: {
+                    ...state.freshData,
+                    [dataKey]: {
+                        isFromCache: true,
+                        cached_at: new Date().toISOString(),
+                    },
+                },
+            }));
+        }
+        return {
+            data: cachedData,
+            isFromCache: true,
+            cached_at: new Date().toISOString(),
+        };
+    }
 
     let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
 

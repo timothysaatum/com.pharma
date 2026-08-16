@@ -7,7 +7,7 @@ import {
 } from "lucide-react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
-import { isBackendReachable } from "@/api/client";
+import { isBackendKnownUnreachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { canUser } from "@/hooks/usePermissions";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -124,7 +124,7 @@ export default function DrugListPage() {
         setDrugsFromCache(false);
 
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.searchDrugs(
                     {
                         search: debouncedSearch || undefined,

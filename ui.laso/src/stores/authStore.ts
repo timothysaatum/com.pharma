@@ -3,6 +3,7 @@ import type { UserResponse as User } from "@/types";
 import { authStorage } from "@/lib/storage";
 import { authApi } from "@/api/auth";
 import { syncEngine } from "@/lib/syncEngine";
+import { isBackendKnownUnreachable } from "@/api/client";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // What post-login destination does this user need?
@@ -125,7 +126,7 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 // change server-side (for example after an RBAC migration).
                 // Refresh it in the background so stale role data cannot keep
                 // the user in the wrong setup flow.
-                if (navigator.onLine) {
+                if (navigator.onLine && !isBackendKnownUnreachable()) {
                     void authApi.me()
                         .then(async (freshUser) => {
                             const cur = get();

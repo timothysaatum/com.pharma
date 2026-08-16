@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { drugApi } from "@/api/drugs";
 import { localRead } from "@/lib/localRead";
-import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { DrugCategory, DrugCategoryTree } from "@/types";
 
@@ -28,7 +28,7 @@ function scopeCategoryCaches(organizationId: string | null): void {
 
 function shouldReadCategoriesFromLocal(): boolean {
     if (typeof navigator === "undefined") return false;
-    return !navigator.onLine || !isBackendReachable();
+    return !navigator.onLine || isBackendKnownUnreachable();
 }
 
 function readLocalCategories(organizationId: string | null): Promise<DrugCategory[]> {

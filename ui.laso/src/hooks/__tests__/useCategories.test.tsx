@@ -54,6 +54,8 @@ async function loadUseCategories(overrides: { backendReachable?: boolean; browse
   }));
   vi.doMock("@/api/client", () => ({
     isBackendReachable: () => backendReachable,
+    isBackendKnownUnreachable: () => !backendReachable,
+    isOfflineOrUnreachable: () => !backendReachable,
     isOfflineError: () => true,
     parseApiError: (err: unknown) => err instanceof Error ? err.message : String(err),
   }));

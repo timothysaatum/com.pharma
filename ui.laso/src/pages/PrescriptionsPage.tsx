@@ -8,7 +8,7 @@ import { drugApi } from "@/api/drugs";
 import { prescriptionsApi } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
-import { isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { Prescription, PrescriptionMedication, PrescriptionStatus, Drug } from "@/types";
 
@@ -157,7 +157,7 @@ export default function PrescriptionsPage() {
     setLoading(true);
     setError(null);
     try {
-      if (!navigator.onLine || !isBackendReachable()) {
+      if (!navigator.onLine || isBackendKnownUnreachable()) {
         const response = await localRead.searchPrescriptions(query);
         setItems(response.items as PrescriptionRow[]);
       } else {
@@ -166,7 +166,7 @@ export default function PrescriptionsPage() {
         setItems(response.items as PrescriptionRow[]);
       }
     } catch (err) {
-      if (isOfflineError(err) || !isBackendReachable()) {
+      if (isOfflineError(err) || isBackendKnownUnreachable()) {
         try {
           const response = await localRead.searchPrescriptions(query);
           setItems(response.items as PrescriptionRow[]);
@@ -191,7 +191,7 @@ export default function PrescriptionsPage() {
     setUpdatingId(rx.id);
     setError(null);
     try {
-      if (!navigator.onLine || !isBackendReachable()) {
+      if (!navigator.onLine || isBackendKnownUnreachable()) {
         const updated = { ...rx, status: nextStatus, updated_at: new Date().toISOString() };
         await writeLocal.prescription(updated, "update");
         setItems((current) => current.map((item) => item.id === rx.id ? updated : item));
@@ -291,7 +291,7 @@ export default function PrescriptionsPage() {
     const timer = setTimeout(async () => {
       setCustomerSearching(true);
       try {
-        if (!navigator.onLine || !isBackendReachable()) {
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
           const result = await localRead.searchCustomers({ search: customerSearch.trim() });
           setCustomerMatches(
             result.customers.map((c) => ({
@@ -363,7 +363,7 @@ export default function PrescriptionsPage() {
       // Execute all searches in parallel
       const searchPromises = activeSearches.map(async ({ key, query }) => {
         try {
-          if (!navigator.onLine || !isBackendReachable()) {
+          if (!navigator.onLine || isBackendKnownUnreachable()) {
             const response = await localRead.searchDrugs({ search: query });
             if (mounted) {
               resultsMap[key] = response.items;

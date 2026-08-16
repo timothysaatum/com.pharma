@@ -143,10 +143,33 @@ vi.mock("@/lib/localWrite", () => ({
 
 vi.mock("@/lib/localDb", () => ({}));
 
+vi.mock("@/lib/storage", () => ({
+    offlineCache: {
+        getBranches: vi.fn().mockResolvedValue([
+            {
+                id: "branch-2",
+                organization_id: "org-abc",
+                name: "Second Branch",
+                code: "SB",
+                is_active: true,
+                manager_id: null,
+                manager_name: null,
+                phone: null,
+                email: null,
+                created_at: "2026-01-01T00:00:00Z",
+            }
+        ]),
+        setBranches: vi.fn().mockResolvedValue(undefined),
+        getBranchName: vi.fn().mockResolvedValue("Main Branch"),
+    },
+}));
+
 const isOfflineErrorMock = vi.fn((_err: unknown) => true);
 
 vi.mock("@/api/client", () => ({
     isBackendReachable: () => true,
+    isBackendKnownUnreachable: () => false,
+    isOfflineOrUnreachable: () => false,
     isOfflineError: (err: unknown) => isOfflineErrorMock(err),
     parseApiError: (err: unknown) => (err instanceof Error ? err.message : String(err)),
 }));

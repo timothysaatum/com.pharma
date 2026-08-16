@@ -27,7 +27,8 @@ export type AggregateType =
   | "drug_category"
   | "drug_batch"
   | "branch_inventory"
-  | "purchase_order";
+  | "purchase_order"
+  | "price_contract";
 
 export type EventStatus =
   | "accepted"

@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { branchApi } from "@/api/branches";
-import { parseApiError, isOfflineError, isBackendReachable } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendKnownUnreachable } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import type { BranchListItem, BranchCreate } from "@/types";
@@ -38,7 +38,7 @@ export function useBranches() {
         setError(null);
         setIsOffline(false);
 
-        if (!isBackendReachable()) {
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
             const cached = await offlineCache.getBranches({ allowExpired: true });
             if (cached) {
                 setBranches(cached);
@@ -78,7 +78,7 @@ export function useBranches() {
     // ── Create ────────────────────────────────────────────────
     const createBranch = useCallback(
         async (data: BranchCreate): Promise<boolean> => {
-            if (!isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 setCreateError("Cannot create a branch while offline. Reconnect and try again.");
                 return false;
             }

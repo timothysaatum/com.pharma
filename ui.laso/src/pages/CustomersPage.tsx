@@ -22,7 +22,7 @@ import {
 } from "lucide-react";
 import { customersApi, type CustomerWithDetails } from "@/api/customers";
 import { localRead } from "@/lib/localRead";
-import { isBackendReachable } from "@/api/client";
+import { isBackendKnownUnreachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -86,7 +86,7 @@ export default function CustomersPage() {
         setCustomersFromCache(false);
 
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.searchCustomers(
                     {
                         search: debouncedSearch || undefined,

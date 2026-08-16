@@ -12,7 +12,8 @@ import { drugApi } from "@/api/drugs";
 import { branchApi } from "@/api/branches";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
-import { isBackendReachable, isOfflineError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineError } from "@/api/client";
+import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { AddBatchForm } from "@/components/inventory/AddBatchForm";
@@ -772,10 +773,19 @@ function TransferStockPanel({
     const available = item.available_quantity ?? (item.quantity - item.reserved_quantity);
 
     useEffect(() => {
+        if (!navigator.onLine || isBackendKnownUnreachable()) {
+            offlineCache.getBranches({ allowExpired: true }).then((cached) => {
+                setBranches((cached ?? []).filter((b) => b.id !== fromBranchId));
+            }).catch(() => setBranches([])).finally(() => setBranchesLoading(false));
+            return;
+        }
         branchApi
             .list({ is_active: true, page_size: 200 })
             .then((r) => setBranches(r.items.filter((b) => b.id !== fromBranchId)))
-            .catch(() => setBranches([]))
+            .catch(async () => {
+                const cached = await offlineCache.getBranches({ allowExpired: true });
+                setBranches((cached ?? []).filter((b) => b.id !== fromBranchId));
+            })
             .finally(() => setBranchesLoading(false));
     }, [fromBranchId]);
 
@@ -986,7 +996,7 @@ export default function InventoryPage() {
 
         try {
             // If offline, go straight to cache
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.getBranchInventory(
                     activeBranchId,
                     {
@@ -1060,7 +1070,7 @@ export default function InventoryPage() {
         setLowStockFromCache(false);
 
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.getLowStock(activeBranchId);
                 setLowStockItems(result.items);
                 setLowStockCounts({ out: result.out_of_stock_count, low: result.low_stock_count });
@@ -1088,7 +1098,7 @@ export default function InventoryPage() {
         setExpiringFromCache(false);
 
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.getExpiring(activeBranchId, 90);
                 setExpiringItems(result.items);
                 setExpiringCount(result.total_items);
@@ -1124,7 +1134,7 @@ export default function InventoryPage() {
         setValuationLoading(true);
         setValuationError(null);
         try {
-            if (!navigator.onLine || !isBackendReachable()) {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
                 const result = await localRead.getValuation(activeBranchId);
                 setValuation(result);
                 valuationFetchedRef.current = true;

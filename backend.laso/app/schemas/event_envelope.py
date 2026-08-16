@@ -53,6 +53,7 @@ class AggregateType(str, Enum):
     DRUG_BATCH = "drug_batch"
     BRANCH_INVENTORY = "branch_inventory"
     PURCHASE_ORDER = "purchase_order"
+    PRICE_CONTRACT = "price_contract"
 
 
 class EventStatus(str, Enum):

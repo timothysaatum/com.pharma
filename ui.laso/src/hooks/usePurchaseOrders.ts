@@ -13,7 +13,7 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { purchaseOrdersApi, suppliersApi, type ListPurchaseOrdersParams } from "@/api/purchases";
-import { parseApiError, isOfflineError } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendKnownUnreachable } from "@/api/client";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
 import { useAuthStore } from "@/stores/authStore";
@@ -74,6 +74,23 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
         setListError(null);
 
         try {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
+                const data = await localRead.searchPurchaseOrders(
+                    {
+                        branch_id: branch_id ?? undefined,
+                        status: statusFilter || undefined,
+                        supplier_id: supplierFilter || undefined,
+                    },
+                    targetPage,
+                    pageSize,
+                );
+                setOrders(data.items);
+                setTotal(data.total);
+                setTotalPages(data.total_pages);
+                setPage(targetPage);
+                return;
+            }
+
             const params: ListPurchaseOrdersParams = {
                 page: targetPage,
                 page_size: pageSize,
@@ -124,6 +141,11 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
         setSuppliersLoading(true);
         setSuppliersError(null);
         try {
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
+                const cached = await localRead.getCachedSuppliers(branch_id);
+                setSuppliers(cached);
+                return;
+            }
             const data = await suppliersApi.list({ active_only: true, page_size: 200 });
             setSuppliers(data.items);
         } catch (err) {
@@ -136,7 +158,7 @@ export function usePurchaseOrders(options: UsePurchaseOrdersOptions = {}) {
         } finally {
             setSuppliersLoading(false);
         }
-    }, []);
+    }, [branch_id]);
 
     useEffect(() => {
         fetchSuppliers();
