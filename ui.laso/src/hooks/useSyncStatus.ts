@@ -33,7 +33,7 @@ export interface SyncState {
 export function useSyncStatus(): SyncState {
     const [status, setStatus] = useState<SyncStatus>(syncEngine.status);
     const [pendingCount, setPendingCount] = useState(0);
-    const [lastSyncAt, setLastSyncAt] = useState<string | null>(null);
+    const [lastSyncAt, setLastSyncAt] = useState<string | null>(syncEngine.lastSyncAt);
     const [conflicts, setConflicts] = useState<QueuedConflict[]>(syncEngine.pendingConflicts);
     const [failures, setFailures] = useState<QueuedFailure[]>(syncEngine.pendingFailures);
     useEffect(() => {

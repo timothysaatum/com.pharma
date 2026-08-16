@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, useNavigate } from "react-router-dom";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "sonner";
 import { useAuthStore } from "@/stores/authStore";
@@ -137,19 +137,23 @@ function RequireSetupAccess({ children }: { children: React.ReactNode }) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Sync gate — waits for the initial sync to settle before showing app content.
-// Only active when the user is fully ready (has a branch).
-// ─────────────────────────────────────────────────────────────────────────────
+let _hasInitialSyncPassed = false;
+
+if (typeof window !== "undefined") {
+  window.addEventListener("auth:logout", () => {
+    _hasInitialSyncPassed = false;
+  });
+}
 
 function SyncGate({ children }: { children: React.ReactNode }) {
-  const { isAuthenticated, activeBranchId } = useAuthStore();
-  const [initialSyncDone, setInitialSyncDone] = useState(false);
-  const hasPassedGate = useRef(false);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const activeBranchId = useAuthStore((s) => s.activeBranchId);
+  const [initialSyncDone, setInitialSyncDone] = useState(_hasInitialSyncPassed);
 
   useEffect(() => {
     if (!isAuthenticated || !activeBranchId) return;
 
-    if (hasPassedGate.current) {
+    if (_hasInitialSyncPassed) {
       setInitialSyncDone(true);
       return;
     }
@@ -160,20 +164,20 @@ function SyncGate({ children }: { children: React.ReactNode }) {
       currentStatus === "offline" ||
       currentStatus === "error"
     ) {
-      hasPassedGate.current = true;
+      _hasInitialSyncPassed = true;
       setInitialSyncDone(true);
       return;
     }
 
     const unsub = syncEngine.subscribe((status) => {
       if (status === "idle" || status === "offline" || status === "error") {
-        hasPassedGate.current = true;
+        _hasInitialSyncPassed = true;
         setInitialSyncDone(true);
       }
     });
 
     const safety = setTimeout(() => {
-      hasPassedGate.current = true;
+      _hasInitialSyncPassed = true;
       setInitialSyncDone(true);
     }, 5_000);
 
@@ -183,7 +187,7 @@ function SyncGate({ children }: { children: React.ReactNode }) {
     };
   }, [isAuthenticated, activeBranchId]);
 
-  if (isAuthenticated && activeBranchId && !initialSyncDone) {
+  if (isAuthenticated && activeBranchId && !_hasInitialSyncPassed && !initialSyncDone) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-4">
@@ -207,7 +211,11 @@ function SyncGate({ children }: { children: React.ReactNode }) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function AppRoutes() {
-  const { isAuthenticated, setupState, isLoading, initialize, user } = useAuthStore();
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const setupState = useAuthStore((s) => s.setupState);
+  const isLoading = useAuthStore((s) => s.isLoading);
+  const initialize = useAuthStore((s) => s.initialize);
+  const user = useAuthStore((s) => s.user);
   const navigate = useNavigate();
 
   useEffect(() => {

@@ -42,6 +42,7 @@ class SyncEngine {
     private retryTimeoutId: ReturnType<typeof setTimeout> | null = null;
     private listeners: StatusListener[] = [];
     private _status: SyncStatus = "idle";
+    private _lastSyncAt: string | null = null;
     private _isSyncing = false;
     private networkRetryAttempt = 0;
     private _dbInitError: string | null = null;
@@ -91,6 +92,20 @@ class SyncEngine {
         this.branchId = branchId;
         this.organizationId = organizationId;
 
+        // Immediately restore last known sync timestamp from localStorage cache
+        try {
+            const cached = localStorage.getItem(`last_sync_at:${branchId}`);
+            if (cached) this._lastSyncAt = cached;
+        } catch {}
+
+        getLastSyncAt(undefined, branchId).then((last) => {
+            if (last && this.branchId === branchId) {
+                this._lastSyncAt = last;
+                try { localStorage.setItem(`last_sync_at:${branchId}`, last); } catch {}
+                this.notify();
+            }
+        }).catch(() => {});
+
         window.addEventListener("online", this._onOnline);
         window.addEventListener("offline", this._onOffline);
         window.addEventListener(
@@ -136,7 +151,7 @@ class SyncEngine {
         this.branchId = null;
         this.organizationId = null;
         this._status = "idle";
-        this.notify(0, null);
+        this.notify(0, this._lastSyncAt);
     }
 
     /** Subscribe to sync status changes. Returns an unsubscribe function. */
@@ -145,19 +160,23 @@ class SyncEngine {
         const branchId = this.branchId;
         this.listeners.push(fn);
         if (!this.branchId) {
-            fn(this._status, 0, null);
+            fn(this._status, 0, this._lastSyncAt);
             return () => {
                 active = false;
                 this.listeners = this.listeners.filter((l) => l !== fn);
             };
         }
+        // Emit current known state synchronously to avoid flash of "Never synced"
+        fn(this._status, 0, this._lastSyncAt);
+
         Promise.all([
             getPendingOutboxCount().catch(() => 0),
-            getLastSyncAt(undefined, branchId ?? undefined).catch(() => null),
+            getLastSyncAt(undefined, branchId ?? undefined).catch(() => this._lastSyncAt),
         ]).then(([count, last]) => {
             if (active && this.listeners.includes(fn)) {
                 if (branchId !== this.branchId) return;
-                fn(this._status, count, last);
+                if (last) this._lastSyncAt = last;
+                fn(this._status, count, this._lastSyncAt);
             }
         });
         return () => {
@@ -167,6 +186,7 @@ class SyncEngine {
     }
 
     get status(): SyncStatus { return this._status; }
+    get lastSyncAt(): string | null { return this._lastSyncAt; }
 
     // ── Main sync cycle: push events, then pull events ───────────────
 
@@ -203,11 +223,18 @@ class SyncEngine {
         try {
             const eventPushResult = await this.pushEvents();
             await this.pullEvents();
-            await setLastSyncAt(new Date().toISOString(), undefined, this.branchId ?? undefined);
+            const nowIso = new Date().toISOString();
+            this._lastSyncAt = nowIso;
+            try {
+                if (this.branchId) {
+                    localStorage.setItem(`last_sync_at:${this.branchId}`, nowIso);
+                }
+            } catch {}
+            await setLastSyncAt(nowIso, undefined, this.branchId ?? undefined);
             this.networkRetryAttempt = 0;
 
             const pending = await getPendingOutboxCount();
-            this.notify(pending);
+            this.notify(pending, nowIso);
 
             this.setStatus(eventPushResult?.hadFailures ? "error" : "idle");
         } catch (err) {
@@ -405,23 +432,26 @@ class SyncEngine {
     private setStatus(s: SyncStatus): void {
         this._status = s;
         if (!this.branchId) {
-            this.notify(0, null);
+            this.notify(0, this._lastSyncAt);
             return;
         }
 
         const branchId = this.branchId;
         Promise.all([
             getPendingOutboxCount().catch(() => 0),
-            getLastSyncAt(undefined, branchId ?? undefined).catch(() => null),
+            getLastSyncAt(undefined, branchId ?? undefined).catch(() => this._lastSyncAt),
         ]).then(([count, last]) => {
             if (branchId !== this.branchId) return;
-            this.notify(count, last);
+            if (last) {
+                this._lastSyncAt = last;
+            }
+            this.notify(count, this._lastSyncAt);
         });
     }
 
-    private notify(pendingCount = 0, lastSync: string | null = null): void {
+    private notify(pendingCount = 0, lastSync: string | null = this._lastSyncAt): void {
         for (const fn of this.listeners) {
-            fn(this._status, pendingCount, lastSync);
+            fn(this._status, pendingCount, lastSync ?? this._lastSyncAt);
         }
     }
 

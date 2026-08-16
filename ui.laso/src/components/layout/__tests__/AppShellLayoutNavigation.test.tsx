@@ -131,4 +131,31 @@ describe("AppShell Layout Route Client-Side Navigation", () => {
     fireEvent.click(screen.getByText("Settings"));
     expect(screen.getByTestId("page-settings")).toBeTruthy();
   });
+
+  it("preserves active branch name across renders without flickering to Loading", async () => {
+    localStorage.setItem("cache.branch_name.b-1", "Main Branch");
+
+    render(
+      <MemoryRouter initialEntries={["/pos"]}>
+        <Routes>
+          <Route element={<AppShell />}>
+            <Route path="/pos" element={<div data-testid="page-pos">POS View</div>} />
+            <Route path="/audit-logs" element={<div data-testid="page-audit">Audit Logs View</div>} />
+          </Route>
+        </Routes>
+      </MemoryRouter>
+    );
+
+    // Initial state: Branch name is immediately visible
+    expect(screen.getByText("Main Branch")).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
+
+    // Navigate to Audit Logs
+    fireEvent.click(screen.getByText("Audit Logs"));
+    expect(screen.getByTestId("page-audit")).toBeTruthy();
+
+    // Branch name remains steady without reset
+    expect(screen.getByText("Main Branch")).toBeTruthy();
+    expect(screen.queryByText("Loading…")).toBeNull();
+  });
 });

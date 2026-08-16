@@ -74,8 +74,23 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
     const navigate = useNavigate();
     const [collapsed, setCollapsed] = useState(false);
     const [loggingOut, setLoggingOut] = useState(false);
-    const [branchName, setBranchName] = useState<string | null | undefined>(undefined);
-    const [organizationName, setOrganizationName] = useState<string | null | undefined>(undefined);
+    const [branchName, setBranchName] = useState<string | null | undefined>(() => {
+        if (!activeBranchId) return null;
+        try {
+            const cached = localStorage.getItem(`cache.branch_name.${activeBranchId}`);
+            if (cached) return cached;
+        } catch {}
+        return undefined;
+    });
+    const [organizationName, setOrganizationName] = useState<string | null | undefined>(() => {
+        const orgId = user?.organization_id;
+        if (!orgId) return null;
+        try {
+            const cached = localStorage.getItem(`cache.org_name.${orgId}`);
+            if (cached) return cached;
+        } catch {}
+        return undefined;
+    });
     const [version, setVersion] = useState<string>("");
 
     useEffect(() => {
@@ -121,11 +136,14 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
         void (async () => {
             const cached = await offlineCache.getBranches({ allowExpired: true });
             if (!cancelled && cached?.length) {
-                setBranches(
-                    canSeeAllBranches
-                        ? cached
-                        : cached.filter((branch) => assignedIds.has(String(branch.id)))
-                );
+                const visible = canSeeAllBranches
+                    ? cached
+                    : cached.filter((branch) => assignedIds.has(String(branch.id)));
+                setBranches(visible);
+                if (activeBranchId && !branchName) {
+                    const activeMatch = visible.find((b) => String(b.id) === String(activeBranchId));
+                    if (activeMatch) setBranchName(activeMatch.name);
+                }
             }
 
             try {
@@ -141,7 +159,13 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                 setBranches(visible);
                 await offlineCache.setBranches(visible);
 
-                if (!activeBranchId && visible.length === 1) {
+                if (activeBranchId) {
+                    const activeMatch = visible.find((b) => String(b.id) === String(activeBranchId));
+                    if (activeMatch) {
+                        setBranchName(activeMatch.name);
+                        try { localStorage.setItem(`cache.branch_name.${activeBranchId}`, activeMatch.name); } catch {}
+                    }
+                } else if (visible.length === 1) {
                     setActiveBranch(String(visible[0].id));
                 }
             } catch {
@@ -170,13 +194,20 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
             return;
         }
         let cancelled = false;
-        setBranchName(undefined);
         branchApi
             .getById(activeBranchId)
-            .then((b) => { if (!cancelled) setBranchName(b.name); })
+            .then((b) => {
+                if (!cancelled) {
+                    setBranchName(b.name);
+                    try { localStorage.setItem(`cache.branch_name.${activeBranchId}`, b.name); } catch {}
+                }
+            })
             .catch(async () => {
                 const cachedName = await offlineCache.getBranchName(activeBranchId);
-                if (!cancelled) setBranchName(cachedName);
+                if (!cancelled && cachedName) {
+                    setBranchName(cachedName);
+                    try { localStorage.setItem(`cache.branch_name.${activeBranchId}`, cachedName); } catch {}
+                }
             });
         return () => { cancelled = true; };
     }, [activeBranchId]);
@@ -189,18 +220,19 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
         }
 
         let cancelled = false;
-        setOrganizationName(undefined);
 
         void (async () => {
             const cachedOrg = await offlineCache.getOrganization({ allowExpired: true });
             if (!cancelled && cachedOrg?.id === orgId) {
                 setOrganizationName(cachedOrg.name);
+                try { localStorage.setItem(`cache.org_name.${orgId}`, cachedOrg.name); } catch {}
             }
 
             try {
                 const org = await organizationApi.getById(orgId);
                 if (!cancelled) {
                     setOrganizationName(org.name);
+                    try { localStorage.setItem(`cache.org_name.${orgId}`, org.name); } catch {}
                     await offlineCache.setOrganization(org);
                 }
             } catch {

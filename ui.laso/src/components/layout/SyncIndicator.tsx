@@ -83,6 +83,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
         return (
             <>
                 <button
+                    type="button"
                     onClick={() => {
                         if (hasConflicts) {
                             setShowConflictModal(true);
@@ -125,6 +126,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                 {/* Manual sync button */}
                 {status !== "syncing" && status !== "offline" && (
                     <button
+                        type="button"
                         onClick={syncNow}
                         title={hasFailures ? "Retry failed sync records" : "Sync now"}
                         className="text-white/30 hover:text-white transition-colors"
@@ -149,6 +151,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                         {conflicts.length} record{conflicts.length > 1 ? "s need" : " needs"} manual review
                     </p>
                     <button
+                        type="button"
                         onClick={() => setShowConflictModal(true)}
                         className="mt-2 inline-flex items-center gap-1 rounded-full border border-red-400/20 bg-red-500/10 px-3 py-1 text-xs font-semibold text-red-200 hover:bg-red-500/20 transition"
                     >
@@ -173,6 +176,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                                     {failure.table_name ?? "sync"}: {failure.error ?? "Unknown error"}
                                 </span>
                                 <button
+                                    type="button"
                                     onClick={() =>
                                         failure.table_name === "sales"
                                             ? setVoidingFailure(failure)
