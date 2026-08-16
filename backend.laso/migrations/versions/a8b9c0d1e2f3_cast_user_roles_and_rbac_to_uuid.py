@@ -24,65 +24,76 @@ def upgrade() -> None:
         sa.text(
             """
             DO $$
+            DECLARE
+                r RECORD;
+                target_tables TEXT[] := ARRAY[
+                    'organizations', 'branches', 'users', 'roles', 'user_roles', 'user_sessions',
+                    'drug_categories', 'drugs', 'suppliers', 'customers', 'insurance_providers',
+                    'prescriptions', 'price_contracts', 'price_contract_items', 'purchase_orders',
+                    'purchase_order_items', 'branch_inventory', 'drug_batches', 'sales',
+                    'sale_items', 'sale_item_batch_allocations', 'stock_adjustments',
+                    'inventory_movements', 'audit_logs', 'system_alerts', 'sync_operation_receipts',
+                    'sync_queue', 'crr_branch_sync_watermark', 'stock_leases'
+                ];
+                target_cols TEXT[] := ARRAY[
+                    'id', 'organization_id', 'branch_id', 'drug_id', 'batch_id', 'customer_id',
+                    'cashier_id', 'pharmacist_id', 'prescription_id', 'price_contract_id',
+                    'refunded_by', 'cancelled_by', 'sale_id', 'sale_item_id', 'purchase_order_id',
+                    'supplier_id', 'ordered_by', 'approved_by', 'manager_id', 'deleted_by',
+                    'parent_id', 'category_id', 'insurance_provider_id', 'preferred_contract_id',
+                    'verified_by', 'contract_id', 'adjusted_by', 'transfer_to_branch_id',
+                    'source_id', 'source_line_id', 'created_by', 'user_id', 'role_id',
+                    'entity_id', 'resolved_by', 'operation_id'
+                ];
             BEGIN
-                -- 1. Repair roles table columns if stored as character varying
-                IF EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = 'roles'
-                      AND column_name = 'id'
-                      AND data_type LIKE '%char%'
-                ) THEN
-                    ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_role_id_fkey;
-                    ALTER TABLE roles DROP CONSTRAINT IF EXISTS roles_organization_id_fkey;
-                    ALTER TABLE roles ALTER COLUMN id TYPE UUID USING id::uuid;
-                    ALTER TABLE roles ALTER COLUMN organization_id TYPE UUID USING organization_id::uuid;
-                    ALTER TABLE roles ADD CONSTRAINT roles_organization_id_fkey FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE;
-                END IF;
+                -- 1. Save all foreign key constraints in current schema to a temporary table
+                CREATE TEMP TABLE IF NOT EXISTS _tmp_saved_fks (
+                    table_name text,
+                    constraint_name text,
+                    constraint_def text
+                ) ON COMMIT DROP;
 
-                -- 2. Repair user_roles table columns if stored as character varying
-                IF EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = 'user_roles'
-                      AND column_name = 'user_id'
-                      AND data_type LIKE '%char%'
-                ) THEN
-                    ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_user_id_fkey;
-                    ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_role_id_fkey;
-                    ALTER TABLE user_roles ALTER COLUMN user_id TYPE UUID USING user_id::uuid;
-                    ALTER TABLE user_roles ALTER COLUMN role_id TYPE UUID USING role_id::uuid;
-                    ALTER TABLE user_roles ADD CONSTRAINT user_roles_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
-                    ALTER TABLE user_roles ADD CONSTRAINT user_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
-                ELSIF EXISTS (
-                    SELECT 1
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                      AND table_name = 'user_roles'
-                      AND column_name = 'role_id'
-                      AND data_type LIKE '%char%'
-                ) THEN
-                    ALTER TABLE user_roles DROP CONSTRAINT IF EXISTS user_roles_role_id_fkey;
-                    ALTER TABLE user_roles ALTER COLUMN role_id TYPE UUID USING role_id::uuid;
-                    ALTER TABLE user_roles ADD CONSTRAINT user_roles_role_id_fkey FOREIGN KEY (role_id) REFERENCES roles(id) ON DELETE CASCADE;
-                END IF;
+                DELETE FROM _tmp_saved_fks;
 
-                -- 3. Repair user_sessions table if user_id is character varying
-                IF EXISTS (
-                    SELECT 1
+                INSERT INTO _tmp_saved_fks (table_name, constraint_name, constraint_def)
+                SELECT
+                    c.conrelid::regclass::text,
+                    c.conname,
+                    pg_get_constraintdef(c.oid)
+                FROM pg_constraint c
+                JOIN pg_namespace n ON n.oid = c.connamespace
+                WHERE c.contype = 'f'
+                  AND n.nspname = current_schema();
+
+                -- 2. Drop all foreign key constraints so column type changes don't fail constraint validation
+                FOR r IN SELECT table_name, constraint_name FROM _tmp_saved_fks LOOP
+                    EXECUTE format('ALTER TABLE %s DROP CONSTRAINT IF EXISTS %I', r.table_name, r.constraint_name);
+                END LOOP;
+
+                -- 3. Alter all target UUID columns that are stored as VARCHAR / TEXT to native PostgreSQL UUID
+                FOR r IN (
+                    SELECT table_name, column_name
                     FROM information_schema.columns
                     WHERE table_schema = current_schema()
-                      AND table_name = 'user_sessions'
-                      AND column_name = 'user_id'
-                      AND data_type LIKE '%char%'
-                ) THEN
-                    ALTER TABLE user_sessions DROP CONSTRAINT IF EXISTS user_sessions_user_id_fkey;
-                    ALTER TABLE user_sessions ALTER COLUMN id TYPE UUID USING id::uuid;
-                    ALTER TABLE user_sessions ALTER COLUMN user_id TYPE UUID USING user_id::uuid;
-                    ALTER TABLE user_sessions ADD CONSTRAINT user_sessions_user_id_fkey FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE;
-                END IF;
+                      AND table_name = ANY(target_tables)
+                      AND column_name = ANY(target_cols)
+                      AND (data_type LIKE '%char%' OR data_type = 'text')
+                ) LOOP
+                    BEGIN
+                        EXECUTE format('ALTER TABLE %I ALTER COLUMN %I TYPE UUID USING NULLIF(%I, '''')::uuid', r.table_name, r.column_name, r.column_name);
+                    EXCEPTION WHEN OTHERS THEN
+                        RAISE NOTICE 'Skipping column %.%: %', r.table_name, r.column_name, SQLERRM;
+                    END;
+                END LOOP;
+
+                -- 4. Re-create all foreign key constraints
+                FOR r IN SELECT table_name, constraint_name, constraint_def FROM _tmp_saved_fks LOOP
+                    BEGIN
+                        EXECUTE format('ALTER TABLE %s ADD CONSTRAINT %I %s', r.table_name, r.constraint_name, r.constraint_def);
+                    EXCEPTION WHEN OTHERS THEN
+                        RAISE NOTICE 'Could not restore FK constraint % on %: %', r.constraint_name, r.table_name, SQLERRM;
+                    END;
+                END LOOP;
             END $$;
             """
         )
