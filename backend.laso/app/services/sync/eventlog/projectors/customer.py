@@ -279,8 +279,8 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
         "email": payload.get("email"),
         "date_of_birth": _parse_date(payload.get("date_of_birth")),
         "address": _json_or_none(payload.get("address")),
-        "allergies": list(payload.get("allergies") or []),
-        "chronic_conditions": list(payload.get("chronic_conditions") or []),
+        "allergies": json.dumps(list(payload.get("allergies") or [])),
+        "chronic_conditions": json.dumps(list(payload.get("chronic_conditions") or [])),
         "loyalty_points": payload.get("loyalty_points", 0),
         "loyalty_tier": payload.get("loyalty_tier", "bronze"),
         "total_orders": payload.get("total_orders", 0),
@@ -322,9 +322,9 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 CAST(:id AS UUID), CAST(:organization_id AS UUID),
                 :customer_type,
                 :first_name, :last_name, :phone, :email, :date_of_birth,
-                CAST(:address AS JSONB),
-                CAST(:allergies AS TEXT[]),
-                CAST(:chronic_conditions AS TEXT[]),
+                :address,
+                :allergies,
+                :chronic_conditions,
                 :loyalty_points, :loyalty_tier, :total_orders, :total_value,
                 :preferred_contact_method, :marketing_consent, :is_active,
                 CAST(:insurance_provider_id AS UUID),
@@ -332,7 +332,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 :insurance_card_image_url,
                 CAST(:preferred_contract_id AS UUID),
                 :medical_data_encrypted,
-                CAST(:version_vector AS JSONB),
+                :version_vector,
                 1, 'synced', FALSE,
                 :created_at, :updated_at
             )
@@ -352,7 +352,16 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
       - incoming dominates or no vector info → apply + update vector.
     """
     payload = event.payload
-    incoming_vector: Dict[str, int] = payload.get("version_vector") or {}
+    incoming_vector_raw = payload.get("version_vector") or {}
+    if isinstance(incoming_vector_raw, str):
+        try:
+            incoming_vector = json.loads(incoming_vector_raw)
+        except Exception:
+            incoming_vector = {}
+    elif isinstance(incoming_vector_raw, dict):
+        incoming_vector = incoming_vector_raw
+    else:
+        incoming_vector = {}
 
     # Read current row for vector comparison + snapshot.
     snapshot_cols_sql = ", ".join(_SNAPSHOT_COLS)
@@ -369,7 +378,16 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
     if row is None:
         return  # validate() already confirmed existence; defensive guard only.
 
-    current_vector: Dict[str, int] = row.version_vector or {}
+    current_vector_raw = getattr(row, "version_vector", None) or {}
+    if isinstance(current_vector_raw, str):
+        try:
+            current_vector = json.loads(current_vector_raw)
+        except Exception:
+            current_vector = {}
+    elif isinstance(current_vector_raw, dict):
+        current_vector = current_vector_raw
+    else:
+        current_vector = {}
 
     if incoming_vector:
         if concurrent(current_vector, incoming_vector):
@@ -405,18 +423,18 @@ async def _apply_updated(event: EventEnvelope, db: AsyncSession) -> None:
     }
     for field, value in updates.items():
         if field == "address":
-            set_clauses.append(f"{field} = CAST(:{field} AS JSONB)")
+            set_clauses.append(f"{field} = :{field}")
             params[field] = _json_or_none(value)
         elif field in ("insurance_provider_id", "preferred_contract_id"):
             set_clauses.append(f"{field} = CAST(:{field} AS UUID)")
-            params[field] = _uuid_str_or_none(value)
+            params[field] = str(value) if value else None
         elif field in ("allergies", "chronic_conditions"):
-            set_clauses.append(f"{field} = CAST(:{field} AS TEXT[])")
-            params[field] = list(value or [])
+            set_clauses.append(f"{field} = :{field}")
+            params[field] = json.dumps(value) if isinstance(value, (list, dict)) else str(value or "[]")
         else:
             set_clauses.append(f"{field} = :{field}")
             params[field] = value
-    set_clauses.append("version_vector = CAST(:new_vector AS JSONB)")
+    set_clauses.append("version_vector = :new_vector")
     set_clauses.append("updated_at = :updated_at")
 
     sql = f"""
@@ -436,25 +454,29 @@ async def _write_conflict(
     incoming_vector: Dict[str, int],
 ) -> None:
     """Park a concurrent edit in unresolved_conflicts."""
+    aggregate_type_str = (
+        event.aggregate_type.value
+        if hasattr(event.aggregate_type, "value")
+        else str(event.aggregate_type)
+    )
     await db.execute(
         text(
             """
             INSERT INTO unresolved_conflicts
-                (org_id, aggregate_type, aggregate_id, event_id,
+                (id, org_id, aggregate_type, aggregate_id, event_id,
                  local_vector, local_snapshot, incoming_vector, incoming_payload,
                  status, created_at)
             VALUES
-                (CAST(:org_id AS UUID), :aggregate_type, CAST(:aggregate_id AS UUID),
+                (gen_random_uuid(), CAST(:org_id AS UUID), :aggregate_type, CAST(:aggregate_id AS UUID),
                  :event_id,
-                 CAST(:local_vector AS JSONB), CAST(:local_snapshot AS JSONB),
-                 CAST(:incoming_vector AS JSONB), CAST(:incoming_payload AS JSONB),
+                 :local_vector, :local_snapshot,
+                 :incoming_vector, :incoming_payload,
                  'pending', now())
-            ON CONFLICT DO NOTHING
             """
         ),
         {
             "org_id": str(event.org_id),
-            "aggregate_type": event.aggregate_type.value,
+            "aggregate_type": aggregate_type_str,
             "aggregate_id": str(event.aggregate_id),
             "event_id": event.event_id,
             "local_vector": json.dumps(current_vector),

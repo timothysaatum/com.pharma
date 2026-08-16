@@ -1,11 +1,11 @@
 import axios, { AxiosError, InternalAxiosRequestConfig } from "axios";
 import { authStorage } from "@/lib/storage";
 
-const configuredBaseUrl = import.meta.env.VITE_API_URL ?? "http://localhost:8000";
+const configuredBaseUrl = import.meta.env.VITE_API_URL ?? "http://127.0.0.1:8000";
 if (import.meta.env.PROD && !configuredBaseUrl.startsWith("https://")) {
     throw new Error("Production VITE_API_URL must use HTTPS.");
 }
-const BASE_URL = configuredBaseUrl.replace(/^http:\/\/127\.0\.0\.1:8000\/?$/, "http://localhost:8000");
+const BASE_URL = configuredBaseUrl.replace(/^http:\/\/localhost:8000\/?$/, "http://127.0.0.1:8000");
 let backendReachable = true;
 let backendOfflineSince: number | null = null;
 

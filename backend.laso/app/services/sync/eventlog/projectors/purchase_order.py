@@ -86,6 +86,46 @@ class PurchaseOrderProjector(Projector):
         po_id = str(event.aggregate_id)
 
         if etype == EVENT_CREATED:
+            supplier_id = _uuid_or_none(p.get("supplier_id"))
+            if not supplier_id:
+                supp_name = p.get("supplier_name") or "Default Supplier"
+                supp_res = await db.execute(
+                    text("""
+                        SELECT id FROM suppliers 
+                        WHERE organization_id = CAST(:org_id AS UUID) 
+                        ORDER BY created_at ASC LIMIT 1
+                    """),
+                    {"org_id": str(p["org_id"])},
+                )
+                found_supp = supp_res.first()
+                if found_supp:
+                    supplier_id = str(found_supp[0])
+                else:
+                    new_supp_id = str(uuid.uuid4())
+                    await db.execute(
+                        text("""
+                            INSERT INTO suppliers (
+                                id, organization_id, name, is_active, is_deleted,
+                                total_orders, total_value,
+                                sync_version, sync_status,
+                                created_at, updated_at
+                            ) VALUES (
+                                CAST(:id AS UUID), CAST(:org_id AS UUID), :name, true, false,
+                                0, 0,
+                                1, 'synced',
+                                :now, :now
+                            )
+                            ON CONFLICT (id) DO NOTHING
+                        """),
+                        {
+                            "id": new_supp_id,
+                            "org_id": str(p["org_id"]),
+                            "name": supp_name,
+                            "now": now,
+                        },
+                    )
+                    supplier_id = new_supp_id
+
             res = await db.execute(
                 text("""
                     INSERT INTO purchase_orders (
@@ -108,7 +148,7 @@ class PurchaseOrderProjector(Projector):
                     "org_id": str(p["org_id"]),
                     "branch_id": str(p["branch_id"]),
                     "po_number": p.get("po_number", "PO-" + str(uuid.uuid4())[:8]),
-                    "supplier_id": _uuid_or_none(p.get("supplier_id")),
+                    "supplier_id": supplier_id,
                     "subtotal": _decimal_str(p.get("subtotal", 0)),
                     "tax_amount": _decimal_str(p.get("tax_amount", 0)),
                     "shipping_cost": _decimal_str(p.get("shipping_cost", 0)),
@@ -127,6 +167,10 @@ class PurchaseOrderProjector(Projector):
                 
             items = p.get("items", [])
             for item in items:
+                qty_ord = int(item.get("quantity_ordered") or item.get("quantity") or 0)
+                qty_rec = int(item.get("quantity_received", 0))
+                u_cost = float(item.get("unit_cost", 0))
+                t_cost = float(item["total_cost"]) if "total_cost" in item else (u_cost * qty_ord)
                 await db.execute(
                     text("""
                         INSERT INTO purchase_order_items (
@@ -145,10 +189,10 @@ class PurchaseOrderProjector(Projector):
                         "id": str(uuid.uuid4()),
                         "po_id": po_id,
                         "drug_id": str(item["drug_id"]),
-                        "qty_ordered": int(item.get("quantity_ordered", 0)),
-                        "qty_received": int(item.get("quantity_received", 0)),
-                        "unit_cost": _decimal_str(item.get("unit_cost", 0)),
-                        "total_cost": _decimal_str(float(item.get("unit_cost", 0)) * int(item.get("quantity_ordered", 0))),
+                        "qty_ordered": qty_ord,
+                        "qty_received": qty_rec,
+                        "unit_cost": _decimal_str(u_cost),
+                        "total_cost": _decimal_str(t_cost),
                         "now": now,
                     }
                 )

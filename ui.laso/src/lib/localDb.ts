@@ -171,7 +171,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 28;
+const MAX_KNOWN_SCHEMA_VERSION = 29;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -785,11 +785,14 @@ export async function migrate_v16(db: Database): Promise<void> {
     selectCols: string,
   ): Promise<void> {
     await db.execute(ddl);
-    await db.execute(`
-      INSERT INTO ${newName} (${selectCols})
-      SELECT ${selectCols} FROM ${oldName}
-    `);
-    await db.execute(`DROP TABLE ${oldName}`);
+    const exists = await tableExists(db, oldName);
+    if (exists) {
+      await db.execute(`
+        INSERT INTO ${newName} (${selectCols})
+        SELECT ${selectCols} FROM ${oldName}
+      `);
+      await db.execute(`DROP TABLE ${oldName}`);
+    }
     await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
   }
 
@@ -1152,11 +1155,14 @@ async function migrate_v17(db: Database): Promise<void> {
       selectCols: string,
     ): Promise<void> {
       await db.execute(ddl);
-      await db.execute(`
-        INSERT INTO ${newName} (${selectCols})
-        SELECT ${selectCols} FROM ${oldName}
-      `);
-      await db.execute(`DROP TABLE ${oldName}`);
+      const exists = await tableExists(db, oldName);
+      if (exists) {
+        await db.execute(`
+          INSERT INTO ${newName} (${selectCols})
+          SELECT ${selectCols} FROM ${oldName}
+        `);
+        await db.execute(`DROP TABLE ${oldName}`);
+      }
       await db.execute(`ALTER TABLE ${newName} RENAME TO ${oldName}`);
     }
 
@@ -1794,9 +1800,18 @@ async function migrate_v22(db: Database): Promise<void> {
       const tmpName = `${table}_v22`;
       await db.execute(`DROP TABLE IF EXISTS ${tmpName}`);
       await db.execute(ddl);
-      await db.execute(
-        `INSERT INTO ${tmpName} (${cols}) SELECT ${cols} FROM ${table}`
-      );
+
+      const existingColsInfo = await db.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
+      const existingColNames = new Set(existingColsInfo.map(c => c.name));
+      const targetCols = cols.split(',').map(c => c.trim()).filter(Boolean);
+      const commonCols = targetCols.filter(c => existingColNames.has(c));
+      const commonColsStr = commonCols.join(', ');
+
+      if (commonCols.length > 0) {
+        await db.execute(
+          `INSERT INTO ${tmpName} (${commonColsStr}) SELECT ${commonColsStr} FROM ${table}`
+        );
+      }
       await db.execute(`DROP TABLE ${table}`);
       await db.execute(`ALTER TABLE ${tmpName} RENAME TO ${table}`);
     }

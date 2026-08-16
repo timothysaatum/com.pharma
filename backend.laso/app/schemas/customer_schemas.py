@@ -8,6 +8,7 @@ from pydantic import (
 )
 from typing import Optional, Dict, Any, List
 from datetime import datetime, date
+import json
 import uuid
 
 
@@ -65,6 +66,11 @@ class CustomerBase(BaseSchema):
         description="Known drug allergies (checked at point of sale)"
     )
 
+    chronic_conditions: List[str] = Field(
+        default_factory=list,
+        description="Chronic medical conditions"
+    )
+
     # ============================================
     # INSURANCE FIELDS
     # ============================================
@@ -112,6 +118,46 @@ class CustomerBase(BaseSchema):
     # ============================================
     # VALIDATORS
     # ============================================
+
+    @field_validator('allergies', 'chronic_conditions', mode='before', check_fields=False)
+    @classmethod
+    def parse_json_list(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return [str(x) for x in parsed]
+            except Exception:
+                pass
+        return []
+
+    @field_validator('address', mode='before')
+    @classmethod
+    def parse_json_dict(cls, v: Any) -> Optional[Dict[str, Any]]:
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            return v
+        if isinstance(v, str):
+            try:
+                parsed = json.loads(v)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return None
+
+    @field_validator('email', 'date_of_birth', 'insurance_provider_id', 'preferred_contract_id', 'insurance_member_id', 'insurance_card_image_url', mode='before')
+    @classmethod
+    def empty_str_to_none(cls, v: Any) -> Any:
+        """Convert empty strings to None so optional fields do not fail validation"""
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
     
     @field_validator('date_of_birth')
     @classmethod

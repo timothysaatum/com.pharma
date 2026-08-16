@@ -87,47 +87,79 @@ class BranchInventoryProjector(Projector):
         now = event.authored_at
 
         if etype == EVENT_CREATED:
-            await db.execute(
+            existing = await db.execute(
                 text("""
-                    INSERT INTO branch_inventory (
-                        id, branch_id, drug_id, quantity, reserved_quantity,
-                        location, selling_price, sync_version, sync_status,
-                        created_at, updated_at
-                    ) VALUES (
-                        CAST(:id AS UUID), CAST(:branch_id AS UUID), CAST(:drug_id AS UUID), 0, 0,
-                        :shelf_location, :branch_selling_price, 1, 'synced',
-                        :now, :now
-                    )
-                    ON CONFLICT (branch_id, drug_id) DO NOTHING
+                    SELECT id FROM branch_inventory
+                    WHERE branch_id = CAST(:branch_id AS UUID) AND drug_id = CAST(:drug_id AS UUID)
+                    LIMIT 1
                 """),
-                {
-                    "id": str(event.aggregate_id),
-                    "branch_id": str(p["branch_id"]),
-                    "drug_id": str(p["drug_id"]),
-                    "shelf_location": p.get("shelf_location"),
-                    "branch_selling_price": _decimal_str(p.get("branch_selling_price")),
-                    "now": now,
-                }
+                {"branch_id": str(p["branch_id"]), "drug_id": str(p["drug_id"])},
             )
+            existing_row = existing.first()
+            if existing_row:
+                await db.execute(
+                    text("""
+                        UPDATE branch_inventory SET
+                            location = COALESCE(:shelf_location, location),
+                            selling_price = COALESCE(:branch_selling_price, selling_price),
+                            updated_at = :now,
+                            sync_version = sync_version + 1,
+                            sync_status = 'synced'
+                        WHERE id = :id
+                    """),
+                    {
+                        "id": existing_row[0],
+                        "shelf_location": p.get("shelf_location"),
+                        "branch_selling_price": _decimal_str(p.get("branch_selling_price")),
+                        "now": now,
+                    },
+                )
+            else:
+                await db.execute(
+                    text("""
+                        INSERT INTO branch_inventory (
+                            id, branch_id, drug_id, quantity, reserved_quantity,
+                            location, selling_price, sync_version, sync_status,
+                            created_at, updated_at
+                        ) VALUES (
+                            CAST(:id AS UUID), CAST(:branch_id AS UUID), CAST(:drug_id AS UUID), 0, 0,
+                            :shelf_location, :branch_selling_price, 1, 'synced',
+                            :now, :now
+                        )
+                        ON CONFLICT (id) DO NOTHING
+                    """),
+                    {
+                        "id": str(event.aggregate_id),
+                        "branch_id": str(p["branch_id"]),
+                        "drug_id": str(p["drug_id"]),
+                        "shelf_location": p.get("shelf_location"),
+                        "branch_selling_price": _decimal_str(p.get("branch_selling_price")),
+                        "now": now,
+                    },
+                )
         elif etype == EVENT_UPDATED:
             # We don't touch quantity, just metadata
-            # For idempotent update we update by ID
+            # Update by ID or by (branch_id, drug_id)
+            inv_id = str(event.aggregate_id)
             await db.execute(
                 text("""
                     UPDATE branch_inventory SET
-                        location = :shelf_location,
-                        selling_price = :branch_selling_price,
+                        location = COALESCE(:shelf_location, location),
+                        selling_price = COALESCE(:branch_selling_price, selling_price),
                         updated_at = :now,
                         sync_version = sync_version + 1,
                         sync_status = 'synced'
                     WHERE id = CAST(:id AS UUID)
+                       OR (branch_id = CAST(:branch_id AS UUID) AND drug_id = CAST(:drug_id AS UUID))
                 """),
                 {
-                    "id": str(event.aggregate_id),
+                    "id": inv_id,
+                    "branch_id": str(p.get("branch_id", "")),
+                    "drug_id": str(p.get("drug_id", "")),
                     "shelf_location": p.get("shelf_location"),
                     "branch_selling_price": _decimal_str(p.get("branch_selling_price")),
                     "now": now,
-                }
+                },
             )
 
 def _decimal_str(v: Any):

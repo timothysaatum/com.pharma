@@ -66,8 +66,20 @@ class UUID(TypeDecorator):
     impl = String(36)
     cache_ok = True
 
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+            return dialect.type_descriptor(PG_UUID(as_uuid=True))
+        return dialect.type_descriptor(String(36))
+
     def process_bind_param(self, value, dialect):
         if value is None:
+            return value
+        if dialect.name == "postgresql":
+            if isinstance(value, uuid.UUID):
+                return value
+            if isinstance(value, str):
+                return uuid.UUID(value)
             return value
         if isinstance(value, uuid.UUID):
             return str(value)
@@ -78,7 +90,7 @@ class UUID(TypeDecorator):
             return value
         if isinstance(value, uuid.UUID):
             return value
-        return uuid.UUID(value)
+        return uuid.UUID(str(value))
 
 
 class JSONB(TypeDecorator):

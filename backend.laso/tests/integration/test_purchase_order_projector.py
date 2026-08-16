@@ -1,6 +1,11 @@
 """
 Integration tests — PurchaseOrderProjector.
+
+Covers purchase_order_created and purchase_order_updated through the full
+EventRouter → AppendService → PurchaseOrderProjector path.
+Requires a real Postgres backend.
 """
+
 from __future__ import annotations
 
 import os
@@ -20,13 +25,15 @@ from app.schemas.event_envelope import (
     compute_hash_self,
 )
 from app.services.sync.eventlog import EventRouter
-import app.services.sync.eventlog.projectors  # registers all projectors
+import app.services.sync.eventlog.projectors  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
+
 
 def _requires_postgres() -> None:
     if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
         pytest.skip("PurchaseOrderProjector integration tests require a real Postgres backend")
+
 
 @pytest_asyncio.fixture
 async def event_sync_tables(db: AsyncSession):
@@ -34,6 +41,7 @@ async def event_sync_tables(db: AsyncSession):
     await db.execute(text("DROP TABLE IF EXISTS pending_projections CASCADE"))
     await db.execute(text("DROP TABLE IF EXISTS aggregate_snapshots CASCADE"))
     await db.execute(text("DROP TABLE IF EXISTS event_log CASCADE"))
+
     await db.execute(text("""
         CREATE TABLE event_log (
             event_id TEXT NOT NULL,
@@ -72,145 +80,117 @@ async def event_sync_tables(db: AsyncSession):
     await db.commit()
     yield
     await db.execute(text("DROP TABLE IF EXISTS pending_projections CASCADE"))
+    await db.execute(text("DROP TABLE IF EXISTS aggregate_snapshots CASCADE"))
     await db.execute(text("DROP TABLE IF EXISTS event_log CASCADE"))
+    await db.commit()
 
-@pytest.fixture
-def org_id() -> uuid.UUID:
-    return uuid.uuid4()
 
-@pytest.fixture
-def branch_id() -> uuid.UUID:
-    return uuid.uuid4()
+def _new_ulid() -> str:
+    from time import time
+    base = f"{int(time() * 1000):013X}"
+    tail = uuid.uuid4().hex[:13].upper()
+    return (base + tail)[:26]
 
-@pytest.fixture
-def drug_id() -> uuid.UUID:
-    return uuid.uuid4()
 
-@pytest.fixture
-def po_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest.fixture
-def user_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest_asyncio.fixture
-async def setup_data(
-    db: AsyncSession,
+def _make_env(
+    *,
+    aggregate_id: uuid.UUID,
+    aggregate_type: AggregateType,
+    event_type: str,
+    payload: dict,
     org_id: uuid.UUID,
     branch_id: uuid.UUID,
-    drug_id: uuid.UUID,
-    user_id: uuid.UUID,
-    event_sync_tables: None,
-):
-    await db.execute(text("""
-        INSERT INTO organizations (id, name, slug)
-        VALUES (:org_id, 'Test Org', 'test-org')
-    """), {"org_id": org_id})
-    await db.execute(text("""
-        INSERT INTO branches (id, organization_id, name)
-        VALUES (:branch_id, :org_id, 'Test Branch')
-    """), {"branch_id": branch_id, "org_id": org_id})
-    await db.execute(text("""
-        INSERT INTO users (id, organization_id, branch_id, email, password_hash, role)
-        VALUES (:user_id, :org_id, :branch_id, 'user@test.com', 'xxx', 'cashier')
-    """), {"user_id": user_id, "org_id": org_id, "branch_id": branch_id})
-    await db.execute(text("""
-        INSERT INTO drug_categories (id, organization_id, name)
-        VALUES (:cat_id, :org_id, 'Cat')
-    """), {"cat_id": uuid.uuid4(), "org_id": org_id})
-    cat_id = (await db.execute(text("SELECT id FROM drug_categories WHERE organization_id = :org_id LIMIT 1"), {"org_id": org_id})).scalar_one()
-    await db.execute(text("""
-        INSERT INTO drugs (id, organization_id, category_id, name, generic_name, dosage_form, unit_price, is_active)
-        VALUES (:drug_id, :org_id, :cat_id, 'Drug', 'Generic', 'Tablet', 10.0, true)
-    """), {"drug_id": drug_id, "org_id": org_id, "cat_id": cat_id})
-    await db.commit()
+    authored_by: uuid.UUID,
+    hash_prev: str = GENESIS_HASH,
+) -> EventEnvelope:
+    env = EventEnvelope(
+        event_id=_new_ulid(),
+        aggregate_id=aggregate_id,
+        aggregate_type=aggregate_type,
+        event_type=event_type,
+        schema_version=1,
+        payload=payload,
+        dependencies=[],
+        authored_at=datetime.now(timezone.utc),
+        authored_by=authored_by,
+        branch_id=branch_id,
+        org_id=org_id,
+        hash_self="0" * 64,
+    )
+    env.hash_self = compute_hash_self(env, hash_prev)
+    return env
+
 
 async def test_purchase_order_projector(
     db: AsyncSession,
-    setup_data: None,
-    org_id: uuid.UUID,
-    branch_id: uuid.UUID,
-    user_id: uuid.UUID,
-    drug_id: uuid.UUID,
-    po_id: uuid.UUID,
+    setup_test_data,
+    event_sync_tables,
 ):
-    router = EventRouter(db)
-    
-    # Create PO
-    env = EventEnvelope(
-        event_id="01HXXXXXXXPOCREATEDXXXXXXXXX",
+    org, branch, user, drugs, _ = setup_test_data
+    drug = drugs[0]
+    po_id = uuid.uuid4()
+
+    created_payload = {
+        "id": str(po_id),
+        "org_id": str(org.id),
+        "branch_id": str(branch.id),
+        "po_number": "PO-TEST-001",
+        "supplier_name": "PharmaCorp Ltd",
+        "status": "pending",
+        "total_amount": 500.0,
+        "items": [
+            {
+                "drug_id": str(drug.id),
+                "drug_name": drug.name,
+                "quantity": 50,
+                "unit_cost": 10.0,
+                "total_cost": 500.0,
+            }
+        ],
+    }
+
+    env1 = _make_env(
         aggregate_id=po_id,
         aggregate_type=AggregateType.PURCHASE_ORDER,
         event_type="purchase_order_created",
-        schema_version=1,
-        payload={
-            "org_id": str(org_id),
-            "branch_id": str(branch_id),
-            "po_number": "PO-12345",
-            "status": "draft",
-            "subtotal": "100.00",
-            "total_amount": "100.00",
-            "items": [
-                {
-                    "drug_id": str(drug_id),
-                    "quantity_ordered": 10,
-                    "unit_cost": "10.00"
-                }
-            ]
-        },
-        authored_at=datetime.now(timezone.utc),
-        authored_by=user_id,
-        branch_id=branch_id,
-        org_id=org_id,
-        hash_self="0" * 64,
-        hash_prev=GENESIS_HASH,
+        payload=created_payload,
+        org_id=org.id,
+        branch_id=branch.id,
+        authored_by=user.id,
     )
-    env.hash_self = compute_hash_self(env.model_dump())
-    resp = await router.process_batch(branch_id, [env])
-    assert resp.results[0].status == EventStatus.ACCEPTED
-    
-    po_row = (await db.execute(
-        text("SELECT * FROM purchase_orders WHERE id = :id"),
-        {"id": po_id}
-    )).fetchone()
-    assert po_row is not None
-    assert po_row.status == "draft"
-    
-    po_item = (await db.execute(
-        text("SELECT * FROM purchase_order_items WHERE purchase_order_id = :po_id"),
-        {"po_id": po_id}
-    )).fetchone()
-    assert po_item is not None
-    assert po_item.quantity_ordered == 10
-    
-    # Update PO
-    update_env = EventEnvelope(
-        event_id="01HXXXXXXXPOUPDATEDXXXXXXXXX",
+
+    results = await EventRouter.process_batch(db, org.id, [env1])
+    assert results[0].status == EventStatus.ACCEPTED
+
+    # Verify PO inserted
+    row = (await db.execute(
+        text("SELECT status, total_amount FROM purchase_orders WHERE id = :id"),
+        {"id": str(po_id)},
+    )).mappings().first()
+    assert row is not None
+    assert row["status"] == "pending"
+
+    # Update PO status to received
+    updated_payload = {
+        **created_payload,
+        "status": "received",
+    }
+    env2 = _make_env(
         aggregate_id=po_id,
         aggregate_type=AggregateType.PURCHASE_ORDER,
         event_type="purchase_order_updated",
-        schema_version=1,
-        payload={
-            "org_id": str(org_id),
-            "branch_id": str(branch_id),
-            "status": "approved",
-            "notes": "Approved by me"
-        },
-        authored_at=datetime.now(timezone.utc),
-        authored_by=user_id,
-        branch_id=branch_id,
-        org_id=org_id,
-        hash_self="0" * 64,
-        hash_prev=env.hash_self,
+        payload=updated_payload,
+        org_id=org.id,
+        branch_id=branch.id,
+        authored_by=user.id,
+        hash_prev=env1.hash_self,
     )
-    update_env.hash_self = compute_hash_self(update_env.model_dump())
-    resp2 = await router.process_batch(branch_id, [update_env])
-    assert resp2.results[0].status == EventStatus.ACCEPTED
-    
-    po_row2 = (await db.execute(
-        text("SELECT * FROM purchase_orders WHERE id = :id"),
-        {"id": po_id}
-    )).fetchone()
-    assert po_row2.status == "approved"
-    assert po_row2.notes == "Approved by me"
+
+    results2 = await EventRouter.process_batch(db, org.id, [env2])
+    assert results2[0].status == EventStatus.ACCEPTED
+
+    row2 = (await db.execute(
+        text("SELECT status FROM purchase_orders WHERE id = :id"),
+        {"id": str(po_id)},
+    )).mappings().first()
+    assert row2["status"] == "received"

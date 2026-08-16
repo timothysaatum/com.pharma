@@ -210,19 +210,21 @@ class AppendService:
                 hash_prev=existing[2],
             )
 
-        # 2. Hash verification: re-compute the expected hash_self from
-        #    the envelope + the real hash_prev (which the client couldn't
-        #    know at outbox-write time). Reject if the client's hash_self
-        #    doesn't match.
-        expected_hash = compute_hash_self(envelope, current_tail_hash)
-        if expected_hash != envelope.hash_self:
+        # 2. Hash verification: re-compute expected hash_self from
+        #    the envelope payload using either client's stated hash_prev or
+        #    the current server tail hash to verify integrity against corruption.
+        client_hash_prev = envelope.hash_prev or GENESIS_HASH
+        expected_client_hash = compute_hash_self(envelope, client_hash_prev)
+        expected_server_hash = compute_hash_self(envelope, current_tail_hash)
+        if envelope.hash_self not in (expected_client_hash, expected_server_hash):
             logger.warning(
                 "Sync: hash_self mismatch for event %s in org %s "
-                "(client=%s expected=%s)",
+                "(client=%s expected_client=%s expected_server=%s)",
                 envelope.event_id,
                 org_id,
                 envelope.hash_self,
-                expected_hash,
+                expected_client_hash,
+                expected_server_hash,
             )
             return AppendResult(
                 event_id=envelope.event_id,
@@ -230,12 +232,13 @@ class AppendService:
                 seq=None,
                 received_at=None,
                 hash_prev=current_tail_hash,
-                expected_hash_self=expected_hash,
+                expected_hash_self=expected_server_hash,
             )
 
-        # 3. Assign seq = tail + 1 and INSERT.
+        # 3. Assign seq = tail + 1 and INSERT with server-chain hash.
         seq = current_tail_seq + 1
         received_at = datetime.now(timezone.utc)
+        server_hash_self = expected_server_hash
         try:
             await db.execute(
                 text(
@@ -272,7 +275,7 @@ class AppendService:
                     "authored_at": envelope.authored_at,
                     "authored_by": str(envelope.authored_by) if envelope.authored_by is not None else None,
                     "branch_id": str(envelope.branch_id),
-                    "hash_self": envelope.hash_self,
+                    "hash_self": server_hash_self,
                     "hash_prev": current_tail_hash,
                     "received_at": received_at,
                 },

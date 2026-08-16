@@ -32,6 +32,18 @@ from app.services.sync.eventlog.vector_clock import merge
 
 logger = logging.getLogger(__name__)
 
+def _parse_json_dict(v: Any) -> Dict[str, Any]:
+    if isinstance(v, dict):
+        return v
+    if isinstance(v, str):
+        try:
+            parsed = json.loads(v)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+
 router = APIRouter(prefix="/conflicts", tags=["Conflicts"])
 
 
@@ -116,10 +128,10 @@ async def list_conflicts(
             aggregate_type=r["aggregate_type"],
             aggregate_id=r["aggregate_id"],
             event_id=r["event_id"],
-            local_vector=r["local_vector"] or {},
-            local_snapshot=r["local_snapshot"] or {},
-            incoming_vector=r["incoming_vector"] or {},
-            incoming_payload=r["incoming_payload"] or {},
+            local_vector=_parse_json_dict(r["local_vector"]),
+            local_snapshot=_parse_json_dict(r["local_snapshot"]),
+            incoming_vector=_parse_json_dict(r["incoming_vector"]),
+            incoming_payload=_parse_json_dict(r["incoming_payload"]),
             status=r["status"],
             resolved_at=r["resolved_at"],
             resolved_by=r["resolved_by"],

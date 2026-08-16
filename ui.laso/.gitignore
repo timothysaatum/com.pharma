@@ -24,7 +24,9 @@ Thumbs.db
 # Tauri
 src-tauri/WixTools/
 
-# Logs
+# Logs & Test outputs
 *.log
 npm-debug.log*
 yarn-debug.log*
+test-results/
+playwright-report/

@@ -171,6 +171,18 @@ class SyncEngine {
     // ── Main sync cycle: push events, then pull events ───────────────
 
     async sync(): Promise<void> {
+        if (!this.branchId) {
+            try {
+                const rawBranch = localStorage.getItem("session.branch_id") || localStorage.getItem("auth.active_branch_id");
+                const rawOrg = localStorage.getItem("session.organization_id") || localStorage.getItem("auth.active_organization_id");
+                if (rawBranch) {
+                    this.branchId = typeof rawBranch === "string" && rawBranch.startsWith('"') ? JSON.parse(rawBranch) : rawBranch;
+                }
+                if (rawOrg) {
+                    this.organizationId = typeof rawOrg === "string" && rawOrg.startsWith('"') ? JSON.parse(rawOrg) : rawOrg;
+                }
+            } catch {}
+        }
         if (!this.branchId || this._isSyncing) return;
         if (this._dbInitError) {
             console.warn("[SyncEngine] Sync skipped: database init failed:", this._dbInitError);

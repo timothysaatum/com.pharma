@@ -46,7 +46,9 @@ async def db():
     try:
         async with engine.begin() as conn:
             if DATABASE_URL_TEST.startswith("postgresql"):
-                await conn.run_sync(Base.metadata.drop_all)
+                from sqlalchemy import text
+                await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+                await conn.execute(text("CREATE SCHEMA public"))
             await conn.run_sync(Base.metadata.create_all)
     finally:
         for table, index in postgres_only_indexes:

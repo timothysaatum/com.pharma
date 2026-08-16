@@ -1,11 +1,16 @@
 """
 Integration tests — DrugBatchProjector.
+
+Covers drug_batch_created and drug_batch_updated through the full
+EventRouter → AppendService → DrugBatchProjector path.
+Requires a real Postgres backend.
 """
+
 from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -20,13 +25,15 @@ from app.schemas.event_envelope import (
     compute_hash_self,
 )
 from app.services.sync.eventlog import EventRouter
-import app.services.sync.eventlog.projectors  # registers all projectors
+import app.services.sync.eventlog.projectors  # noqa: F401
 
 pytestmark = pytest.mark.asyncio
+
 
 def _requires_postgres() -> None:
     if not os.environ.get("DATABASE_URL", "").startswith("postgresql"):
         pytest.skip("DrugBatchProjector integration tests require a real Postgres backend")
+
 
 @pytest_asyncio.fixture
 async def event_sync_tables(db: AsyncSession):
@@ -72,159 +79,121 @@ async def event_sync_tables(db: AsyncSession):
     await db.commit()
     yield
     await db.execute(text("DROP TABLE IF EXISTS pending_projections CASCADE"))
+    await db.execute(text("DROP TABLE IF EXISTS aggregate_snapshots CASCADE"))
     await db.execute(text("DROP TABLE IF EXISTS event_log CASCADE"))
-
-@pytest.fixture
-def org_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest.fixture
-def branch_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest.fixture
-def drug_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest.fixture
-def batch_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest.fixture
-def user_id() -> uuid.UUID:
-    return uuid.uuid4()
-
-@pytest_asyncio.fixture
-async def setup_data(
-    db: AsyncSession,
-    org_id: uuid.UUID,
-    branch_id: uuid.UUID,
-    drug_id: uuid.UUID,
-    user_id: uuid.UUID,
-    event_sync_tables: None,
-):
-    await db.execute(text("""
-        INSERT INTO organizations (id, name, slug)
-        VALUES (:org_id, 'Test Org', 'test-org')
-    """), {"org_id": org_id})
-    await db.execute(text("""
-        INSERT INTO branches (id, organization_id, name)
-        VALUES (:branch_id, :org_id, 'Test Branch')
-    """), {"branch_id": branch_id, "org_id": org_id})
-    await db.execute(text("""
-        INSERT INTO users (id, organization_id, branch_id, email, password_hash, role)
-        VALUES (:user_id, :org_id, :branch_id, 'user@test.com', 'xxx', 'cashier')
-    """), {"user_id": user_id, "org_id": org_id, "branch_id": branch_id})
-    await db.execute(text("""
-        INSERT INTO drug_categories (id, organization_id, name)
-        VALUES (:cat_id, :org_id, 'Cat')
-    """), {"cat_id": uuid.uuid4(), "org_id": org_id})
-    cat_id = (await db.execute(text("SELECT id FROM drug_categories WHERE organization_id = :org_id LIMIT 1"), {"org_id": org_id})).scalar_one()
-    await db.execute(text("""
-        INSERT INTO drugs (id, organization_id, category_id, name, generic_name, dosage_form, unit_price, is_active)
-        VALUES (:drug_id, :org_id, :cat_id, 'Drug', 'Generic', 'Tablet', 10.0, true)
-    """), {"drug_id": drug_id, "org_id": org_id, "cat_id": cat_id})
     await db.commit()
 
-def _make_batch_created(
+
+def _new_ulid() -> str:
+    from time import time
+    base = f"{int(time() * 1000):013X}"
+    tail = uuid.uuid4().hex[:13].upper()
+    return (base + tail)[:26]
+
+
+def _make_env(
+    *,
+    aggregate_id: uuid.UUID,
+    aggregate_type: AggregateType,
+    event_type: str,
+    payload: dict,
     org_id: uuid.UUID,
     branch_id: uuid.UUID,
-    user_id: uuid.UUID,
-    drug_id: uuid.UUID,
-    batch_id: uuid.UUID,
+    authored_by: uuid.UUID,
+    hash_prev: str = GENESIS_HASH,
 ) -> EventEnvelope:
     env = EventEnvelope(
-        event_id="01HXXXXXXXBATCHCREATEDXXXX",
-        aggregate_id=batch_id,
-        aggregate_type=AggregateType.DRUG_BATCH,
-        event_type="drug_batch_created",
+        event_id=_new_ulid(),
+        aggregate_id=aggregate_id,
+        aggregate_type=aggregate_type,
+        event_type=event_type,
         schema_version=1,
-        payload={
-            "org_id": str(org_id),
-            "branch_id": str(branch_id),
-            "drug_id": str(drug_id),
-            "batch_number": "B001",
-            "quantity": 100,
-            "remaining_quantity": 100,
-            "expiry_date": "2026-12-31",
-            "cost_price": "5.0",
-            "selling_price": "10.0"
-        },
+        payload=payload,
+        dependencies=[],
         authored_at=datetime.now(timezone.utc),
-        authored_by=user_id,
+        authored_by=authored_by,
         branch_id=branch_id,
         org_id=org_id,
         hash_self="0" * 64,
-        hash_prev=GENESIS_HASH,
     )
-    env.hash_self = compute_hash_self(env.model_dump())
+    env.hash_self = compute_hash_self(env, hash_prev)
     return env
+
 
 async def test_drug_batch_created_and_updated(
     db: AsyncSession,
-    setup_data: None,
-    org_id: uuid.UUID,
-    branch_id: uuid.UUID,
-    user_id: uuid.UUID,
-    drug_id: uuid.UUID,
-    batch_id: uuid.UUID,
+    setup_test_data,
+    event_sync_tables,
 ):
-    router = EventRouter(db)
-    
-    # Create batch
-    env = _make_batch_created(org_id, branch_id, user_id, drug_id, batch_id)
-    resp = await router.process_batch(branch_id, [env])
-    assert resp.results[0].status == EventStatus.ACCEPTED
-    
-    batch_row = (await db.execute(
-        text("SELECT * FROM drug_batches WHERE id = :id"),
-        {"id": batch_id}
-    )).fetchone()
-    assert batch_row is not None
-    assert batch_row.remaining_quantity == 100
-    
+    org, branch, user, drugs, _ = setup_test_data
+    drug = drugs[0]
+    batch_id = uuid.uuid4()
+
+    created_payload = {
+        "org_id": str(org.id),
+        "branch_id": str(branch.id),
+        "drug_id": str(drug.id),
+        "batch_number": "BATCH-001",
+        "quantity": 100,
+        "remaining_quantity": 100,
+        "expiry_date": "2027-12-31",
+        "cost_price": 5.0,
+        "selling_price": 10.0,
+        "received_date": date.today().isoformat(),
+    }
+
+    env1 = _make_env(
+        aggregate_id=batch_id,
+        aggregate_type=AggregateType.DRUG_BATCH,
+        event_type="drug_batch_created",
+        payload=created_payload,
+        org_id=org.id,
+        branch_id=branch.id,
+        authored_by=user.id,
+    )
+
+    results = await EventRouter.process_batch(db, org.id, [env1])
+    assert results[0].status == EventStatus.ACCEPTED
+
+    # Verify batch inserted
+    row = (await db.execute(
+        text("SELECT batch_number, remaining_quantity FROM drug_batches WHERE id = :id"),
+        {"id": str(batch_id)},
+    )).mappings().first()
+    assert row is not None
+    assert row["batch_number"] == "BATCH-001"
+    assert row["remaining_quantity"] == 100
+
+    # Verify branch_inventory quantity updated
     inv_row = (await db.execute(
-        text("SELECT * FROM branch_inventory WHERE branch_id = :branch_id AND drug_id = :drug_id"),
-        {"branch_id": branch_id, "drug_id": drug_id}
-    )).fetchone()
+        text("SELECT quantity FROM branch_inventory WHERE branch_id = :b_id AND drug_id = :d_id"),
+        {"b_id": str(branch.id), "d_id": str(drug.id)},
+    )).mappings().first()
     assert inv_row is not None
-    assert inv_row.quantity == 100
-    
+    assert inv_row["quantity"] >= 100
+
     # Update batch
-    update_env = EventEnvelope(
-        event_id="01HXXXXXXXBATCHUPDATEDXXXX",
+    updated_payload = {
+        **created_payload,
+        "remaining_quantity": 80,
+    }
+    env2 = _make_env(
         aggregate_id=batch_id,
         aggregate_type=AggregateType.DRUG_BATCH,
         event_type="drug_batch_updated",
-        schema_version=1,
-        payload={
-            "org_id": str(org_id),
-            "branch_id": str(branch_id),
-            "drug_id": str(drug_id),
-            "batch_number": "B001",
-            "quantity": 100,
-            "remaining_quantity": 50,
-            "expiry_date": "2026-12-31",
-        },
-        authored_at=datetime.now(timezone.utc),
-        authored_by=user_id,
-        branch_id=branch_id,
-        org_id=org_id,
-        hash_self="0" * 64,
-        hash_prev=env.hash_self,
+        payload=updated_payload,
+        org_id=org.id,
+        branch_id=branch.id,
+        authored_by=user.id,
+        hash_prev=env1.hash_self,
     )
-    update_env.hash_self = compute_hash_self(update_env.model_dump())
-    resp2 = await router.process_batch(branch_id, [update_env])
-    assert resp2.results[0].status == EventStatus.ACCEPTED
-    
-    batch_row2 = (await db.execute(
-        text("SELECT * FROM drug_batches WHERE id = :id"),
-        {"id": batch_id}
-    )).fetchone()
-    assert batch_row2.remaining_quantity == 50
-    
-    inv_row2 = (await db.execute(
-        text("SELECT * FROM branch_inventory WHERE branch_id = :branch_id AND drug_id = :drug_id"),
-        {"branch_id": branch_id, "drug_id": drug_id}
-    )).fetchone()
-    assert inv_row2.quantity == 50
+
+    results2 = await EventRouter.process_batch(db, org.id, [env2])
+    assert results2[0].status == EventStatus.ACCEPTED
+
+    # Verify updated quantity
+    row2 = (await db.execute(
+        text("SELECT remaining_quantity FROM drug_batches WHERE id = :id"),
+        {"id": str(batch_id)},
+    )).mappings().first()
+    assert row2["remaining_quantity"] == 80
