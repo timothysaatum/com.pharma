@@ -221,7 +221,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
     },
 
     setActiveBranch: (branchId) => {
-        const { user } = get();
+        const { user, activeBranchId } = get();
+        if (activeBranchId === branchId) {
+            return;
+        }
         authStorage.setActiveBranch(branchId);
         set({ activeBranchId: branchId });
         syncEngine.stop();
