@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Check, ChevronDown, ChevronUp, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { conflictsApi, type ConflictRecord, type ConflictResolution } from "@/api/conflicts";
-import { isOfflineError } from "@/api/client";
+import { isOfflineError, isOfflineOrUnreachable } from "@/api/client";
+import { getEventConflicts } from "@/lib/localDb";
 import { cn } from "@/lib/utils";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -269,6 +270,18 @@ export default function ConflictsPage() {
     const load = useCallback(async () => {
         setLoading(true);
         try {
+            if (isOfflineOrUnreachable()) {
+                const localConflicts = await getEventConflicts();
+                const filtered = statusFilter === "pending"
+                    ? localConflicts.filter(c => c.status === "pending")
+                    : statusFilter === "all"
+                    ? localConflicts
+                    : localConflicts.filter(c => c.status === statusFilter);
+                setConflicts(filtered as unknown as ConflictRecord[]);
+                setTotal(filtered.length);
+                setPending(localConflicts.filter(c => c.status === "pending").length);
+                return;
+            }
             const result = await conflictsApi.list({
                 status: statusFilter,
                 page,
@@ -278,7 +291,21 @@ export default function ConflictsPage() {
             setTotal(result.total);
             setPending(result.pending);
         } catch (err) {
-            if (!isOfflineError(err)) {
+            if (isOfflineError(err) || isOfflineOrUnreachable()) {
+                try {
+                    const localConflicts = await getEventConflicts();
+                    const filtered = statusFilter === "pending"
+                        ? localConflicts.filter(c => c.status === "pending")
+                        : statusFilter === "all"
+                        ? localConflicts
+                        : localConflicts.filter(c => c.status === statusFilter);
+                    setConflicts(filtered as unknown as ConflictRecord[]);
+                    setTotal(filtered.length);
+                    setPending(localConflicts.filter(c => c.status === "pending").length);
+                } catch {
+                    // silently handle
+                }
+            } else {
                 toast.error("Could not load conflicts.");
             }
         } finally {

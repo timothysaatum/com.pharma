@@ -107,6 +107,7 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
     case "purchase_order_created":
     case "purchase_order_updated":
       await _purchaseOrderUpserted(db, envelope);
+      break;
     // ── Price Contract ──────────────────────────────────────────────────
     case "price_contract_created":
       await _priceContractCreated(db, envelope);

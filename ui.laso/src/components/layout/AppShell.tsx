@@ -251,6 +251,10 @@ export function AppShell({ children }: { children?: React.ReactNode }) {
                 try { localStorage.setItem(`cache.org_name.${orgId}`, cachedOrg.name); } catch {}
             }
 
+            if (!navigator.onLine || isBackendKnownUnreachable()) {
+                return;
+            }
+
             try {
                 const org = await organizationApi.getById(orgId);
                 if (!cancelled) {

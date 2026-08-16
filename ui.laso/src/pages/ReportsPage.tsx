@@ -247,7 +247,7 @@ export default function ReportsPage() {
           ]);
           if (!cancelled) {
             setBranches((cachedBranches ?? []).map((b: any) => ({ id: b.id, name: b.name })));
-            setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.name, code: c.code })));
+            setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.contract_name ?? c.name, code: c.contract_code ?? c.code })));
           }
           return;
         }
@@ -257,7 +257,11 @@ export default function ReportsPage() {
         ]);
         if (!cancelled) {
           setBranches((branchRes as any).items?.map((b: any) => ({ id: b.id, name: b.name })) ?? []);
-          setContracts((contractRes as any).contracts?.map((c: any) => ({ id: c.id, name: c.contract_name, code: c.contract_code })) ?? []);
+          setContracts(
+            (contractRes as any).items?.map((c: any) => ({ id: c.id, name: c.contract_name ?? c.name, code: c.contract_code ?? c.code })) ??
+            (contractRes as any).contracts?.map((c: any) => ({ id: c.id, name: c.contract_name ?? c.name, code: c.contract_code ?? c.code })) ??
+            []
+          );
         }
       } catch {
         const [cachedBranches, localContracts] = await Promise.all([
@@ -266,7 +270,7 @@ export default function ReportsPage() {
         ]);
         if (!cancelled) {
           setBranches((cachedBranches ?? []).map((b: any) => ({ id: b.id, name: b.name })));
-          setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.name, code: c.code })));
+          setContracts((localContracts.items ?? []).map((c: any) => ({ id: c.id, name: c.contract_name ?? c.name, code: c.contract_code ?? c.code })));
         }
       } finally {
         // Filter metadata is optional; reports remain usable if it cannot load.

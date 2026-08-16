@@ -54,7 +54,7 @@ describe("Migration v30 & Sync Cursor Recovery", () => {
         } else {
           normValues.push(...values);
         }
-        const res = rawDb.prepare(normSql).run(...normValues);
+        const res = rawDb.prepare(normSql).run(...(normValues as any[]));
         return { rowsAffected: Number(res.changes), lastInsertId: Number(res.lastInsertRowid) };
       },
       select: async <T>(sql: string, values: unknown[] = []): Promise<T> => {
@@ -69,7 +69,7 @@ describe("Migration v30 & Sync Cursor Recovery", () => {
         } else {
           normValues.push(...values);
         }
-        return rawDb.prepare(normSql).all(...normValues) as T;
+        return rawDb.prepare(normSql).all(...(normValues as any[])) as T;
       },
       execute_batch: async (sql: string) => {
         rawDb.exec(sql);

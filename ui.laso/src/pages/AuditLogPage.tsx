@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { auditApi, type AuditLogEntry } from "@/api/audit";
-import { isOfflineError, isBackendKnownUnreachable, parseApiError } from "@/api/client";
+import { isOfflineError, isBackendKnownUnreachable, isBackendReachable, parseApiError } from "@/api/client";
 import { getDb } from "@/lib/localDb";
 import { cn } from "@/lib/utils";
 

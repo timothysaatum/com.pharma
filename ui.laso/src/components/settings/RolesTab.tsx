@@ -7,7 +7,8 @@ import { toast } from "sonner";
 import { rolesApi } from "@/api/roles";
 import { Button, Input } from "@/components/ui";
 import { Role, PermissionInfo } from "@/types";
-import { parseApiError } from "@/api/client";
+import { isOfflineError, isOfflineOrUnreachable, parseApiError } from "@/api/client";
+import { useAuthStore } from "@/stores/authStore";
 import { motion, AnimatePresence } from "framer-motion";
 
 export function RolesTab() {
@@ -19,6 +20,14 @@ export function RolesTab() {
 
     useEffect(() => {
         const loadData = async () => {
+            if (isOfflineOrUnreachable()) {
+                const currentUser = useAuthStore.getState().user;
+                if (currentUser?.roles) {
+                    setRoles(currentUser.roles);
+                }
+                setIsLoading(false);
+                return;
+            }
             try {
                 const [rolesData, permsData] = await Promise.all([
                     rolesApi.getRoles(),
@@ -27,7 +36,14 @@ export function RolesTab() {
                 setRoles(rolesData);
                 setPermissions(permsData);
             } catch (err) {
-                toast.error(parseApiError(err));
+                if (isOfflineError(err) || isOfflineOrUnreachable()) {
+                    const currentUser = useAuthStore.getState().user;
+                    if (currentUser?.roles) {
+                        setRoles(currentUser.roles);
+                    }
+                } else {
+                    toast.error(parseApiError(err));
+                }
             } finally {
                 setIsLoading(false);
             }

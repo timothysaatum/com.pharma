@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import { contractsApi, type ContractResponse, type ContractListParams } from "@/api/contracts";
 import { localRead } from "@/lib/localRead";
-import { isOfflineError, isBackendKnownUnreachable, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
 import { ContractForm } from "@/components/contracts/ContractForm";

@@ -12,7 +12,7 @@ import { drugApi } from "@/api/drugs";
 import { branchApi } from "@/api/branches";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
-import { isBackendKnownUnreachable, isOfflineError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineOrUnreachable, isOfflineError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import { useDebounce } from "@/hooks/useDebounce";
@@ -74,7 +74,7 @@ function BatchViewerPanel({
         setLoading(true);
         setError(null);
         try {
-            const r = !navigator.onLine || !isBackendReachable()
+            const r = isOfflineOrUnreachable()
                 ? await localRead.getBatchesForDrug(item.drug_id, {
                     branch_id: branchId,
                     include_expired: true,
@@ -87,7 +87,7 @@ function BatchViewerPanel({
                 });
             if (!cancelled) setBatches(r.items);
         } catch (err) {
-            if (!cancelled && isOfflineError(err)) {
+            if (!cancelled && (isOfflineError(err) || isOfflineOrUnreachable())) {
                 const r = await localRead.getBatchesForDrug(item.drug_id, {
                     branch_id: branchId,
                     include_expired: true,
@@ -108,7 +108,7 @@ function BatchViewerPanel({
         setError(null);
         const load = async () => {
             try {
-                const r = !navigator.onLine || !isBackendReachable()
+                const r = isOfflineOrUnreachable()
                     ? await localRead.getBatchesForDrug(item.drug_id, {
                         branch_id: branchId,
                         include_expired: false,
@@ -121,7 +121,7 @@ function BatchViewerPanel({
                     });
                 if (!cancelled) setBatches(r.items);
             } catch (err) {
-                if (!cancelled && isOfflineError(err)) {
+                if (!cancelled && (isOfflineError(err) || isOfflineOrUnreachable())) {
                     const r = await localRead.getBatchesForDrug(item.drug_id, {
                         branch_id: branchId,
                         include_expired: false,

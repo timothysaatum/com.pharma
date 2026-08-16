@@ -17,7 +17,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { usersApi } from "@/api/users";
 import { branchApi } from "@/api/branches";
 import { rolesApi } from "@/api/roles";
-import { isBackendKnownUnreachable, isOfflineError, parseApiError } from "@/api/client";
+import { isOfflineOrUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { Input, Button } from "@/components/ui";
 import type { UserResponse, BranchListItem, Role } from "@/types";
@@ -793,12 +793,7 @@ export default function UsersPage() {
 
     // ── Load branches and roles once ────────────────────────
     useEffect(() => {
-        if (!isBackendReachable()) {
-            offlineCache.getBranches().then((cached) => setBranches(cached ?? []));
-            return;
-        }
-
-        if (!navigator.onLine || isBackendKnownUnreachable()) {
+        if (isOfflineOrUnreachable()) {
             offlineCache.getBranches().then((cached) => {
                 if (cached) setBranches(cached);
             });
@@ -816,8 +811,11 @@ export default function UsersPage() {
             setRoles(rolesData);
             offlineCache.setBranches(branchItems);
         }).catch(async (err) => {
-            if (isOfflineError(err)) {
+            if (isOfflineError(err) || isOfflineOrUnreachable()) {
                 setBranches((await offlineCache.getBranches()) ?? []);
+                if (currentUser?.roles) {
+                    setRoles(currentUser.roles);
+                }
             }
         });
     }, [currentUser]);
@@ -830,7 +828,7 @@ export default function UsersPage() {
 
         setIsLoading(true);
         try {
-            if (!navigator.onLine || isBackendKnownUnreachable()) {
+            if (isOfflineOrUnreachable()) {
                 const cached = await offlineCache.getUsers();
                 const source = cached?.items ?? (currentUser ? [currentUser] : []);
                 const filtered = source.filter((item) => {
@@ -867,7 +865,7 @@ export default function UsersPage() {
             const isAbort =
                 (err as { name?: string })?.name === "AbortError" ||
                 (err as { code?: string })?.code === "ERR_CANCELED";
-            if (!isAbort && isOfflineError(err)) {
+            if (!isAbort && (isOfflineError(err) || isOfflineOrUnreachable())) {
                 const cached = await offlineCache.getUsers();
                 const source = cached?.items ?? (currentUser ? [currentUser] : []);
                 const filtered = source.filter((item) => {

@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { branchApi } from "@/api/branches";
-import { parseApiError, isOfflineError, isBackendKnownUnreachable } from "@/api/client";
+import { parseApiError, isOfflineError, isBackendKnownUnreachable, isBackendReachable } from "@/api/client";
 import { offlineCache } from "@/lib/storage";
 import { useAuthStore } from "@/stores/authStore";
 import type { BranchListItem, BranchCreate } from "@/types";

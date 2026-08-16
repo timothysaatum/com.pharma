@@ -8,7 +8,7 @@ import { drugApi } from "@/api/drugs";
 import { prescriptionsApi } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
 import { writeLocal } from "@/lib/localWrite";
-import { isBackendKnownUnreachable, isOfflineError, parseApiError } from "@/api/client";
+import { isBackendKnownUnreachable, isOfflineOrUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { Prescription, PrescriptionMedication, PrescriptionStatus, Drug } from "@/types";
 
@@ -219,7 +219,7 @@ export default function PrescriptionsPage() {
     setUpdatingId(id);
     try {
       const prescription = items.find((item) => item.id === id);
-      if (prescription && (!navigator.onLine || !isBackendReachable())) {
+      if (prescription && isOfflineOrUnreachable()) {
         await writeLocal.prescription({
           ...prescription,
           status: "cancelled",
@@ -513,7 +513,7 @@ export default function PrescriptionsPage() {
       if (editingId) {
         const current = items.find((item) => item.id === editingId);
         let updated: Prescription;
-        if (current && (!navigator.onLine || !isBackendReachable())) {
+        if (current && isOfflineOrUnreachable()) {
           updated = {
             ...current,
             ...data,
@@ -561,7 +561,7 @@ export default function PrescriptionsPage() {
           updated_at: now,
         };
 
-        if (!navigator.onLine || !isBackendReachable()) {
+        if (isOfflineOrUnreachable()) {
           await writeLocal.prescription(localPrescriptionData);
         } else {
           try {
