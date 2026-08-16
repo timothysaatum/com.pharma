@@ -291,7 +291,10 @@ class AuthService:
         )
 
         await db.commit()
-        await db.refresh(user)
+        result = await db.execute(
+            select(User).options(selectinload(User.roles)).where(User.id == user.id)
+        )
+        user = result.scalar_one()
         
         return user, access_token, refresh_token
     
