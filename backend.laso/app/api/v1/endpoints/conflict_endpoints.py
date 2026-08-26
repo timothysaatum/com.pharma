@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import text
@@ -203,9 +203,9 @@ async def resolve_conflict(
             aggregate_type=row["aggregate_type"],
             aggregate_id=str(row["aggregate_id"]),
             org_id=str(row["org_id"]),
-            incoming_payload=row["incoming_payload"],
-            local_vector=row["local_vector"] or {},
-            incoming_vector=row["incoming_vector"] or {},
+            incoming_payload=_parse_json_dict(row["incoming_payload"]),
+            local_vector=_parse_json_dict(row["local_vector"]),
+            incoming_vector=_parse_json_dict(row["incoming_vector"]),
             db=db,
         )
 
@@ -239,10 +239,10 @@ async def resolve_conflict(
         aggregate_type=updated["aggregate_type"],
         aggregate_id=updated["aggregate_id"],
         event_id=updated["event_id"],
-        local_vector=updated["local_vector"] or {},
-        local_snapshot=updated["local_snapshot"] or {},
-        incoming_vector=updated["incoming_vector"] or {},
-        incoming_payload=updated["incoming_payload"] or {},
+        local_vector=_parse_json_dict(updated["local_vector"]),
+        local_snapshot=_parse_json_dict(updated["local_snapshot"]),
+        incoming_vector=_parse_json_dict(updated["incoming_vector"]),
+        incoming_payload=_parse_json_dict(updated["incoming_payload"]),
         status=updated["status"],
         resolved_at=updated["resolved_at"],
         resolved_by=updated["resolved_by"],
