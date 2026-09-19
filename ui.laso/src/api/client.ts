@@ -315,3 +315,44 @@ export function isOfflineError(err: unknown): boolean {
 
     return false;
 }
+
+/**
+ * Probes the backend health endpoint to accurately set the reachability flag
+ * BEFORE any page tries to fetch data. Any HTTP response (even 4xx) means the
+ * server is up. Only a network-level failure (ECONNREFUSED, timeout) means it
+ * is truly unreachable.
+ *
+ * Call once at app startup, before ReactDOM.render, so all offline guards
+ * have an accurate `backendReachable` value when pages first mount.
+ */
+export async function probeBackendNow(): Promise<boolean> {
+    try {
+        await axios.get(`${BASE_URL}/health`, { timeout: 5_000 });
+        markBackendOnline();
+        return true;
+    } catch (err: unknown) {
+        if (axios.isAxiosError(err) && err.response) {
+            // Server responded (e.g. 401 / 404) — it IS reachable
+            markBackendOnline();
+            return true;
+        }
+        // No response at all — network error, backend is down
+        markBackendOffline();
+        return false;
+    }
+}
+
+/**
+ * Starts a periodic heartbeat that keeps `backendReachable` accurate
+ * throughout the session. Detects when the backend comes back online after
+ * being unreachable and emits the connectivity-change event so components
+ * can re-fetch live data.
+ *
+ * Returns a cleanup function (call on app unmount or logout).
+ */
+export function startBackendHeartbeat(intervalMs = 15_000): () => void {
+    const id = setInterval(() => {
+        probeBackendNow().catch(() => { /* never throws — errors handled inside */ });
+    }, intervalMs);
+    return () => clearInterval(id);
+}

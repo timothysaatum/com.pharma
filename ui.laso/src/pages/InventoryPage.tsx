@@ -1141,35 +1141,30 @@ export default function InventoryPage() {
                 setValuationPage(1);
                 return;
             }
-            const result = await inventoryApi.getValuation(activeBranchId);
-            setValuation(result);
+            const timeoutResult = await withTimeout(
+                () => inventoryApi.getValuation(activeBranchId),
+                () => localRead.getValuation(activeBranchId),
+                { timeoutMs: 15000, dataKey: `valuation:${activeBranchId}` }
+            );
+            setValuation(timeoutResult.data);
             valuationFetchedRef.current = true;
             setValuationPage(1);
         } catch (err: unknown) {
-            setValuationError(parseApiError(err));
-            if (isOfflineError(err)) {
-                await fetchValuationOffline();
+            // withTimeout already tried local — if we're here both server and
+            // local failed. Show the error but attempt one last local read.
+            try {
+                const result = await localRead.getValuation(activeBranchId);
+                setValuation(result);
+                valuationFetchedRef.current = true;
+                setValuationPage(1);
+            } catch {
+                setValuationError(parseApiError(err));
             }
         } finally {
             setValuationLoading(false);
         }
     }, [activeBranchId]);
 
-    const fetchValuationOffline = useCallback(async () => {
-        if (!activeBranchId) return;
-        setValuationLoading(true);
-        setValuationError(null);
-        try {
-            const result = await localRead.getValuation(activeBranchId);
-            setValuation(result);
-            valuationFetchedRef.current = true;
-            setValuationPage(1);
-        } catch (err: unknown) {
-            setValuationError((err as Error)?.message ?? "Failed to load valuation report");
-        } finally {
-            setValuationLoading(false);
-        }
-    }, [activeBranchId]);
 
     useEffect(() => {
         fetchInventory();
