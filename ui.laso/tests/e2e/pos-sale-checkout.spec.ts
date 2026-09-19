@@ -18,12 +18,21 @@ test.describe('POS Sale Checkout End-to-End Tests', () => {
 
     backendDb = new BackendDatabase();
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
     await bridge.attachToPage(page);
 
     const auth = await setupAuthenticatedState(page, bridge);
     orgId = auth.orgId;
     branchId = auth.branchId;
     userId = auth.user.id;
+
+    // Capture max seq BEFORE seeding so reconnect sync only pulls test-inserted events
+    // (without this, sync pulls 6000+ historical events, holding _isSyncing for 30+ seconds)
+    const [{ max_seq }] = await backendDb.query<{ max_seq: number }>(
+      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM event_log WHERE org_id = $1',
+      [orgId]
+    );
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '${max_seq}')`);
 
     // Seed default standard price contract in PostgreSQL
     await backendDb.seedDefaultPriceContract(orgId);
@@ -176,11 +185,13 @@ test.describe('POS Sale Checkout End-to-End Tests', () => {
       [orgId]
     );
 
-    // Intercept backend endpoints to simulate network disconnect
+    // Intercept backend endpoints to simulate network disconnect.
+    // Use 503 (not abort) so failures are immediate and don't hold the axios
+    // 30-second timeout, which would block the _isSyncing lock for too long.
     let offline = true;
     await page.route('**/api/v1/**', async (route) => {
       if (offline) {
-        await route.abort('failed');
+        await route.fulfill({ status: 503, body: '{"detail":"offline"}' });
       } else {
         await route.continue();
       }
@@ -227,12 +238,18 @@ test.describe('POS Sale Checkout End-to-End Tests', () => {
     offline = false;
     await page.unroute('**/api/v1/**');
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
+    // Brief pause so any in-flight 503 response finishes and releases the sync lock
+    await page.waitForTimeout(800);
 
     // Trigger sync cycle to push offline sale to server
     await page.evaluate(async () => {
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
 
     // Verify outbox event is accepted and drains

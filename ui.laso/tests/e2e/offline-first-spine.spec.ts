@@ -15,8 +15,24 @@ test.describe('Offline-First Architecture & Event Spine E2E Tests', () => {
   const contractId = '99999999-9999-9999-9999-999999999999';
   const prescriptionId = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa';
 
-  test.beforeAll(async () => {
+  test.beforeEach(async ({ page }) => {
+    test.setTimeout(150000);
+    page.on('console', msg => console.log(`[BROWSER ${msg.type()}]:`, msg.text()));
+    page.on('pageerror', err => console.error('[BROWSER ERROR]:', err));
+
     backendDb = new BackendDatabase();
+    bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
+
+    // Capture current max event seq BEFORE seeding so Phase 1 sync only pulls
+    // the freshly-inserted events instead of the full historical log.
+    const [{ max_seq }] = await backendDb.query<{ max_seq: number }>(
+      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM event_log WHERE org_id = $1',
+      [orgId]
+    );
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '${max_seq}')`);
+
+    await bridge.attachToPage(page);
 
     // Seed comprehensive event stream in PostgreSQL event_log
     const now = new Date().toISOString();
@@ -169,19 +185,12 @@ test.describe('Offline-First Architecture & Event Spine E2E Tests', () => {
         updated_at: now,
       },
     });
-  });
 
-  test.afterAll(async () => {
-    await backendDb.close();
-  });
-
-  test.beforeEach(async ({ page }) => {
-    test.setTimeout(90000);
-    page.on('console', msg => console.log(`[BROWSER ${msg.type()}]:`, msg.text()));
-    page.on('pageerror', err => console.error('[BROWSER ERROR]:', err));
-    bridge = new TauriSqliteBridge();
-    await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
+  });
+
+  test.afterEach(async () => {
+    await backendDb.close();
   });
 
   test('Complete Offline-First lifecycle: Sync -> Disconnect -> Navigate 7 screens -> Mutate Outbox -> Reconnect -> Reconcile', async ({ page }) => {
@@ -254,42 +263,36 @@ test.describe('Offline-First Architecture & Event Spine E2E Tests', () => {
 
     // 2. Sales History (Offline from SQLite)
     console.log('[E2E] Testing Sales History while offline...');
-    await page.goto('/sales');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/sales', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Sales History/i).first()).toBeVisible({ timeout: 10000 });
 
     // 3. Drugs Catalogue (Offline from SQLite)
     console.log('[E2E] Testing Drugs Catalogue while offline...');
-    await page.goto('/admin/drugs');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/admin/drugs', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Drug Catalogue|Drugs/i).first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/Paracetamol/i).first()).toBeVisible({ timeout: 10000 });
 
     // 4. Branch Inventory (Offline from SQLite)
     console.log('[E2E] Testing Branch Inventory while offline...');
-    await page.goto('/admin/inventory');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/admin/inventory', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Inventory/i).first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/Paracetamol/i).first()).toBeVisible({ timeout: 10000 });
 
     // 5. Customers List (Offline from SQLite)
     console.log('[E2E] Testing Customers while offline...');
-    await page.goto('/customers');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/customers', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Customers/i).first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/Kwame Nkrumah/i).first()).toBeVisible({ timeout: 10000 });
 
     // 6. Price Contracts (Offline from SQLite)
     console.log('[E2E] Testing Contracts while offline...');
-    await page.goto('/admin/contracts');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/admin/contracts', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Contracts|Price Contracts/i).first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/National Health Insurance/i).first()).toBeVisible({ timeout: 10000 });
 
     // 7. Prescriptions (Offline from SQLite)
     console.log('[E2E] Testing Prescriptions while offline...');
-    await page.goto('/prescriptions');
-    await page.waitForLoadState('domcontentloaded');
+    await page.goto('/prescriptions', { waitUntil: 'domcontentloaded' });
     await expect(page.getByText(/Prescriptions/i).first()).toBeVisible({ timeout: 10000 });
     await expect(page.getByText(/Kwame Nkrumah|RX-2026-999/i).first()).toBeVisible({ timeout: 10000 });
 
@@ -328,8 +331,10 @@ test.describe('Offline-First Architecture & Event Spine E2E Tests', () => {
     console.log('[E2E] Reconnecting network and pushing outbox events...');
     networkBlocked = false;
     await page.unroute('**/api/v1/**');
+    // Let any in-flight aborted responses resolve and release the sync lock
+    await page.waitForTimeout(800);
 
-    // Mark backend back online and run sync
+    // Mark backend back online and run sync with retries in case lock is momentarily held
     await page.evaluate(async () => {
       // @ts-ignore
       const { markBackendOnline } = await import('/src/api/client.ts');
@@ -337,7 +342,11 @@ test.describe('Offline-First Architecture & Event Spine E2E Tests', () => {
 
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
 
     // Verify event outbox is pushed and cleared

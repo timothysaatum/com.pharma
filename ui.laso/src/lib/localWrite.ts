@@ -121,6 +121,7 @@ const PRESCRIPTION_COLUMNS = new Set([
     "status",
     "verified_by",
     "verified_at",
+    "created_offline_at",
     "sync_status",
     "sync_version",
     "synced_at",
@@ -651,6 +652,8 @@ async function upsertLocal<T extends Record<string, unknown>>(
     record: T,
 ): Promise<void> {
     const db = await getDb();
+    const tableInfo = await db.select<{ name: string }[]>(`PRAGMA table_info(${table})`).catch(() => []);
+    const validCols = tableInfo.length > 0 ? new Set(tableInfo.map((c) => c.name)) : null;
     const now = new Date().toISOString();
 
     const payload = {
@@ -660,9 +663,12 @@ async function upsertLocal<T extends Record<string, unknown>>(
         created_at: record.created_at ?? now,
     };
 
-    const cols = Object.keys(payload);
+    const rawCols = Object.keys(payload);
+    const cols = validCols ? rawCols.filter((c) => validCols.has(c)) : rawCols;
+    if (cols.length === 0 || !cols.includes("id")) return;
+
     const vals = cols.map((c) => {
-        const v = payload[c];
+        const v = (payload as Record<string, unknown>)[c];
         if (typeof v === "boolean") return v ? 1 : 0;
         if (Array.isArray(v) || (typeof v === "object" && v !== null)) return JSON.stringify(v);
         return v ?? null;
@@ -929,6 +935,9 @@ export const writeLocal = {
         if (prescriptions.length === 0) return;
 
         const db = await getDb();
+        const tableInfo = await db.select<{ name: string }[]>("PRAGMA table_info(prescriptions)").catch(() => []);
+        const validCols = tableInfo.length > 0 ? new Set(tableInfo.map((c) => c.name)) : null;
+
         for (const prescription of prescriptions) {
             const existing = await db.select<{ sync_status: string }[]>(
                 "SELECT sync_status FROM prescriptions WHERE id = $1 LIMIT 1",
@@ -949,7 +958,10 @@ export const writeLocal = {
                 } as Record<string, unknown>,
                 PRESCRIPTION_COLUMNS
             );
-            const cols = Object.keys(payload);
+            const rawCols = Object.keys(payload);
+            const cols = validCols ? rawCols.filter((c) => validCols.has(c)) : rawCols;
+            if (cols.length === 0 || !cols.includes("id")) continue;
+
             const vals = cols.map((c) => {
                 const v = payload[c];
                 if (typeof v === "boolean") return v ? 1 : 0;

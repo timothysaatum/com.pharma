@@ -3,7 +3,7 @@ import { Pool } from 'pg';
 export class BackendDatabase {
   private pool: Pool;
 
-  constructor(connectionString = 'postgresql://postgres:postgres@localhost:5432/laso_db') {
+  constructor(connectionString = process.env.TEST_DATABASE_URL || 'postgresql://cassie1:SatumCassie25@localhost:5432/atlasdb') {
     this.pool = new Pool({ connectionString });
   }
 
@@ -58,6 +58,15 @@ export class BackendDatabase {
   }
 
   async seedDefaultPriceContract(orgId: string) {
+    // Check if a default contract already exists for this org
+    const existing = await this.query<{ id: string }>(
+      `SELECT id FROM price_contracts WHERE organization_id = $1 AND is_default_contract = TRUE LIMIT 1`,
+      [orgId]
+    );
+    if (existing.length > 0) {
+      return existing[0].id;
+    }
+
     const contractId = '33333333-3333-3333-3333-333333333333';
     await this.query(
       `INSERT INTO price_contracts (

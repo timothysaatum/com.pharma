@@ -24,6 +24,7 @@ test.describe('Event-Sourced Sync: Trigger Cleanup, Projector Execution & Cursor
     });
 
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
     await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
   });

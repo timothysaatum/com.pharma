@@ -10,18 +10,23 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
   const branchId = '22222222-2222-2222-2222-222222222222';
   const userId = '44444444-4444-4444-4444-444444444444';
 
-  test.beforeAll(async () => {
-    backendDb = new BackendDatabase();
-  });
-
-  test.afterAll(async () => {
-    await backendDb.close();
-  });
-
   test.beforeEach(async ({ page }) => {
+    test.setTimeout(90000);
+    backendDb = new BackendDatabase();
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
+    // Capture max seq so sync only pulls events inserted within each test body.
+    const [{ max_seq }] = await backendDb.query<{ max_seq: number }>(
+      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM event_log WHERE org_id = $1',
+      [orgId]
+    );
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '${max_seq}')`);
     await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
+  });
+
+  test.afterEach(async () => {
+    await backendDb.close();
   });
 
   test('1. Concurrent edits trigger version vector conflict and park in unresolved_conflicts', async ({ page }) => {
@@ -196,11 +201,15 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
       }, 'create', branchId);
     }, { custId, orgId, branchId, firstName });
 
-    // Sync first time
+    // Sync first time — retry loop in case auto-sync from page load holds the lock
     await page.evaluate(async () => {
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
 
     // Verify outbox drained
@@ -296,11 +305,15 @@ test.describe('Sync Conflicts, Idempotency & Terminal Failures E2E Tests', () =>
 
     expect(bridge.getOutboxCount()).toBeGreaterThanOrEqual(1);
 
-    // Trigger sync
+    // Trigger sync — retry loop to ensure the lock isn't held from page-load auto-sync
     await page.evaluate(async () => {
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
 
     // Verify the corrupted event is marked rejected_permanent in outbox

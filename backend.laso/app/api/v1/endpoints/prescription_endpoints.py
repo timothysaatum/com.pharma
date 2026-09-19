@@ -447,6 +447,7 @@ async def list_prescriptions(
     status_filter: Optional[str] = Query(None, description="Filter by status: active, filled, expired, cancelled"),
     include_expired: bool = Query(True),
     search: Optional[str] = Query(None, description="Search prescription number, prescriber, or customer name"),
+    branch_id: Optional[uuid.UUID] = Query(None, description="Filter by specific branch"),
 ):
     """
     List prescriptions for the organization.
@@ -462,12 +463,21 @@ async def list_prescriptions(
     # for the same bug class first found (and fixed) on purchase orders.
     if not current_user.is_super_admin:
         assigned_strs = [str(b) for b in (current_user.assigned_branches or [])]
-        if assigned_strs:
+        if branch_id:
+            if str(branch_id) not in assigned_strs:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You don't have access to this branch"
+                )
+            conditions.append(Prescription.branch_id == branch_id)
+        elif assigned_strs:
             conditions.append(Prescription.branch_id.in_(
                 [uuid.UUID(b) for b in assigned_strs]
             ))
         else:
             conditions.append(false())
+    elif branch_id:
+        conditions.append(Prescription.branch_id == branch_id)
 
     if customer_id:
         conditions.append(Prescription.customer_id == customer_id)

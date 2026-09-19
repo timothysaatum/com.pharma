@@ -1185,42 +1185,74 @@ export const localRead = {
     let notStocked = true;
     if (rows.length > 0) {
       const row = rows[0];
-      const rawVal = row.sellable_quantity !== undefined ? row.sellable_quantity : row.quantity;
+      // Use != null so both null and undefined fall through to quantity
+      const rawVal = row.sellable_quantity != null ? row.sellable_quantity : row.quantity;
       const q = Number(rawVal);
       unleasedPool = Math.max(0, !isNaN(q) ? q : 0);
       notStocked = false;
     }
-    
-    // 2. Get the active lease for this terminal
+
+    // 2. When branch_inventory aggregate is missing, derive stock from drug_batches.
+    //    This handles the common case where the aggregate hasn't synced yet but the
+    //    granular batch rows are present (the batches are the authoritative source).
+    let noBatchData = false;
+    if (notStocked) {
+      try {
+        const today = new Date().toISOString().slice(0, 10);
+        const batchRows = await db.select<Array<{ remaining_quantity: number }>>(
+          `SELECT remaining_quantity FROM drug_batches
+           WHERE branch_id = $1 AND drug_id = $2
+             AND remaining_quantity > 0 AND expiry_date > $3`,
+          [branchId, drugId, today]
+        );
+        if (batchRows.length > 0) {
+          for (const b of batchRows) {
+            unleasedPool += Math.max(0, Number(b.remaining_quantity));
+          }
+          notStocked = false;
+        } else {
+          // No valid batches at all — warn the UI so the user knows to sync
+          noBatchData = true;
+        }
+      } catch {
+        // drug_batches table not yet created; leave notStocked as-is
+      }
+    }
+
+    // 3. Get the active lease for this terminal
     let terminalId = "";
     if (typeof localStorage !== "undefined") {
       terminalId = localStorage.getItem("laso_terminal_id") || "UNKNOWN";
     }
-    
+
     const nowUtc = new Date().toISOString();
     let leaseRemaining = 0;
     try {
       const leaseRows = await db.select<Array<{ leased_quantity: number; consumed_quantity: number }>>(
-        `SELECT leased_quantity, consumed_quantity FROM stock_leases 
-         WHERE branch_id = $1 AND drug_id = $2 AND terminal_id = $3 
+        `SELECT leased_quantity, consumed_quantity FROM stock_leases
+         WHERE branch_id = $1 AND drug_id = $2 AND terminal_id = $3
            AND status = 'active' AND expires_at > $4`,
         [branchId, drugId, terminalId, nowUtc]
       );
-      
+
       for (const lease of leaseRows) {
         leaseRemaining += Math.max(0, Number(lease.leased_quantity) - Number(lease.consumed_quantity));
       }
-    } catch (err) {
-      // If table doesn't exist yet, ignore
+    } catch {
+      // stock_leases table not yet created; ignore
     }
 
     const isOnline = typeof navigator !== 'undefined' ? navigator.onLine : true;
-    
-    // If online, we can sell from the lease PLUS the unleased pool (which we could lease on demand).
-    // If offline, we can ONLY sell from what we have already leased.
-    const sellable = isOnline ? (leaseRemaining + unleasedPool) : leaseRemaining;
 
-    return { sellable, totalValidBatch: sellable, notStocked, noBatchData: false };
+    // Online : sell from lease + full unleased pool (can acquire lease on demand).
+    // Offline with lease : restrict to the leased amount to prevent oversell across terminals.
+    // Offline, no lease  : lease system not in use — fall back to unleasedPool so
+    //                       pharmacies that haven't set up leases can still sell offline.
+    const sellable = isOnline
+      ? (leaseRemaining + unleasedPool)
+      : (leaseRemaining > 0 ? leaseRemaining : unleasedPool);
+
+    return { sellable, totalValidBatch: sellable, notStocked, noBatchData };
   },
 
   async getValuation(branchId: string): Promise<InventoryValuationResponse> {
@@ -1349,7 +1381,9 @@ async searchPrescriptions(
     const totalRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM prescriptions p ${where}`, values);
     const total = totalRows[0]?.total ?? 0;
 
-    const offset = (page - 1) * page_size;
+    const effectivePage = params.page ?? page;
+    const effectivePageSize = params.page_size ?? page_size;
+    const offset = (effectivePage - 1) * effectivePageSize;
     const rows = await db.select<Record<string, unknown>[]>(
       `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name${auditSelect}
        FROM prescriptions p
@@ -1358,11 +1392,11 @@ async searchPrescriptions(
        ${where}
        ORDER BY p.created_at DESC
        LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
-      [...values, page_size, offset]
+      [...values, effectivePageSize, offset]
     );
     console.log(`[LocalRead] searchPrescriptions: found ${total} total, returning ${rows.length} rows`);
 
-    return buildPagination(rows.map(toPrescription), page, page_size, total);
+    return buildPagination(rows.map(toPrescription), effectivePage, effectivePageSize, total);
   },
 
   async getPrescriptionById(id: string): Promise<any | null> {

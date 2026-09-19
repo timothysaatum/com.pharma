@@ -48,6 +48,16 @@ interface AuthState {
 //  3. Any other role with NO branches      → needs_branch
 //     (Org exists but the admin skipped branch setup — prompt to add one.)
 // ─────────────────────────────────────────────────────────────────────────────
+function isTokenExpired(token: string): boolean {
+    try {
+        const payload = JSON.parse(atob(token.split(".")[1]));
+        // 30-second buffer so a token expiring mid-flight still gets refreshed
+        return (payload.exp - 30) * 1000 < Date.now();
+    } catch {
+        return true;
+    }
+}
+
 function deriveSetupState(user: User): SetupState {
     // Must change password before accessing the app
     if (user.password_change_required) {
@@ -105,6 +115,23 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             ]);
 
             if (token && user) {
+                // Proactively refresh if the stored token is expired so that
+                // the sync engine, authApi.me(), and any page queries all fire
+                // with a valid token — preventing the burst of startup 401s.
+                if (isTokenExpired(token) && navigator.onLine && !isBackendKnownUnreachable()) {
+                    try {
+                        const storedRefresh = await authStorage.getRefreshToken();
+                        if (!storedRefresh) {
+                            await authStorage.clearTokens();
+                            return;
+                        }
+                        await authApi.refresh(storedRefresh);
+                    } catch {
+                        await authStorage.clearTokens();
+                        return;
+                    }
+                }
+
                 const setupState = deriveSetupState(user);
 
                 // Only restore the saved branch when the user is actually ready.

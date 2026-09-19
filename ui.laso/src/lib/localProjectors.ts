@@ -346,12 +346,12 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
     `INSERT OR IGNORE INTO prescriptions
        (id, organization_id, branch_id, customer_id,
         prescription_number, prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
-        issue_date, expiry_date, diagnosis, notes, medications,
-        refills_allowed, refills_remaining, status,
+        issue_date, expiry_date, diagnosis, notes, special_instructions, medications,
+        refills_allowed, refills_remaining, status, verified_by, verified_at,
         sync_status, sync_version, synced_at, updated_at, created_at)
      VALUES
-       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-        'synced',1,NULL,$18,$19)`,
+       ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,
+        'synced',1,NULL,$21,$22)`,
     [
       String(e.aggregate_id),
       String(p.organization_id ?? e.org_id),
@@ -366,10 +366,13 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
       p.expiry_date != null ? String(p.expiry_date) : new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10),
       p.diagnosis != null ? String(p.diagnosis) : null,
       p.notes != null ? String(p.notes) : null,
+      p.special_instructions != null ? String(p.special_instructions) : null,
       JSON.stringify(p.medications ?? []),
       Number(p.refills_allowed ?? 0),
       Number(p.refills_remaining ?? 0),
       String(p.status ?? "active"),
+      p.verified_by != null ? String(p.verified_by) : null,
+      p.verified_at != null ? String(p.verified_at) : null,
       now,
       now,
     ]
@@ -380,8 +383,8 @@ async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const UPDATABLE = [
     "prescriber_name", "prescriber_license", "prescriber_phone", "prescriber_address",
-    "issue_date", "expiry_date", "diagnosis", "notes",
-    "status", "refills_allowed", "refills_remaining",
+    "issue_date", "expiry_date", "diagnosis", "notes", "special_instructions",
+    "status", "refills_allowed", "refills_remaining", "verified_by", "verified_at",
   ];
   const fields: [string, unknown][] = [];
   if ("medications" in p) {

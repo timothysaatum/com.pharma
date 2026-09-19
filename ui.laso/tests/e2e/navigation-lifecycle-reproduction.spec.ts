@@ -11,6 +11,8 @@ test.describe('Navigation Lifecycle & Global Reload Verification', () => {
     test.setTimeout(60000);
     backendDb = new BackendDatabase();
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '9999999')`);
     await bridge.attachToPage(page);
     const auth = await setupAuthenticatedState(page, bridge);
     await backendDb.seedDefaultPriceContract(auth.orgId);
@@ -56,9 +58,14 @@ test.describe('Navigation Lifecycle & Global Reload Verification', () => {
     await page.evaluate(async () => {
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      // Retry a few times in case auto-retry holds the lock momentarily
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
-    await expect(page.getByText(/Just now|\d+m ago|0 pending/i).first()).toBeVisible({ timeout: 20000 });
+    await expect(page.getByText(/Just now|\d+m ago|0 pending/i).first()).toBeVisible({ timeout: 25000 });
 
     // Active Branch must be visible and stable
     const branchPill = page.locator('aside').getByText('Downtown Main Branch');

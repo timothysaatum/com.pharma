@@ -171,7 +171,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 30;
+const MAX_KNOWN_SCHEMA_VERSION = 31;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -291,7 +291,9 @@ async function runMigrations(db: Database): Promise<void> {
         if (user_version < 28) await migrate_v28(db);
         if (user_version < 29) await migrate_v29(db);
         if (user_version < 30) await migrate_v30(db);
+        if (user_version < 31) await migrate_v31(db);
         await ensureAuditLogSchema(db);
+        await ensurePrescriptionSchema(db);
     } catch (e) {
         const msg = (e && typeof e === "object" && "message" in e)
           ? (e as { message: unknown }).message
@@ -1579,11 +1581,15 @@ async function migrate_v22(db: Database): Promise<void> {
             expiry_date           TEXT,
             diagnosis             TEXT,
             notes                 TEXT,
+            special_instructions  TEXT,
             medications           TEXT NOT NULL DEFAULT '[]',
             refills_allowed       INTEGER NOT NULL DEFAULT 0,
             refills_remaining     INTEGER NOT NULL DEFAULT 0,
             last_refill_date      TEXT,
             status                TEXT NOT NULL DEFAULT 'active',
+            verified_by           TEXT,
+            verified_at           TEXT,
+            created_offline_at    TEXT,
             is_deleted            INTEGER NOT NULL DEFAULT 0,
             sync_status           TEXT NOT NULL DEFAULT 'synced',
             sync_version          INTEGER NOT NULL DEFAULT 1,
@@ -1593,8 +1599,8 @@ async function migrate_v22(db: Database): Promise<void> {
           )`,
           cols: `id, organization_id, branch_id, prescription_number, customer_id,
             prescriber_name, prescriber_license, prescriber_phone, prescriber_address,
-            issue_date, expiry_date, diagnosis, notes, medications, refills_allowed,
-            refills_remaining, last_refill_date, status, is_deleted, sync_status,
+            issue_date, expiry_date, diagnosis, notes, special_instructions, medications, refills_allowed,
+            refills_remaining, last_refill_date, status, verified_by, verified_at, created_offline_at, is_deleted, sync_status,
             sync_version, synced_at, updated_at, created_at`,
         },
         purchase_orders: {
@@ -2526,6 +2532,55 @@ export async function migrate_v30(db: Database): Promise<void> {
   }
 
   await db.execute("PRAGMA user_version = 30");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v31 — ensure prescription columns (special_instructions, verified_by, verified_at, created_offline_at)
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function migrate_v31(db: Database): Promise<void> {
+  const columnsToAdd = [
+    { name: "special_instructions", type: "TEXT" },
+    { name: "verified_by", type: "TEXT" },
+    { name: "verified_at", type: "TEXT" },
+    { name: "created_offline_at", type: "TEXT" },
+  ];
+
+  for (const { name, type } of columnsToAdd) {
+    try {
+      await db.execute(`ALTER TABLE prescriptions ADD COLUMN ${name} ${type}`);
+    } catch {
+      // Column may already exist
+    }
+  }
+
+  await db.execute("PRAGMA user_version = 31");
+}
+
+export async function ensurePrescriptionSchema(db: Database): Promise<void> {
+  const columnsToAdd = [
+    { name: "special_instructions", type: "TEXT" },
+    { name: "verified_by", type: "TEXT" },
+    { name: "verified_at", type: "TEXT" },
+    { name: "created_offline_at", type: "TEXT" },
+  ];
+
+  try {
+    const tableInfo = await db.select<{ name: string }[]>("PRAGMA table_info(prescriptions)");
+    const existingCols = new Set(tableInfo.map((col) => col.name));
+
+    for (const { name, type } of columnsToAdd) {
+      if (!existingCols.has(name)) {
+        try {
+          await db.execute(`ALTER TABLE prescriptions ADD COLUMN ${name} ${type}`);
+        } catch {
+          // Ignored if concurrently added
+        }
+      }
+    }
+  } catch (err) {
+    console.warn("[localDb] ensurePrescriptionSchema warning:", err);
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

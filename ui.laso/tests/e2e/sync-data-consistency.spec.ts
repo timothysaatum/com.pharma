@@ -10,21 +10,26 @@ test.describe('Sync Data Consistency & Multi-Directional E2E Tests', () => {
   const branchId = '22222222-2222-2222-2222-222222222222';
   const drugId = '33333333-3333-3333-3333-333333333331'; // Amoxicillin
 
-  test.beforeAll(async () => {
-    backendDb = new BackendDatabase();
-  });
-
-  test.afterAll(async () => {
-    await backendDb.close();
-  });
-
   test.beforeEach(async ({ page }) => {
     test.setTimeout(60000);
     page.on('console', msg => console.log(`[BROWSER ${msg.type()}]:`, msg.text()));
     page.on('pageerror', err => console.error('[BROWSER ERROR]:', err));
+    backendDb = new BackendDatabase();
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
+    // Capture max seq before test-specific events are inserted so sync only
+    // pulls the events seeded within each test body, not the full history.
+    const [{ max_seq }] = await backendDb.query<{ max_seq: number }>(
+      'SELECT COALESCE(MAX(seq), 0) as max_seq FROM event_log WHERE org_id = $1',
+      [orgId]
+    );
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '${max_seq}')`);
     await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
+  });
+
+  test.afterEach(async () => {
+    await backendDb.close();
   });
 
   test('1. Server-side new batch is pulled to client SQLite and reflected in POS search', async ({ page }) => {

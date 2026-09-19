@@ -221,14 +221,25 @@ class SyncEngine {
         this._isSyncing = true;
         this.setStatus("syncing");
 
+        let _timeoutResolve: (() => void) | null = null;
+        const _timeoutRace = new Promise<void>(res => { _timeoutResolve = res; });
+
         const timeoutId = setTimeout(() => {
             if (this._isSyncing) {
                 console.warn("[SyncEngine] Sync cycle timed out after 30s — resetting syncing status.");
                 this._isSyncing = false;
                 this.setStatus("error");
             }
+            _timeoutResolve?.();
         }, 30_000);
 
+        await Promise.race([this._doSync(), _timeoutRace]);
+
+        clearTimeout(timeoutId);
+        this._isSyncing = false;
+    }
+
+    private async _doSync(): Promise<void> {
         try {
             const eventPushResult = await this.pushEvents();
             await this.pullEvents();
@@ -265,7 +276,6 @@ class SyncEngine {
                 }
             }
         } finally {
-            clearTimeout(timeoutId);
             this._isSyncing = false;
         }
     }

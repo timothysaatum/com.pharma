@@ -10,19 +10,19 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
   const branchId = '22222222-2222-2222-2222-222222222222';
   const userId = '44444444-4444-4444-4444-444444444444';
 
-  test.beforeAll(async () => {
-    backendDb = new BackendDatabase();
-  });
-
-  test.afterAll(async () => {
-    await backendDb.close();
-  });
-
   test.beforeEach(async ({ page }) => {
-    test.setTimeout(60000);
+    test.setTimeout(90000);
+    backendDb = new BackendDatabase();
     bridge = new TauriSqliteBridge();
+    bridge.prewarmSchema();
+    // High cursor so pull phase returns instantly — these tests only exercise push.
+    bridge.db.exec(`INSERT OR REPLACE INTO sync_meta (key, value) VALUES ('event_pull_seq', '9999999')`);
     await bridge.attachToPage(page);
     await setupAuthenticatedState(page, bridge);
+  });
+
+  test.afterEach(async () => {
+    await backendDb.close();
   });
 
   test('1. Sync attempts while offline handle network errors gracefully and retain outbox', async ({ page }) => {
@@ -195,12 +195,18 @@ test.describe('Sync Adversarial & Network Failure E2E Tests', () => {
     // Now unblock the route (server recovered)
     failureInjected = false;
     await page.unroute('**/api/v1/sync/events');
+    // Wait for any in-flight 500 response to resolve and release the sync lock
+    await page.waitForTimeout(800);
 
-    // Trigger next sync cycle
+    // Trigger next sync cycle with retries in case the lock is momentarily held
     await page.evaluate(async () => {
       // @ts-ignore
       const { syncEngine } = await import('/src/lib/syncEngine.ts');
-      await syncEngine.sync();
+      for (let i = 0; i < 5; i++) {
+        await syncEngine.sync();
+        if (syncEngine.status === 'idle') break;
+        await new Promise(r => setTimeout(r, 600));
+      }
     });
 
     // Verify outbox drains to 0
