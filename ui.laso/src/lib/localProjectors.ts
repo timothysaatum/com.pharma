@@ -194,10 +194,15 @@ async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {
   if (fields.length === 0) return;
   const now = e.authored_at ?? new Date().toISOString();
   const setClauses = fields.map((_, i) => `${fields[i][0]} = $${i + 1}`).join(", ");
-  await db.execute(
+  const result = await db.execute(
     `UPDATE customers SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
     [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
+  // If row didn't exist, fall back to a full insert.
+  if (result.rowsAffected === 0) {
+    await _customerCreated(db, e);
+    return;
+  }
   // Persist the authoritative vector so future offline edits read the correct base.
   if (Object.keys(incomingVector).length > 0) {
     await setVersionVector("customers", String(e.aggregate_id), incomingVector);
@@ -505,10 +510,13 @@ async function _priceContractUpdated(db: Db, e: EventEnvelope): Promise<void> {
   if (fields.length === 0) return;
   const now = e.authored_at ?? new Date().toISOString();
   const setClauses = fields.map((f, i) => `${f[0]} = $${i + 1}`).join(", ");
-  await db.execute(
+  const result = await db.execute(
     `UPDATE price_contracts SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
     [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
+  if (result.rowsAffected === 0) {
+    await _priceContractCreated(db, e);
+  }
 }
 
 async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
@@ -648,7 +656,8 @@ async function _drugCreated(db: Db, e: EventEnvelope): Promise<void> {
 
 async function _drugUpdated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
-  await db.execute(
+  const now = e.authored_at ?? new Date().toISOString();
+  const result = await db.execute(
     `UPDATE drugs SET
        name = $1, generic_name = $2, brand_name = $3,
        sku = $4, barcode = $5, category_id = $6,
@@ -691,10 +700,13 @@ async function _drugUpdated(db: Db, e: EventEnvelope): Promise<void> {
       p.contraindications != null ? String(p.contraindications) : null,
       p.storage_conditions != null ? String(p.storage_conditions) : null,
       p.is_active !== false ? 1 : 0,
-      p.updated_at != null ? String(p.updated_at) : (e.authored_at ?? new Date().toISOString()),
+      p.updated_at != null ? String(p.updated_at) : now,
       String(e.aggregate_id),
     ]
   );
+  if (result.rowsAffected === 0) {
+    await _drugCreated(db, e);
+  }
 }
 
 // ── Drug category projectors ───────────────────────────────────────────────
@@ -724,7 +736,7 @@ async function _drugCategoryCreated(db: Db, e: EventEnvelope): Promise<void> {
 
 async function _drugCategoryUpdated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
-  await db.execute(
+  const result = await db.execute(
     `UPDATE drug_categories SET
        name = $1, description = $2,
        parent_id = $3, path = $4, level = $5,
@@ -740,6 +752,9 @@ async function _drugCategoryUpdated(db: Db, e: EventEnvelope): Promise<void> {
       String(e.aggregate_id),
     ]
   );
+  if (result.rowsAffected === 0) {
+    await _drugCategoryCreated(db, e);
+  }
 }
 
 // ── Drug Batch projectors ───────────────────────────────────────────────────

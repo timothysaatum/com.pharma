@@ -370,8 +370,8 @@ class SyncEngine {
         // Page through server events. Cap at 50 pages per cycle.
         for (let page = 0; page < 50; page++) {
             const response = await syncApi.pullEvents(afterSeq);
-            let contiguousSeq = afterSeq;
-            let hadProjectionError = false;
+            let lastSuccessSeq = afterSeq;
+            let hitFailure = false;
 
             for (const envelope of response.events) {
                 let authored = false;
@@ -382,41 +382,41 @@ class SyncEngine {
                 }
 
                 if (authored) {
-                    if (envelope.seq != null && envelope.seq > contiguousSeq) {
-                        contiguousSeq = envelope.seq;
-                        await setEventPullSeq(contiguousSeq);
+                    if (envelope.seq != null && envelope.seq > lastSuccessSeq) {
+                        lastSuccessSeq = envelope.seq;
                     }
                     continue;
                 }
 
                 try {
                     await applyEventLocally(envelope);
-                    if (envelope.seq != null && envelope.seq > contiguousSeq) {
-                        contiguousSeq = envelope.seq;
-                        await setEventPullSeq(contiguousSeq);
+                    if (envelope.seq != null && envelope.seq > lastSuccessSeq) {
+                        lastSuccessSeq = envelope.seq;
                     }
                 } catch (err) {
                     console.warn(
                         `[SyncEngine] localProjector failed for event ${envelope.event_id} (${envelope.event_type}):`,
                         err
                     );
-                    hadProjectionError = true;
-                    break;
+                    hitFailure = true;
+                    // Stop advancing — remaining events in this page may depend
+                    // on this one.  The next cycle will re-pull from lastSuccessSeq.
                 }
+
+                if (hitFailure) break;
             }
 
-            if (hadProjectionError) {
-                // Halt pull loop on projector failure without advancing beyond the last successful contiguous seq
-                afterSeq = contiguousSeq;
-                break;
-            }
-
-            if (response.events.length > 0) {
-                if (response.next_after_seq > contiguousSeq) {
-                    contiguousSeq = response.next_after_seq;
-                    await setEventPullSeq(contiguousSeq);
+            // Persist the cursor.  If a failure occurred we stay before the
+            // failed event so it will be retried; otherwise we jump to
+            // next_after_seq to skip ahead of any gaps.
+            if (!hitFailure && response.events.length > 0) {
+                const target = response.next_after_seq > lastSuccessSeq
+                    ? response.next_after_seq
+                    : lastSuccessSeq;
+                if (target > afterSeq) {
+                    await setEventPullSeq(target);
+                    afterSeq = target;
                 }
-                afterSeq = contiguousSeq;
             }
 
             if (!response.has_more) break;

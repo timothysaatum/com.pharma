@@ -1405,12 +1405,19 @@ export default function InventoryPage() {
                                 ) : inventory.length === 0 ? (
                                     <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">
                                         <Package className="w-10 h-10 opacity-30" />
-                                        <p className="text-sm">No inventory items found</p>
-                                        <button onClick={() => setAddDrugOpen(true)}
-                                            className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700">
-                                            <Plus className="w-4 h-4" />
-                                            Add Drugs
-                                        </button>
+                                        <p className="text-sm">
+                                            {inventoryFromCache
+                                                ? "No inventory data available offline. Connect to the server to sync."
+                                                : "No inventory items found"
+                                            }
+                                        </p>
+                                        {!inventoryFromCache && (
+                                            <button onClick={() => setAddDrugOpen(true)}
+                                                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700">
+                                                <Plus className="w-4 h-4" />
+                                                Add Drugs
+                                            </button>
+                                        )}
                                     </div>
                                 ) : (
                                     <table className="w-full text-sm">

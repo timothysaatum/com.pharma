@@ -31,7 +31,6 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { AnimatePresence } from "framer-motion";
 import { useAuthStore } from "@/stores/authStore";
 import { contractsApi, type AvailableContract } from "@/api/contracts";
-import { inventoryApi } from "@/api/inventory";
 import { salesApi, type ProcessSaleResponse } from "@/api/sales";
 import { statsApi } from "@/api/stats";
 import { isBackendKnownUnreachable, isBackendReachable, isOfflineError, parseApiError } from "@/api/client";
@@ -110,24 +109,7 @@ export default function POSPage() {
     const stockRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
     const resolveSellableQuantity = useCallback(async (branchId: string, drugId: string) => {
-        let info = await localRead.getSellableQuantity(branchId, drugId);
-        if (info.notStocked && navigator.onLine && isBackendReachable()) {
-            try {
-                const res = await inventoryApi.getBranchInventory(branchId, { drug_id: drugId });
-                const item = res.items.find((i) => i.drug_id === drugId);
-                if (item) {
-                    const qty = item.valid_batch_quantity ?? item.available_quantity ?? item.quantity ?? 0;
-                    info = {
-                        sellable: qty,
-                        totalValidBatch: qty,
-                        notStocked: false,
-                        noBatchData: false,
-                    };
-                }
-            } catch {
-                // Ignore network error; fallback to local info
-            }
-        }
+        const info = await localRead.getSellableQuantity(branchId, drugId);
         return info;
     }, []);
 

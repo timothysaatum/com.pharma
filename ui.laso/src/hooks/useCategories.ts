@@ -97,6 +97,7 @@ export function useCategories() {
     const [categories, setCategories] = useState<DrugCategory[]>(flatCache ?? []);
     const [isLoading, setIsLoading] = useState(flatCache === null);
     const [error, setError] = useState<string | null>(null);
+    const [fromCache, setFromCache] = useState(false);
     const mounted = useRef(true);
 
     useEffect(() => {
@@ -106,11 +107,13 @@ export function useCategories() {
         if (flatCache !== null && !preferLocal) {
             setCategories(flatCache);
             setIsLoading(false);
+            setFromCache(false);
             return;
         }
         setCategories(flatCache ?? []);
         setIsLoading(true);
         setError(null);
+        setFromCache(preferLocal);
 
         if (!flatInflight || preferLocal) {
             flatInflight = loadFlatCategories(organizationId);
@@ -123,6 +126,7 @@ export function useCategories() {
                 if (mounted.current) {
                     setCategories(data);
                     setIsLoading(false);
+                    setFromCache(shouldReadCategoriesFromLocal());
                 }
             })
             .catch((err) => {
@@ -179,7 +183,7 @@ export function useCategories() {
             });
     }
 
-    return { categories, isLoading, error, invalidate };
+    return { categories, isLoading, error, invalidate, fromCache };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -199,6 +203,7 @@ export function useCategoryTree() {
     const [tree, setTree] = useState<DrugCategoryTree[]>(treeCache ?? []);
     const [isLoading, setIsLoading] = useState(treeCache === null);
     const [error, setError] = useState<string | null>(null);
+    const [fromCache, setFromCache] = useState(false);
     const mounted = useRef(true);
 
     useEffect(() => {
@@ -208,11 +213,13 @@ export function useCategoryTree() {
         if (treeCache !== null && !preferLocal) {
             setTree(treeCache);
             setIsLoading(false);
+            setFromCache(false);
             return;
         }
         setTree(treeCache ?? []);
         setIsLoading(true);
         setError(null);
+        setFromCache(preferLocal);
 
         if (!treeInflight || preferLocal) {
             treeInflight = loadCategoryTree(organizationId);
@@ -225,6 +232,7 @@ export function useCategoryTree() {
                 if (mounted.current) {
                     setTree(data);
                     setIsLoading(false);
+                    setFromCache(shouldReadCategoriesFromLocal());
                 }
             })
             .catch((err) => {
@@ -282,5 +290,5 @@ export function useCategoryTree() {
             });
         }
 
-    return { tree, isLoading, error, invalidate };
+    return { tree, isLoading, error, invalidate, fromCache };
 }

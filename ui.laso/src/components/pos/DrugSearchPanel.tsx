@@ -335,7 +335,12 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
                     <div className="flex flex-col items-center justify-center h-32 gap-2 text-ink-muted">
                         <Package className="w-8 h-8 opacity-30" />
                         <p className="text-xs">
-                            {query ? "No drugs match your search" : "No drugs available"}
+                            {query
+                                ? "No drugs match your search"
+                                : (!navigator.onLine || isBackendKnownUnreachable())
+                                    ? "No drug data available offline. Connect to the server to sync."
+                                    : "No drugs available"
+                            }
                         </p>
                     </div>
                 ) : (

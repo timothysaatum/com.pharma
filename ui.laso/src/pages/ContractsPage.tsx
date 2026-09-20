@@ -80,6 +80,7 @@ export default function ContractsPage() {
     const [filterType, setFilterType] = useState("");
     const [filterStatus, setFilterStatus] = useState("");
     const [statsBar, setStatsBar] = useState({ active: 0, suspended: 0, expired: 0 });
+    const [contractsFromCache, setContractsFromCache] = useState(false);
 
     // ── Modal state ────────────────────────────────────────────────────────────
     const [showCreate, setShowCreate] = useState(false);
@@ -99,6 +100,7 @@ export default function ContractsPage() {
 
         setIsLoading(true);
         setError(null);
+        setContractsFromCache(false);
 
         const params: ContractListParams = {
             page,
@@ -126,6 +128,7 @@ export default function ContractsPage() {
                     setContracts(result.items);
                     setTotal(result.total);
                     setTotalPages(result.total_pages);
+                    setContractsFromCache(true);
                     setStatsBar({
                         active: result.items.filter((c) => c.status === "active").length,
                         suspended: result.items.filter((c) => c.status === "suspended").length,
@@ -344,8 +347,13 @@ export default function ContractsPage() {
                 ) : contracts.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-48 gap-3 text-ink-muted">
                         <Filter className="w-10 h-10 opacity-25" />
-                        <p className="text-sm font-medium">No contracts found</p>
-                        {canManage && <button onClick={() => setShowCreate(true)} className="text-sm text-brand-600 hover:underline">Create your first contract</button>}
+                        <p className="text-sm font-medium">
+                            {contractsFromCache
+                                ? "No contracts available offline. Connect to the server to sync."
+                                : "No contracts found"
+                            }
+                        </p>
+                        {!contractsFromCache && canManage && <button onClick={() => setShowCreate(true)} className="text-sm text-brand-600 hover:underline">Create your first contract</button>}
                     </div>
                 ) : (
                     <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">

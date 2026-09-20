@@ -273,8 +273,15 @@ export default function CustomersPage() {
                 ) : customers.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-48 gap-3 text-ink-muted">
                         <Users className="w-10 h-10 opacity-25" />
-                        <p className="text-sm font-medium">No customers found</p>
-                        <button onClick={() => setShowCreate(true)} className="text-sm text-brand-600 hover:underline">Register your first customer</button>
+                        <p className="text-sm font-medium">
+                            {customersFromCache
+                                ? "No customers available offline. Connect to the server to sync."
+                                : "No customers found"
+                            }
+                        </p>
+                        {!customersFromCache && (
+                            <button onClick={() => setShowCreate(true)} className="text-sm text-brand-600 hover:underline">Register your first customer</button>
+                        )}
                     </div>
                 ) : (
                     <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
