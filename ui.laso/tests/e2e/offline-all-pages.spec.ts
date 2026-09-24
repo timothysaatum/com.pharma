@@ -3,12 +3,14 @@ import { TauriSqliteBridge } from './helpers/tauri-bridge';
 import { setupAuthenticatedState } from './helpers/auth-helper';
 import { BackendDatabase } from './helpers/backend-db';
 
+test.use({ baseURL: 'http://127.0.0.1:1420' });
+
 test.describe('All Pages Offline-First & Online Navigation E2E Audit', () => {
   let bridge: TauriSqliteBridge;
   let backendDb: BackendDatabase;
 
-  const orgId = '11111111-1111-1111-1111-111111111111';
-  const branchId = '22222222-2222-2222-2222-222222222222';
+  const orgId = '2d060ef8-a302-447c-91f4-b2fd30268341';
+  const branchId = '72b2433d-120b-42a2-918b-e6dfcf176b1a';
   const categoryId = '55555555-5555-5555-5555-555555555555';
   const drugId = '66666666-6666-6666-6666-666666666666';
   const customerId = '88888888-8888-8888-8888-888888888888';

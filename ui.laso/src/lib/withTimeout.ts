@@ -35,7 +35,11 @@ export async function withTimeout<T>(
 ): Promise<TimeoutResult<T>> {
     const { timeoutMs = 20000, dataKey = "" } = options;
 
-    if (isBackendKnownUnreachable()) {
+    // Check both navigator.onLine and backendReachable for robust offline detection.
+    // The main.tsx probe ensures backendReachable is accurate before render,
+    // but navigator.onLine is an instant, synchronous check that works even
+    // if the probe hasn't completed or state is stale.
+    if (isBackendKnownUnreachable() || (typeof navigator !== "undefined" && !navigator.onLine)) {
         const cachedData = await cacheFn();
         if (dataKey) {
             dataFreshnessStore.setState((state) => ({

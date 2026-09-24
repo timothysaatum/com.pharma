@@ -284,7 +284,10 @@ class InventoryService:
         """
         Paginated inventory for a branch with joined drug and branch details.
 
-        Calculates drug quantity as the sum of unexpired batches.
+        Calculates drug quantity as the sum of unexpired batches, falling back to
+        BranchInventory.quantity when no valid batches exist (e.g., expired batches
+        or no batches recorded). This ensures manually-set quantities or legacy data
+        are still visible in the UI.
         """
         from app.models.pharmacy.pharmacy_model import Branch
         from datetime import date
@@ -304,8 +307,18 @@ class InventoryService:
             .scalar_subquery()
         )
 
+        # Combined quantity: use valid_batch_sum if > 0, otherwise fall back to BranchInventory.quantity
+        # This handles cases where:
+        # - Only expired batches exist (valid_batch_sum = 0, but inventory.quantity has legacy value)
+        # - No batches recorded yet (valid_batch_sum = 0, but inventory.quantity was manually set)
+        # - All batches consumed/expired but inventory record still exists with quantity
+        combined_quantity = func.coalesce(
+            func.nullif(valid_batch_sum, 0),
+            BranchInventory.quantity
+        )
+
         query = (
-            select(BranchInventory, valid_batch_sum.label("valid_batch_qty"))
+            select(BranchInventory, valid_batch_sum.label("valid_batch_qty"), combined_quantity.label("combined_qty"))
             .join(Drug,   BranchInventory.drug_id   == Drug.id)
             .join(Branch, BranchInventory.branch_id == Branch.id)
             .options(
@@ -327,8 +340,8 @@ class InventoryService:
             count_base = count_base.where(BranchInventory.drug_id == drug_id)
 
         if not include_zero_stock:
-            query      = query.where(valid_batch_sum > 0)
-            count_base = count_base.where(valid_batch_sum > 0)
+            query      = query.where(combined_quantity > 0)
+            count_base = count_base.where(combined_quantity > 0)
 
         if search:
             pattern = f"%{search}%"
@@ -342,8 +355,8 @@ class InventoryService:
             count_base = count_base.where(cond)
 
         if low_stock_only:
-            query      = query.where(valid_batch_sum <= Drug.reorder_level)
-            count_base = count_base.where(valid_batch_sum <= Drug.reorder_level)
+            query      = query.where(combined_quantity <= Drug.reorder_level)
+            count_base = count_base.where(combined_quantity <= Drug.reorder_level)
 
         if drug_type:
             if drug_type == "prescription":
@@ -367,11 +380,11 @@ class InventoryService:
         batch_selling_prices = await InventoryService._get_fefo_batch_selling_prices(
             db=db,
             branch_id=branch_id,
-            drug_ids=[inv.drug_id for inv, _ in rows],
+            drug_ids=[inv.drug_id for inv, _, _ in rows],
         )
 
         items: List[BranchInventoryWithDetails] = []
-        for inv, valid_batch_qty in rows:
+        for inv, valid_batch_qty, combined_qty in rows:
             drug: Drug             = inv.drug
             branch                 = inv.branch
             catalog_unit_price = Decimal(str(drug.unit_price))
@@ -392,7 +405,7 @@ class InventoryService:
                     id=inv.id,
                     branch_id=inv.branch_id,
                     drug_id=inv.drug_id,
-                    quantity=valid_batch_qty,  # Map the unexpired batch sum!
+                    quantity=combined_qty,  # Use combined quantity (valid batches + fallback to inventory.quantity)
                     reserved_quantity=inv.reserved_quantity,
                     location=inv.location,
                     selling_price=branch_unit_price,
@@ -1670,15 +1683,13 @@ class InventoryService:
         """
         Generate a low-stock / out-of-stock report for an organisation.
 
-        Includes every active drug whose ``BranchInventory.quantity`` is at
-        or below its ``Drug.reorder_level``.
+        Includes every active drug whose available stock (unexpired batches, falling back
+        to BranchInventory.quantity) is at or below its Drug.reorder_level.
         """
         from app.models.pharmacy.pharmacy_model import Branch
         from datetime import date as _date
 
-        # Use batch-sum subquery (same approach as get_branch_inventory) so the
-        # low-stock report always reflects the real dispatchable stock rather than
-        # the potentially-stale BranchInventory.quantity column.
+        # Subquery to calculate the sum of remaining quantities for unexpired, non-zero batches
         valid_batch_sum = (
             select(func.coalesce(func.sum(DrugBatch.remaining_quantity), 0))
             .where(
@@ -1693,7 +1704,11 @@ class InventoryService:
             .scalar_subquery()
         )
 
-        available_expr = valid_batch_sum - BranchInventory.reserved_quantity
+        # Combined available quantity: use valid_batch_sum if > 0, otherwise fall back to BranchInventory.quantity
+        combined_available = func.coalesce(
+            func.nullif(valid_batch_sum, 0),
+            BranchInventory.quantity
+        ) - BranchInventory.reserved_quantity
 
         query = (
             select(
@@ -1706,6 +1721,7 @@ class InventoryService:
                 Branch.name.label("branch_name"),
                 valid_batch_sum.label("batch_qty"),
                 BranchInventory.reserved_quantity,
+                combined_available.label("available_qty"),
             )
             .join(BranchInventory, Drug.id == BranchInventory.drug_id)
             .join(Branch, BranchInventory.branch_id == Branch.id)
@@ -1713,7 +1729,7 @@ class InventoryService:
                 Drug.organization_id == organization_id,
                 Drug.is_active       == True,
                 Drug.is_deleted      == False,
-                available_expr <= Drug.reorder_level,
+                combined_available <= Drug.reorder_level,
             )
         )
 
@@ -1730,7 +1746,7 @@ class InventoryService:
         low_stock_count    = 0
 
         for row in rows:
-            available = int(row.batch_qty or 0) - (row.reserved_quantity or 0)
+            available = int(row.available_qty or 0)
             item_status = "out_of_stock" if available == 0 else "low_stock"
             if item_status == "out_of_stock":
                 out_of_stock_count += 1

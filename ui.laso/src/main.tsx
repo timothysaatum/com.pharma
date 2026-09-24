@@ -9,11 +9,15 @@ import { probeBackendNow, startBackendHeartbeat } from "@/api/client";
 // value when pages mount. Without this, `backendReachable` defaults to
 // `true` and all pages optimistically hit the API before it has had a
 // chance to fail and flip the flag.
-probeBackendNow();
-startBackendHeartbeat();
+// We AWAIT the probe to eliminate the cold-start race where pages mount
+// before `backendReachable` is correctly set (up to 5s delay otherwise).
+(async () => {
+  await probeBackendNow();
+  startBackendHeartbeat();
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>
+  );
+})();
