@@ -9,3 +9,7 @@
 .ruff_cache/
 __pycache__/
 *.pyc
+
+/backend.log
+/logs/
+/test-results/
