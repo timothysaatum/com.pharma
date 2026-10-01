@@ -27,13 +27,23 @@ interface SyncIndicatorProps {
 }
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
-    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, discardFailure } = useSyncStatus();
+    const { status, pendingCount, lastSyncAt, conflicts, failures, health, syncNow, discardFailure } = useSyncStatus();
     const [showConflictModal, setShowConflictModal] = useState(false);
     const [voidingFailure, setVoidingFailure] = useState<QueuedFailure | null>(null);
 
     const hasConflicts = conflicts.length > 0;
     const hasFailures = failures.length > 0;
     const blockedFailures = failures.filter((failure) => failure.is_blocked).length;
+
+    // Projection failures are separate from push-queue `failures`: these are
+    // events the SERVER sent that this device could not apply locally. They used
+    // to be invisible, which is how a wedged cursor presented as a healthy idle
+    // device while stock figures quietly disagreed with the server.
+    const projectionFailures = health.failedCount + health.quarantinedCount;
+    const isProjectionStalled = projectionFailures > 0;
+    const behindBy =
+        health.serverHeadSeq !== null ? health.serverHeadSeq - health.pulledSeq : null;
+    const isBehind = behindBy !== null && behindBy > 0;
 
     // This device has never completed a sync, so every local read is served
     // from an empty or partial cache. Showing that as "healthy" is actively
@@ -52,7 +62,7 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return <RefreshCw className="w-3.5 h-3.5 animate-spin text-brand-400" />;
         if (status === "offline")
             return <WifiOff className="w-3.5 h-3.5 text-amber-400" />;
-        if (status === "error" || hasConflicts || hasFailures)
+        if (status === "error" || hasConflicts || hasFailures || isProjectionStalled)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
         if (neverSynced)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
@@ -65,6 +75,10 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
         if (status === "syncing") return "Syncing…";
         if (status === "offline") return "Offline";
         if (hasConflicts) return `${conflicts.length} conflict${conflicts.length > 1 ? "s" : ""}`;
+        if (isProjectionStalled) {
+            return `${projectionFailures} unapplied`;
+        }
+        if (isBehind) return `Behind by ${behindBy}`;
         if (hasFailures) {
             if (blockedFailures > 0) {
                 return `${blockedFailures} blocked`;
@@ -141,6 +155,24 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
                 <p className="mt-1.5 text-xs text-red-400 leading-tight">
                     No data has synced to this device yet — stock figures may be
                     incomplete.
+                </p>
+            )}
+
+            {/* Projection failures — server events this device could not apply.
+                A stalled device has applied fewer events than the server holds,
+                so stock figures here can legitimately disagree with the server.
+                Say so plainly instead of showing a reassuring green tick. */}
+            {isProjectionStalled && (
+                <p className="mt-1.5 text-xs text-red-400 leading-tight">
+                    {health.quarantinedCount > 0
+                        ? `${health.quarantinedCount} event${health.quarantinedCount > 1 ? "s" : ""} could not be applied and stopped retrying`
+                        : `${health.failedCount} event${health.failedCount > 1 ? "s" : ""} failed to apply, retrying`}
+                    {isBehind && behindBy !== null ? ` — behind by ${behindBy}` : ""}
+                </p>
+            )}
+            {isBehind && !isProjectionStalled && behindBy !== null && (
+                <p className="mt-1.5 text-xs text-amber-400 leading-tight">
+                    Sync behind by {behindBy} event{behindBy > 1 ? "s" : ""}
                 </p>
             )}
 

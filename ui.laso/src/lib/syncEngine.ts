@@ -16,6 +16,11 @@ import {
     setEventPullSeq,
     isLocallyAuthored,
     upsertPendingConflicts,
+    getDb,
+    recordEventProjectionFailure,
+    listRetryableEventFailures,
+    clearEventProjectionFailure,
+    countEventProjectionFailures,
 } from "@/lib/localDb";
 import { applyEventLocally } from "@/lib/localProjectors";
 import { conflictsApi } from "@/api/conflicts";
@@ -32,8 +37,29 @@ export type { SyncStatus } from "@/types";
 type StatusListener = (
     status: SyncStatus,
     pendingCount: number,
-    lastSync: string | null
+    lastSync: string | null,
+    health?: SyncHealth
 ) => void;
+
+/**
+ * How far this device's event stream has actually got, and what it could not
+ * apply. Existed as an invisible truth before: a device whose cursor was
+ * wedged behind one poison event looked identical to a healthy idle device,
+ * because the only symptom was stock figures quietly disagreeing with the
+ * server.
+ */
+export interface SyncHealth {
+    /** Highest server seq this device has pulled and applied. */
+    pulledSeq: number;
+    /** Highest seq the server has, from the last pull. Null before the first pull. */
+    serverHeadSeq: number | null;
+    /** Events whose projection failed and are still being retried. */
+    failedCount: number;
+    /** Events that exhausted MAX_PROJECTION_ATTEMPTS and are no longer retried. */
+    quarantinedCount: number;
+    /** True when there is a known gap between the device and the server head. */
+    stalled: boolean;
+}
 
 class SyncEngine {
     private branchId: string | null = null;
@@ -52,6 +78,15 @@ class SyncEngine {
     private _isSyncing = false;
     private networkRetryAttempt = 0;
     private _dbInitError: string | null = null;
+    private _pulledSeq = 0;
+    private _serverHeadSeq: number | null = null;
+    private _syncHealth: SyncHealth = {
+        pulledSeq: 0,
+        serverHeadSeq: null,
+        failedCount: 0,
+        quarantinedCount: 0,
+        stalled: false,
+    };
 
     private readonly _onOnline = () => this.onOnline();
     private readonly _onOffline = () => this.onOffline();
@@ -160,6 +195,18 @@ class SyncEngine {
         this.branchId = null;
         this.organizationId = null;
         this._status = "idle";
+        // Health is per-branch: the cursor, head, and failure counts all belong
+        // to the branch we just left, so carrying them over would show the next
+        // branch a false "stalled" reading.
+        this._pulledSeq = 0;
+        this._serverHeadSeq = null;
+        this._syncHealth = {
+            pulledSeq: 0,
+            serverHeadSeq: null,
+            failedCount: 0,
+            quarantinedCount: 0,
+            stalled: false,
+        };
         this.notify(0, this._lastSyncAt);
     }
 
@@ -196,6 +243,7 @@ class SyncEngine {
 
     get status(): SyncStatus { return this._status; }
     get lastSyncAt(): string | null { return this._lastSyncAt; }
+    get syncHealth(): SyncHealth { return this._syncHealth; }
 
     // ── Main sync cycle: push events, then pull events ───────────────
 
@@ -365,15 +413,27 @@ class SyncEngine {
     private async pullEvents(): Promise<void> {
         if (!this.branchId) return;
 
+        // Re-attempt previously failed projections first, while they are still
+        // in reach. Each one is bounded by MAX_PROJECTION_ATTEMPTS and then
+        // quarantined, so this cannot loop forever.
+        await this.retryFailedProjections();
+
         let afterSeq = await getEventPullSeq();
 
         // Page through server events. Cap at 50 pages per cycle.
         for (let page = 0; page < 50; page++) {
             const response = await syncApi.pullEvents(afterSeq);
             let lastSuccessSeq = afterSeq;
-            let hitFailure = false;
 
-            for (const envelope of response.events) {
+            let db;
+        try {
+            db = await getDb();
+        } catch (err) {
+            this.logError(err, "Could not open local DB during pull");
+            return;
+        }
+
+        for (const envelope of response.events) {
                 let authored = false;
                 try {
                     authored = await isLocallyAuthored(envelope.event_id);
@@ -390,26 +450,40 @@ class SyncEngine {
 
                 try {
                     await applyEventLocally(envelope);
+                    // Applied: forget any earlier failure so the table reflects
+                    // current reality rather than history.
                     if (envelope.seq != null && envelope.seq > lastSuccessSeq) {
                         lastSuccessSeq = envelope.seq;
                     }
+                    await clearEventProjectionFailure(db, envelope.event_id);
                 } catch (err) {
+                    // Record and KEEP GOING. The previous code set a flag and
+                    // broke out of the page, which left the cursor pinned
+                    // before the failing event and starved every later event
+                    // forever: one poison event silently froze the whole device
+                    // at a fixed seq with nothing logged or retryable. The
+                    // failure is now durable and bounded, so advancing past it
+                    // is recoverable instead of terminal.
                     console.warn(
-                        `[SyncEngine] localProjector failed for event ${envelope.event_id} (${envelope.event_type}):`,
+                        `[SyncEngine] localProjector failed for event ${envelope.event_id} (${envelope.event_type}); ` +
+                        `recording and continuing so later events still apply:`,
                         err
                     );
-                    hitFailure = true;
-                    // Stop advancing — remaining events in this page may depend
-                    // on this one.  The next cycle will re-pull from lastSuccessSeq.
+                    try {
+                        await recordEventProjectionFailure(db, envelope, err);
+                    } catch (recordErr) {
+                        // Failing to record must not wedge the cursor either.
+                        this.logError(recordErr, `Could not record failure for ${envelope.event_id}`);
+                    }
+                    if (envelope.seq != null && envelope.seq > lastSuccessSeq) {
+                        lastSuccessSeq = envelope.seq;
+                    }
                 }
-
-                if (hitFailure) break;
             }
 
-            // Persist the cursor.  If a failure occurred we stay before the
-            // failed event so it will be retried; otherwise we jump to
-            // next_after_seq to skip ahead of any gaps.
-            if (!hitFailure && response.events.length > 0) {
+            // Persist the cursor. Advances past failed events too, since those
+            // are now tracked and retried on their own schedule.
+            if (response.events.length > 0) {
                 const target = response.next_after_seq > lastSuccessSeq
                     ? response.next_after_seq
                     : lastSuccessSeq;
@@ -419,8 +493,16 @@ class SyncEngine {
                 }
             }
 
-            if (!response.has_more) break;
+            if (!response.has_more) {
+                // The server has nothing past next_after_seq, so that is the
+                // head. Used by the UI to show how far behind a device is.
+                this._serverHeadSeq = response.next_after_seq;
+                break;
+            }
         }
+
+        this._pulledSeq = await getEventPullSeq();
+        await this.refreshSyncHealth();
 
         // Refresh the local conflict cache so the Conflicts page works offline.
         try {
@@ -495,8 +577,100 @@ class SyncEngine {
 
     private notify(pendingCount = 0, lastSync: string | null = this._lastSyncAt): void {
         for (const fn of this.listeners) {
-            fn(this._status, pendingCount, lastSync ?? this._lastSyncAt);
+            fn(this._status, pendingCount, lastSync ?? this._lastSyncAt, this._syncHealth);
         }
+    }
+
+    /**
+     * Re-attempt projections that previously threw, newest-known seq last.
+     *
+     * The stored failure rows carry only identity and the error, not the
+     * envelope, so a retry re-pulls the event from the server by its recorded
+     * seq rather than replaying a cached copy. Events the server no longer
+     * returns are dropped from the table rather than retried forever.
+     *
+     * Quarantined rows (attempts exhausted) are skipped: they are surfaced in
+     * the UI but never retried automatically.
+     */
+    private async retryFailedProjections(): Promise<void> {
+        let db;
+        try {
+            db = await getDb();
+        } catch (err) {
+            this.logError(err, "Could not open local DB to retry failed projections");
+            return;
+        }
+
+        let retryable;
+        try {
+            retryable = await listRetryableEventFailures(db);
+        } catch (err) {
+            this.logError(err, "Could not read sync_event_failures");
+            return;
+        }
+        if (retryable.length === 0) return;
+
+        for (const failure of retryable) {
+            try {
+                // Pull the single event we previously failed on. after_seq-1 so
+                // the server includes this exact seq.
+                const response = await syncApi.pullEvents(Math.max(0, failure.seq - 1), 1);
+                const envelope = response.events.find((e) => e.event_id === failure.event_id);
+                if (!envelope) {
+                    // The server no longer serves this event (retention, or it
+                    // was never persisted). Stop tracking it so the table does
+                    // not accumulate dead rows.
+                    await clearEventProjectionFailure(db, failure.event_id);
+                    continue;
+                }
+                await applyEventLocally(envelope);
+                await clearEventProjectionFailure(db, failure.event_id);
+            } catch (err) {
+                // Bump attempts; recordEventProjectionFailure quarantines once
+                // MAX_PROJECTION_ATTEMPTS is reached.
+                try {
+                    await recordEventProjectionFailure(
+                        db,
+                        {
+                            event_id: failure.event_id,
+                            seq: failure.seq,
+                            event_type: failure.event_type,
+                            aggregate_id: failure.aggregate_id,
+                            branch_id: failure.branch_id,
+                        },
+                        err
+                    );
+                } catch (recordErr) {
+                    this.logError(recordErr, `Could not re-record failure for ${failure.event_id}`);
+                }
+            }
+        }
+    }
+
+    /** Recompute the health snapshot the UI chip renders. */
+    private async refreshSyncHealth(): Promise<void> {
+        let failed = 0;
+        let quarantined = 0;
+        try {
+            const db = await getDb();
+            const counts = await countEventProjectionFailures(db);
+            failed = counts.failed;
+            quarantined = counts.quarantined;
+            this._pulledSeq = await getEventPullSeq();
+        } catch {
+            // Leave the previous numbers rather than reporting a false zero.
+            return;
+        }
+
+        this._syncHealth = {
+            pulledSeq: this._pulledSeq,
+            serverHeadSeq: this._serverHeadSeq,
+            failedCount: failed,
+            quarantinedCount: quarantined,
+            stalled:
+                this._serverHeadSeq !== null &&
+                (failed > 0 || quarantined > 0 || this._pulledSeq < this._serverHeadSeq),
+        };
     }
 
     private logError(err: unknown, context: string): void {

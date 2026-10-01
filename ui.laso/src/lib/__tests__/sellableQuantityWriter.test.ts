@@ -7,11 +7,13 @@
  * at the column's DEFAULT 0. A test that mocks the thing under test proves
  * only that the mock was read.
  *
- * These tests run the REAL projector and writer against a REAL in-memory SQLite
- * built by the production migration chain, and assert the persisted column.
+ * These run the real projector and writer against a real in-memory SQLite built
+ * by the production migration chain, and assert the persisted column.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DatabaseSync } from "node:sqlite";
 import {
+  GEBEDOL,
   OTHER_BRANCH,
   OTHER_TERMINAL,
   TEST_BRANCH,
@@ -21,69 +23,131 @@ import {
   insertBatch,
   insertInventory,
   insertLease,
-  makeFixture,
+  installRealDb,
+  rawDb,
   readSellable,
+  resetTables,
 } from "@/lib/__tests__/realDb";
-import type { DatabaseSync } from "node:sqlite";
 
-// Route localDb.getDb() at the fixture. runMigrations itself is kept real so
-// the schema under test is the production one.
-let activeDb: Awaited<ReturnType<typeof makeFixture>>["db"];
+// installRealDb wires the REAL localDb to in-memory SQLite at the Tauri invoke
+// boundary, so getDb(), the migration chain, and the projectors all run their
+// production code paths against the real schema.
+//
+// These imports must happen INSIDE beforeAll, after installRealDb() has stubbed
+// window. localDb evaluates IS_TAURI at module load, and a top-level import
+// would load it before the stub exists, making it resolve to MockDb and turning
+// every migration into a silent no-op (no tables, so every insert fails).
+let refreshSellableQuantity: typeof import("@/lib/sellableQty").refreshSellableQuantity;
+let applyEventLocally: typeof import("@/lib/localProjectors").applyEventLocally;
+let getDb: typeof import("@/lib/localDb").getDb;
+let migrate_v32: typeof import("@/lib/localDb").migrate_v32;
 
-vi.mock("@/lib/localDb", async () => {
-  const actual = await vi.importActual<typeof import("@/lib/localDb")>("@/lib/localDb");
-  return { ...actual, getDb: async () => activeDb };
+beforeAll(async () => {
+  await installRealDb();
+  ({ refreshSellableQuantity } = await import("@/lib/sellableQty"));
+  ({ applyEventLocally } = await import("@/lib/localProjectors"));
+  ({ getDb, migrate_v32 } = await import("@/lib/localDb"));
 });
 
-const { refreshSellableQuantity } = await import("@/lib/sellableQty");
-const { applyEventLocally } = await import("@/lib/localProjectors");
-
 beforeEach(() => {
+  resetTables([
+    "drugs",
+    "branch_inventory",
+    "drug_batches",
+    "stock_leases",
+    "sync_meta",
+    "event_outbox",
+  ]);
   // Pin this device's terminal so lease subtraction is deterministic.
   vi.stubGlobal("localStorage", {
     getItem: (k: string) => (k === "laso_terminal_id" ? THIS_TERMINAL : null),
     setItem: () => {},
+    removeItem: () => {},
   });
 });
 
 afterEach(() => {
-  vi.unstubAllGlobals();
-  vi.clearAllMocks();
+  vi.restoreAllMocks();
 });
+
+/** A branch_inventory_updated envelope for Gebedol at the active branch. */
+function inventoryEvent(
+  eventId: string,
+  seq: number,
+  quantity: number,
+  eventType: "branch_inventory_created" | "branch_inventory_updated" = "branch_inventory_updated"
+) {
+  return {
+    event_id: eventId,
+    seq,
+    org_id: "org-1",
+    aggregate_id: `agg-${eventId}`,
+    aggregate_type: "branch_inventory",
+    event_type: eventType,
+    schema_version: 1,
+    payload: { branch_id: TEST_BRANCH, drug_id: GEBEDOL, quantity },
+    dependencies: [],
+    authored_at: "2026-01-01T00:00:00Z",
+    branch_id: TEST_BRANCH,
+    received_at: "2026-01-01T00:00:00Z",
+  } as never;
+}
+
+/** A drug_batch_created envelope for Gebedol at the active branch. */
+function batchEvent(eventId: string, seq: number, remaining: number, expiry: string) {
+  return {
+    event_id: eventId,
+    seq,
+    org_id: "org-1",
+    aggregate_id: `agg-${eventId}`,
+    aggregate_type: "drug_batch",
+    event_type: "drug_batch_created",
+    schema_version: 1,
+    payload: {
+      branch_id: TEST_BRANCH,
+      drug_id: GEBEDOL,
+      remaining_quantity: remaining,
+      quantity: remaining + 40,
+      batch_number: "CAE32423",
+      expiry_date: expiry,
+    },
+    dependencies: [],
+    authored_at: "2026-01-01T00:00:00Z",
+    branch_id: TEST_BRANCH,
+    received_at: "2026-01-01T00:00:00Z",
+  } as never;
+}
 
 describe("sellable_quantity writer", () => {
   it("populates sellable_quantity from unexpired batches", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 117 });
-      insertBatch(r, { remaining: 117 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 117 });
+    insertBatch(raw, { remaining: 117 });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(117);
   });
 
   it("falls back to branch_inventory.quantity when the device holds no batches", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 250 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 250 });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(250);
   });
 
   it("excludes expired batches but still counts a valid one", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 0 });
-      insertBatch(r, { id: "expired", remaining: 90, expiry: daysFromNow(-1) });
-      insertBatch(r, { id: "valid", remaining: 27, expiry: daysFromNow(30) });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 0 });
+    insertBatch(raw, { id: "expired", remaining: 90, expiry: daysFromNow(-1) });
+    insertBatch(raw, { id: "valid", remaining: 27, expiry: daysFromNow(30) });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(27);
   });
@@ -92,77 +156,71 @@ describe("sellable_quantity writer", () => {
     // Regression guard: an all-expired drug must NOT fall back to
     // branch_inventory.quantity. Expired stock is not sellable, and a stale
     // aggregate would otherwise resurrect it.
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 250 });
-      insertBatch(r, { remaining: 90, expiry: daysFromNow(-30) });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 250 });
+    insertBatch(raw, { remaining: 90, expiry: daysFromNow(-30) });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(0);
   });
 
   it("subtracts an active lease held by another terminal", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 0 });
-      insertBatch(r, { remaining: 117 });
-      insertLease(r, { terminalId: OTHER_TERMINAL, leased: 40, consumed: 0 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 0 });
+    insertBatch(raw, { remaining: 117 });
+    insertLease(raw, { terminalId: OTHER_TERMINAL, leased: 40, consumed: 0 });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(77);
   });
 
   it("does not subtract this device's own lease", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 0 });
-      insertBatch(r, { remaining: 117 });
-      insertLease(r, { terminalId: THIS_TERMINAL, leased: 40, consumed: 0 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 0 });
+    insertBatch(raw, { remaining: 117 });
+    insertLease(raw, { terminalId: THIS_TERMINAL, leased: 40, consumed: 0 });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(117);
   });
 
   it("ignores expired and released leases", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 0 });
-      insertBatch(r, { remaining: 117 });
-      insertLease(r, { id: "l1", terminalId: OTHER_TERMINAL, leased: 30, expiresAt: hoursFromNow(-1) });
-      insertLease(r, { id: "l2", terminalId: OTHER_TERMINAL, leased: 30, status: "released" });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 0 });
+    insertBatch(raw, { remaining: 117 });
+    insertLease(raw, { id: "l1", terminalId: OTHER_TERMINAL, leased: 30, expiresAt: hoursFromNow(-1) });
+    insertLease(raw, { id: "l2", terminalId: OTHER_TERMINAL, leased: 30, status: "released" });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(117);
   });
 
   it("never goes negative", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 0 });
-      insertBatch(r, { remaining: 10 });
-      insertLease(r, { terminalId: OTHER_TERMINAL, leased: 999 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 0 });
+    insertBatch(raw, { remaining: 10 });
+    insertLease(raw, { terminalId: OTHER_TERMINAL, leased: 999 });
 
-    await refreshSellableQuantity(db, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f");
+    await refreshSellableQuantity(db, TEST_BRANCH, GEBEDOL);
 
     expect(readSellable(raw)).toBe(0);
   });
 
   it("leaves other branches and drugs untouched", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { id: "a", branchId: TEST_BRANCH, drugId: "drug-a", quantity: 10, sellable: 0 });
-      insertInventory(r, { id: "b", branchId: OTHER_BRANCH, drugId: "drug-a", quantity: 10, sellable: 0 });
-      insertBatch(r, { id: "ba", drugId: "drug-a", remaining: 10 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { id: "a", branchId: TEST_BRANCH, drugId: "drug-a", quantity: 10, sellable: 0 });
+    insertInventory(raw, { id: "b", branchId: OTHER_BRANCH, drugId: "drug-a", quantity: 10, sellable: 0 });
+    insertBatch(raw, { id: "ba", drugId: "drug-a", remaining: 10 });
 
     await refreshSellableQuantity(db, TEST_BRANCH, "drug-a");
 
@@ -173,130 +231,55 @@ describe("sellable_quantity writer", () => {
 
 describe("branch_inventory projector writes sellable_quantity", () => {
   it("branch_inventory_updated with no batches falls back to the payload quantity", async () => {
-    const { raw, db } = await makeFixture();
-    activeDb = db;
+    const raw = rawDb();
 
-    await applyEventLocally({
-      event_id: "e1",
-      seq: 1,
-      org_id: "org",
-      aggregate_id: "inv-geb",
-      aggregate_type: "branch_inventory",
-      event_type: "branch_inventory_updated",
-      schema_version: 1,
-      payload: { branch_id: TEST_BRANCH, drug_id: "8d4cc1a7-03c7-4a6a-8080-2bda5def026f", quantity: 117 },
-      dependencies: [],
-      authored_at: "2026-01-01T00:00:00Z",
-      branch_id: TEST_BRANCH,
-      received_at: "2026-01-01T00:00:00Z",
-    } as never);
+    await applyEventLocally(inventoryEvent("e1", 1, 117));
 
     expect(readSellable(raw)).toBe(117);
   });
 
-it("a batch arriving after the inventory row corrects a stale fallback value", async () => {
-    // Out-of-order delivery: the inventory row lands first, with no batches
-    // present, so sellable_quantity can only fall back to quantity. The batch
-    // event lands second and must overwrite that fallback with the real number.
-    const { raw, db } = await makeFixture();
-    activeDb = db;
-    const drugId = "8d4cc1a7-03c7-4a6a-8080-2bda5def026f";
+  it("a batch arriving after the inventory row overwrites the fallback", async () => {
+    // Out-of-order delivery: the inventory row lands first with no batches, so
+    // sellable can only fall back to quantity. The batch lands second and must
+    // replace that fallback with the real number.
+    const raw = rawDb();
 
-    await applyEventLocally({
-      event_id: "e1",
-      seq: 1,
-      org_id: "org",
-      aggregate_id: "inv-geb",
-      aggregate_type: "branch_inventory",
-      event_type: "branch_inventory_created",
-      schema_version: 1,
-      payload: { branch_id: TEST_BRANCH, drug_id: drugId, quantity: 117 },
-      dependencies: [],
-      authored_at: "2026-01-01T00:00:00Z",
-      branch_id: TEST_BRANCH,
-      received_at: "2026-01-01T00:00:00Z",
-    } as never);
+    await applyEventLocally(inventoryEvent("e1", 1, 117, "branch_inventory_created"));
     expect(readSellable(raw)).toBe(117);
 
-    // Batch says 60 usable out of 100 received. Batches are authoritative, so
-    // the fallback of 117 must become 60.
-    await applyEventLocally({
-      event_id: "e2",
-      seq: 2,
-      org_id: "org",
-      aggregate_id: "batch-geb",
-      aggregate_type: "drug_batch",
-      event_type: "drug_batch_created",
-      schema_version: 1,
-      payload: {
-        branch_id: TEST_BRANCH,
-        drug_id: drugId,
-        remaining_quantity: 60,
-        quantity: 100,
-        batch_number: "CAE32423",
-        expiry_date: daysFromNow(400),
-      },
-      dependencies: [],
-      authored_at: "2026-01-01T00:00:00Z",
-      branch_id: TEST_BRANCH,
-      received_at: "2026-01-01T00:00:00Z",
-    } as never);
-
+    await applyEventLocally(batchEvent("e2", 2, 60, daysFromNow(400)));
     expect(readSellable(raw)).toBe(60);
   });
 
   it("drug_batch_created inserts the inventory row with a correct sellable_quantity", async () => {
-    const { raw, db } = await makeFixture();
-    activeDb = db;
-    const drugId = "8d4cc1a7-03c7-4a6a-8080-2bda5def026f";
+    const raw = rawDb();
 
-    await applyEventLocally({
-      event_id: "e3",
-      seq: 3,
-      org_id: "org",
-      aggregate_id: "batch-geb",
-      aggregate_type: "drug_batch",
-      event_type: "drug_batch_created",
-      schema_version: 1,
-      payload: {
-        branch_id: TEST_BRANCH,
-        drug_id: drugId,
-        remaining_quantity: 123,
-        quantity: 123,
-        batch_number: "CAE32423",
-        expiry_date: daysFromNow(2000),
-      },
-      dependencies: [],
-      authored_at: "2026-01-01T00:00:00Z",
-      branch_id: TEST_BRANCH,
-      received_at: "2026-01-01T00:00:00Z",
-    } as never);
+    await applyEventLocally(batchEvent("e3", 3, 123, daysFromNow(2000)));
 
     const row = raw
       .prepare("SELECT quantity, sellable_quantity FROM branch_inventory WHERE drug_id = ?")
-      .get(drugId) as { quantity: number; sellable_quantity: number };
+      .get(GEBEDOL) as { quantity: number; sellable_quantity: number };
     expect(row.quantity).toBe(123);
     expect(row.sellable_quantity).toBe(123);
   });
 
   it("stock_adjusted recomputes sellable after moving quantity", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { quantity: 100 });
-      insertBatch(r, { remaining: 100 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 100 });
+    insertBatch(raw, { remaining: 100 });
 
     await applyEventLocally({
       event_id: "e4",
       seq: 4,
-      org_id: "org",
-      aggregate_id: "adj-1",
+      org_id: "org-1",
+      aggregate_id: "agg-e4",
       aggregate_type: "stock_adjustment",
       event_type: "stock_adjusted",
       schema_version: 1,
       payload: {
         branch_id: TEST_BRANCH,
-        drug_id: "8d4cc1a7-03c7-4a6a-8080-2bda5def026f",
+        drug_id: GEBEDOL,
         quantity_change: -40,
         batch_changes: [{ batch_id: "batch-1", quantity_change: -40 }],
       },
@@ -308,22 +291,58 @@ it("a batch arriving after the inventory row corrects a stale fallback value", a
 
     expect(readSellable(raw)).toBe(60);
   });
+
+  it("sale_created recomputes sellable for every deducted drug", async () => {
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { quantity: 117 });
+    insertBatch(raw, { id: "b1", remaining: 117 });
+
+    await applyEventLocally({
+      event_id: "e5",
+      seq: 5,
+      org_id: "org-1",
+      aggregate_id: "agg-sale",
+      aggregate_type: "sale",
+      event_type: "sale_created",
+      schema_version: 1,
+      payload: {
+        branch_id: TEST_BRANCH,
+        organization_id: "org-1",
+        sale_number: "S-1",
+        cashier_id: "u1",
+        items: [{ drug_id: GEBEDOL, quantity: 17, unit_price: 5, quantity_used: 17, total: 85 }],
+        // The sale deducts the batch and the aggregate. Both must be reflected.
+        batch_changes: [{ batch_id: "b1", quantity_used: 17 }],
+        subtotal: 85,
+        tax_amount: 0,
+        total_amount: 85,
+      },
+      dependencies: [],
+      authored_at: "2026-01-01T00:00:00Z",
+      branch_id: TEST_BRANCH,
+      received_at: "2026-01-01T00:00:00Z",
+    } as never);
+
+    const row = raw
+      .prepare("SELECT quantity, sellable_quantity FROM branch_inventory WHERE drug_id = ?")
+      .get(GEBEDOL) as { quantity: number; sellable_quantity: number };
+    expect(row.quantity).toBe(100);
+    expect(row.sellable_quantity).toBe(100);
+  });
 });
 
 describe("v32 backfill", () => {
   it("corrects rows already sitting at the DEFAULT 0", async () => {
-    const { raw, db } = await makeFixture((r: DatabaseSync) => {
-      insertInventory(r, { id: "old-1", quantity: 117, sellable: 0 });
-      insertBatch(r, { remaining: 117 });
-      insertInventory(r, { id: "old-2", drugId: "drug-nb", quantity: 42, sellable: 0 });
-    });
-    activeDb = db;
+    const db = await getDb();
+    const raw = rawDb();
+    insertInventory(raw, { id: "old-1", quantity: 117, sellable: 0 });
+    insertBatch(raw, { remaining: 117 });
+    insertInventory(raw, { id: "old-2", drugId: "drug-nb", quantity: 42, sellable: 0 });
 
-    const { migrate_v32 } = await import("@/lib/localDb");
     await migrate_v32(db);
 
-    expect(readSellable(raw, TEST_BRANCH, "8d4cc1a7-03c7-4a6a-8080-2bda5def026f")).toBe(117);
+    expect(readSellable(raw, TEST_BRANCH, GEBEDOL)).toBe(117);
     expect(readSellable(raw, TEST_BRANCH, "drug-nb")).toBe(42);
-    raw.close();
   });
 });

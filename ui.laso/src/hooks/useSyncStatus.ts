@@ -8,6 +8,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { syncEngine } from "@/lib/syncEngine";
+import type { SyncHealth } from "@/lib/syncEngine";
 import type { SyncStatus } from "@/types";
 import type { QueuedConflict, QueuedFailure } from "@/lib/localDb";
 
@@ -17,6 +18,8 @@ export interface SyncState {
     lastSyncAt: string | null;
     conflicts: QueuedConflict[];
     failures: QueuedFailure[];
+    /** How far this device's event stream has got, and what it could not apply. */
+    health: SyncHealth;
     /** Manually trigger a sync (e.g. from a button) */
     syncNow: () => Promise<void>;
     /** Resolve a manual conflict with server or local preference */
@@ -36,13 +39,17 @@ export function useSyncStatus(): SyncState {
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(syncEngine.lastSyncAt);
     const [conflicts, setConflicts] = useState<QueuedConflict[]>(syncEngine.pendingConflicts);
     const [failures, setFailures] = useState<QueuedFailure[]>(syncEngine.pendingFailures);
+    const [health, setHealth] = useState<SyncHealth>(syncEngine.syncHealth);
     useEffect(() => {
-        const unsub = syncEngine.subscribe((s, count, last) => {
+        const unsub = syncEngine.subscribe((s, count, last, h) => {
             setStatus(s);
             setPendingCount(count);
             setLastSyncAt(last);
             setConflicts([...syncEngine.pendingConflicts]);
             setFailures([...syncEngine.pendingFailures]);
+            // Fall back to the engine's snapshot when a listener passes no
+            // health (older callers pass only the first three arguments).
+            setHealth(h ?? syncEngine.syncHealth);
         });
         return unsub;
     }, []);
@@ -67,5 +74,5 @@ export function useSyncStatus(): SyncState {
         []
     );
 
-    return { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, resolveConflict, discardFailure, voidFailedSale };
+    return { status, pendingCount, lastSyncAt, conflicts, failures, health, syncNow, resolveConflict, discardFailure, voidFailedSale };
 }

@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 32;
+const MAX_KNOWN_SCHEMA_VERSION = 33;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -301,6 +301,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 30) await migrate_v30(db);
         if (user_version < 31) await migrate_v31(db);
         if (user_version < 32) await migrate_v32(db);
+        if (user_version < 33) await migrate_v33(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2597,6 +2598,151 @@ export async function migrate_v32(db: Database): Promise<void> {
   }
 
   await db.execute("PRAGMA user_version = 32");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v33 — sync_event_failures
+//
+// Records events whose local projector threw. Previously a projector throw
+// aborted the whole pull page and the cursor was left where it was, so one bad
+// event starved every event after it forever with nothing recorded anywhere:
+// the device just silently stopped advancing. This table makes each failure
+// individually visible, retryable, and eventually quarantined.
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function migrate_v33(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS sync_event_failures (
+      event_id        TEXT NOT NULL PRIMARY KEY,
+      seq             INTEGER NOT NULL DEFAULT 0,
+      event_type      TEXT NOT NULL DEFAULT '',
+      aggregate_id    TEXT NOT NULL DEFAULT '',
+      branch_id       TEXT NOT NULL DEFAULT '',
+      error_message   TEXT NOT NULL DEFAULT '',
+      attempts        INTEGER NOT NULL DEFAULT 0,
+      status          TEXT NOT NULL DEFAULT 'pending',
+      first_failed_at TEXT NOT NULL DEFAULT '',
+      last_failed_at  TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_sync_event_failures_status ON sync_event_failures(status)"
+  );
+  await db.execute("PRAGMA user_version = 33");
+}
+
+/** Attempts allowed before an event is quarantined and never retried again. */
+export const MAX_PROJECTION_ATTEMPTS = 3;
+
+export interface EventProjectionFailure {
+  event_id: string;
+  seq: number;
+  event_type: string;
+  aggregate_id: string;
+  branch_id: string;
+  error_message: string;
+  attempts: number;
+  status: "pending" | "quarantined";
+  first_failed_at: string;
+  last_failed_at: string;
+}
+
+/**
+ * Record (or bump) a failed local projection. Reaching MAX_PROJECTION_ATTEMPTS
+ * flips the row to 'quarantined', which keeps it visible but stops automatic
+ * retries so one poison event cannot consume a retry slot on every cycle
+ * forever.
+ */
+/** The envelope fields failure tracking needs. */
+export interface EventFailureIdentity {
+  event_id: string;
+  seq?: number | null;
+  event_type: string;
+  aggregate_id: string;
+  branch_id?: string | null;
+}
+
+export async function recordEventProjectionFailure(
+  db: Database,
+  envelope: EventFailureIdentity,
+  error: unknown
+): Promise<void> {
+  const now = new Date().toISOString();
+  const message =
+    error instanceof Error
+      ? error.message
+      : error && typeof error === "object" && "message" in error
+        ? String((error as { message: unknown }).message)
+        : String(error);
+
+  const existing = await db.select<{ attempts: number; first_failed_at: string }[]>(
+    "SELECT attempts, first_failed_at FROM sync_event_failures WHERE event_id = $1",
+    [envelope.event_id]
+  );
+  const prior = existing?.[0];
+  const attempts = (prior?.attempts ?? 0) + 1;
+  const status = attempts >= MAX_PROJECTION_ATTEMPTS ? "quarantined" : "pending";
+
+  await db.execute(
+    `INSERT INTO sync_event_failures
+       (event_id, seq, event_type, aggregate_id, branch_id, error_message,
+        attempts, status, first_failed_at, last_failed_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT(event_id) DO UPDATE SET
+       error_message = excluded.error_message,
+       attempts      = excluded.attempts,
+       status        = excluded.status,
+       last_failed_at= excluded.last_failed_at`,
+    [
+      envelope.event_id,
+      envelope.seq ?? 0,
+      envelope.event_type,
+      envelope.aggregate_id,
+      envelope.branch_id ?? "",
+      message,
+      attempts,
+      status,
+      prior?.first_failed_at ?? now,
+      now,
+    ]
+  );
+}
+
+/** Failures still eligible for an automatic retry (not yet quarantined). */
+export async function listRetryableEventFailures(db: Database): Promise<EventProjectionFailure[]> {
+  return db.select<EventProjectionFailure[]>(
+    `SELECT * FROM sync_event_failures
+      WHERE status = 'pending'
+      ORDER BY seq ASC, event_id ASC`,
+    []
+  );
+}
+
+export async function listEventProjectionFailures(db: Database): Promise<EventProjectionFailure[]> {
+  return db.select<EventProjectionFailure[]>(
+    "SELECT * FROM sync_event_failures ORDER BY seq ASC, event_id ASC",
+    []
+  );
+}
+
+/**
+ * Drop the failure record for an event that has since applied. Called on a
+ * successful projection so the table reflects reality rather than history.
+ */
+export async function clearEventProjectionFailure(db: Database, eventId: string): Promise<void> {
+  await db.execute("DELETE FROM sync_event_failures WHERE event_id = $1", [eventId]);
+}
+
+export async function countEventProjectionFailures(
+  db: Database
+): Promise<{ failed: number; quarantined: number }> {
+  const rows = await db.select<{ status: string; n: number }[]>(
+    "SELECT status, COUNT(*) AS n FROM sync_event_failures GROUP BY status",
+    []
+  );
+  const failed = Number(rows?.find((r) => r.status === "pending")?.n ?? 0);
+  const quarantined = Number(rows?.find((r) => r.status === "quarantined")?.n ?? 0);
+  return { failed, quarantined };
 }
 
 export async function ensurePrescriptionSchema(db: Database): Promise<void> {
