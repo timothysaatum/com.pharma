@@ -1,5 +1,6 @@
 import { getDb } from "./localDb";
 import { authStorage } from "@/lib/storage";
+import { refreshSellableQuantity } from "@/lib/sellableQty";
 import { z } from "zod";
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
@@ -119,6 +120,14 @@ export class LeaseEngine {
       } catch (err) {
         await db.execute("ROLLBACK");
         throw err;
+      }
+
+      // Lease rows change how much stock is locked away from other terminals,
+      // so every touched (branch, drug) needs its sellable_quantity recomputed.
+      for (const lease of leases) {
+        await refreshSellableQuantity(db, lease.branch_id, lease.drug_id, {
+          excludeTerminalId: lease.terminal_id,
+        });
       }
       
     } catch (err) {

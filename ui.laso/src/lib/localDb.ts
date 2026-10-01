@@ -7,6 +7,7 @@
 
 import type { Sale } from "@/types";
 import { invoke } from "@tauri-apps/api/core";
+import { refreshSellableForPairs } from "@/lib/sellableQty";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -171,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 31;
+const MAX_KNOWN_SCHEMA_VERSION = 32;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -218,7 +219,14 @@ export async function guardAgainstSchemaDowngrade(_db: Database, user_version: n
 
 let _migrationRunningPromise: Promise<void> | null = null;
 
-async function runMigrations(db: Database): Promise<void> {
+/**
+ * Apply every pending migration up to MAX_KNOWN_SCHEMA_VERSION.
+ *
+ * Exported for tests: building the real schema in a fixture by replaying the
+ * production migration chain is the only way to assert against the exact DDL a
+ * device ends up with. Hand-copied DDL in a test drifts silently.
+ */
+export async function runMigrations(db: Database): Promise<void> {
   if (_migrationRunningPromise) {
     return _migrationRunningPromise;
   }
@@ -292,6 +300,7 @@ async function runMigrations(db: Database): Promise<void> {
         if (user_version < 29) await migrate_v29(db);
         if (user_version < 30) await migrate_v30(db);
         if (user_version < 31) await migrate_v31(db);
+        if (user_version < 32) await migrate_v32(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2555,6 +2564,39 @@ export async function migrate_v31(db: Database): Promise<void> {
   }
 
   await db.execute("PRAGMA user_version = 31");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v32 — backfill branch_inventory.sellable_quantity
+//
+// sellable_quantity was declared NOT NULL DEFAULT 0 back when the column was
+// added, on the understanding that "the next sync would populate it". No
+// writer was ever added, so every existing row has been sitting at 0 while
+// localRead.getSellableQuantity() reads that column first. Result: the POS cart
+// reported "/0" and "Only 0 available" for drugs Inventory showed as stocked.
+//
+// One-time recompute of every existing row from local state. Runs at migration
+// time rather than on read because getSellableQuantity must stay a pure read,
+// and leaseEngine queries the column directly (WHERE sellable_quantity > 0).
+// ─────────────────────────────────────────────────────────────────────────────
+
+export async function migrate_v32(db: Database): Promise<void> {
+  try {
+    const rows = await db.select<{ branch_id: string; drug_id: string }[]>(
+      "SELECT branch_id, drug_id FROM branch_inventory WHERE branch_id != '' AND drug_id != ''"
+    );
+    await refreshSellableForPairs(
+      db,
+      rows.map((r) => ({ branchId: String(r.branch_id), drugId: String(r.drug_id) }))
+    );
+  } catch (err) {
+    // A device with a partially-built local DB (or an older schema missing
+    // stock_leases) still gets to run. Leaving sellable_quantity at its default
+    // is strictly better than refusing to open the database at all.
+    console.warn("[localDb] v32 sellable_quantity backfill skipped:", err);
+  }
+
+  await db.execute("PRAGMA user_version = 32");
 }
 
 export async function ensurePrescriptionSchema(db: Database): Promise<void> {

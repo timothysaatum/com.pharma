@@ -21,6 +21,7 @@ import {
   appendOutboxEvent,
   buildSaleCreatedEnvelope,
 } from "@/lib/localWrite";
+import { refreshSellableQuantity } from "@/lib/sellableQty";
 import type { Sale, SaleItem } from "@/types";
 
 export interface OfflineSaleRecord {
@@ -110,6 +111,14 @@ export class OfflineSalesManager {
         now,
     );
     await db.executeTransaction(statements);
+
+    // Post-commit: the sale moved both branch_inventory.quantity and
+    // drug_batches.remaining_quantity, so recompute sellable_quantity now that
+    // the transaction is durable. Inside the transaction these reads would see
+    // pre-commit batch state.
+    for (const { drug_id } of inventoryDeltas) {
+      await refreshSellableQuantity(db, sale.branch_id, drug_id);
+    }
 
     // Append sale_created outbox event for sync engine FIFO shipping
     await appendOutboxEvent((hashPrev) =>

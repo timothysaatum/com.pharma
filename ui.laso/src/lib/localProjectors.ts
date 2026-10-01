@@ -21,6 +21,7 @@
 import { getDb, setVersionVector } from "@/lib/localDb";
 import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
+import { refreshSellableQuantity, refreshSellableForPairs } from "@/lib/sellableQty";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
 
@@ -303,6 +304,7 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
 
   // Deduct branch_inventory for every sale item.
   const branchId = String(p.branch_id ?? e.branch_id);
+  const touched: Array<{ branchId: string; drugId: string }> = [];
   for (const item of items) {
     if (item.drug_id != null && item.quantity != null) {
       await db.execute(
@@ -311,8 +313,12 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
           WHERE branch_id = $2 AND drug_id = $3`,
         [Number(item.quantity), branchId, String(item.drug_id)]
       );
+      touched.push({ branchId, drugId: String(item.drug_id) });
     }
   }
+  // The sale moved both branch_inventory.quantity and drug_batches
+  // .remaining_quantity, so sellable_quantity is stale until recomputed.
+  await refreshSellableForPairs(db, touched);
 }
 
 async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
@@ -323,7 +329,20 @@ async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
     [now, String(e.aggregate_id)]
   );
   // Restore stock.
+  const branchId = String(p.branch_id ?? e.branch_id);
   const batchChanges = (p.batch_changes ?? []) as Array<Record<string, unknown>>;
+  const batchIds = batchChanges.map((bc) => String(bc.batch_id));
+  const touched: Array<{ branchId: string; drugId: string }> = [];
+  // Resolve which drugs the restored batches belong to before mutating them:
+  // a void can restore batches for drugs other than p.drug_id.
+  if (batchIds.length > 0) {
+    const placeholders = batchIds.map((_, i) => `$${i + 1}`).join(",");
+    const ownerRows = await db.select<{ drug_id: string }[]>(
+      `SELECT DISTINCT drug_id FROM drug_batches WHERE id IN (${placeholders})`,
+      batchIds
+    );
+    for (const row of ownerRows) touched.push({ branchId, drugId: String(row.drug_id) });
+  }
   for (const bc of batchChanges) {
     await db.execute(
       `UPDATE drug_batches
@@ -337,9 +356,11 @@ async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
       `UPDATE branch_inventory
           SET quantity = quantity + $1
         WHERE branch_id = $2 AND drug_id = $3`,
-      [Number(p.quantity), String(p.branch_id ?? e.branch_id), String(p.drug_id)]
+      [Number(p.quantity), branchId, String(p.drug_id)]
     );
+    touched.push({ branchId, drugId: String(p.drug_id) });
   }
+  await refreshSellableForPairs(db, touched);
 }
 
 // ── Prescription projectors ────────────────────────────────────────────────
@@ -554,6 +575,7 @@ async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
       [Number(bc.quantity_change ?? 0), String(bc.batch_id)]
     );
   }
+  await refreshSellableQuantity(db, branchId, drugId);
 }
 
 // ── Stock transfer projector ───────────────────────────────────────────────
@@ -594,6 +616,11 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
       [batchQty, String(bc.batch_id)]
     );
   }
+
+  // Stock left the source branch, so both its inventory row and the affected
+  // batch rows moved.
+  await refreshSellableQuantity(db, srcBranch, drugId);
+  await refreshSellableQuantity(db, dstBranch, drugId);
 }
 
 // ── Drug projectors ────────────────────────────────────────────────────────
@@ -843,6 +870,12 @@ async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
       p.received_date != null ? String(p.received_date) : now
     ]
   );
+
+  // Run last: the batch row is now present, so the sellable recomputation sees
+  // the authoritative remaining_quantity rather than a pre-batch snapshot.
+  // This is what keeps the value correct whether the batch event or the
+  // inventory event arrives first.
+  await refreshSellableQuantity(db, branchId, drugId);
 }
 
 // ── Branch Inventory projectors ─────────────────────────────────────────────
@@ -881,6 +914,11 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
       [String(e.aggregate_id), branchId, drugId, qty, location, sellingPrice, now]
     );
   }
+
+  // sellable_quantity is a derived column: nothing in the event payload can be
+  // trusted to populate it (PostgreSQL branch_inventory has no such column, so
+  // the server never emits one). Recompute it from local batches and leases.
+  await refreshSellableQuantity(db, branchId, drugId);
 }
 
 // ── Purchase Order projectors ───────────────────────────────────────────────

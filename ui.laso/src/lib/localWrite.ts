@@ -16,6 +16,7 @@
  */
 
 import { getDb, appendToOutbox, getOutboxTailHash, getVersionVector, bumpVector } from "@/lib/localDb";
+import { refreshSellableQuantity } from "@/lib/sellableQty";
 import { generateUlid, computeHashSelf, GENESIS_HASH } from "@/lib/eventEnvelope";
 import type { OutboxEvent, VectorClock } from "@/lib/localDb";
 import type {
@@ -881,7 +882,9 @@ export const writeLocal = {
             return;
         }
 
-
+        // A local inventory write changes the sellable pool. Recompute so the
+        // POS cart does not keep serving the previous value.
+        await refreshSellableQuantity(db, branchId, drugId);
     },
 
     /**
