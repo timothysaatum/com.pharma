@@ -1,0 +1,11 @@
+# Scripts are executed inside WSL, where a CRLF line ending on a shebang line
+# fails with "bad interpreter: /bin/bash^M". Without this, Git's default
+# core.autocrlf behaviour rewrites .sh files to CRLF on checkout on Windows and
+# the scripts stop working when invoked from WSL.
+*.sh text eol=lf
+*.py text eol=lf
+*.bash text eol=lf
+
+# Keep lockfiles and generated data untouched.
+pnpm-lock.yaml -text
+*.sqlite3 binary
