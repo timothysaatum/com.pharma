@@ -9,7 +9,7 @@ import json
 import logging
 
 from fastapi import FastAPI, Request, status
-from fastapi.exceptions import RequestValidationError
+from fastapi.exceptions import RequestValidationError, ResponseValidationError
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from sqlalchemy.exc import DataError, IntegrityError
@@ -78,27 +78,56 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def pydantic_validation_exception_handler(
         request: Request, exc: ValidationError
     ) -> JSONResponse:
-        """Handle Pydantic model ValidationError."""
+        """Pydantic ValidationError reaching the app during a request.
+
+        This is a RESPONSE-building failure, never a request failure: request
+        validation raises RequestValidationError (handled above, and correctly
+        reported as 422). A row that fails to serialize is a server-side data
+        problem, so it is reported as 500 and logged with the offending field
+        paths. Returning 422 here made a GET report the caller as the cause and
+        hid the bad row behind a validation error the caller could not act on.
+        """
         request_id = getattr(request.state, "request_id", "unknown")
-        logger.warning(
-            "[%s] Pydantic validation error on %s %s",
+        logger.error(
+            "[%s] Response serialization failed on %s %s "
+            "(server-side data does not satisfy the response schema): %s",
             request_id,
             request.method,
             request.url.path,
+            exc.errors(),
         )
-        formatted_errors = [
-            {
-                "loc": list(e.get("loc", [])),
-                "msg": str(e.get("msg", "")),
-                "type": e.get("type", "validation_error"),
-            }
-            for e in exc.errors()
-        ]
         return JSONResponse(
-            status_code=HTTP_422_UNPROCESSABLE,
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             content={
-                "detail": "Validation error",
-                "errors": formatted_errors,
+                "detail": "Internal server error: failed to serialize response.",
+                "type": "ResponseValidationError",
+                "request_id": request_id,
+            },
+        )
+
+    @app.exception_handler(ResponseValidationError)
+    async def response_validation_exception_handler(
+        request: Request, exc: ResponseValidationError
+    ) -> JSONResponse:
+        """FastAPI response_model validation failure.
+
+        Raised when a route declares response_model= and the returned object
+        cannot be validated into it. Explicitly 500 with the failing paths
+        logged, so it is distinguishable from a client error in the logs.
+        """
+        request_id = getattr(request.state, "request_id", "unknown")
+        logger.error(
+            "[%s] ResponseValidationError on %s %s (response_model): %s",
+            request_id,
+            request.method,
+            request.url.path,
+            exc.errors(),
+        )
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={
+                "detail": "Internal server error: response did not match the declared response_model.",
+                "type": "ResponseValidationError",
                 "request_id": request_id,
             },
         )

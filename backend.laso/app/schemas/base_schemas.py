@@ -14,6 +14,14 @@ Money: TypeAlias = Annotated[
     PlainSerializer(lambda v: float(v), return_type=float, when_used="json"),
 ]
 
+# Money for RESPONSE models. Same wire format as Money, but no digit/scale/sign
+# bounds, so serializing a row that was written outside these bounds can never
+# raise while building a response. Input schemas keep the strict Money alias.
+UnboundedMoney: TypeAlias = Annotated[
+    Decimal,
+    PlainSerializer(lambda v: float(v), return_type=float, when_used="json"),
+]
+
 class BaseSchema(BaseModel):
     """Base schema with common configuration"""
     model_config = ConfigDict(

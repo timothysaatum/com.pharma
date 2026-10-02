@@ -12,6 +12,7 @@ from app.core.deps import (
     get_db, get_current_active_user,
     require_permission
 )
+from app.core.response_building import build_response
 from app.models.user.user_model import User
 from app.services.drug.drug_service import DrugService
 from app.services.inventory.inventory_service import InventoryService
@@ -102,7 +103,11 @@ async def _serialize_drugs_with_branch_prices(
     )
     responses: List[DrugResponse] = []
     for drug in drugs:
-        response = DrugResponse.model_validate(drug)
+        response = build_response(
+            DrugResponse,
+            drug,
+            context="_serialize_drugs_with_branch_prices",
+        )
         responses.append(
             response.model_copy(
                 update={"unit_price": effective_prices.get(drug.id, response.unit_price)}
@@ -531,7 +536,11 @@ async def get_drug_with_inventory(
         branch_id=branch_id
     )
     
-    drug_response = DrugResponse.model_validate(result["drug"])
+    drug_response = build_response(
+        DrugResponse,
+        result["drug"],
+        context="get_drug_with_inventory",
+    )
     if branch_id:
         drug_response = (
             await _serialize_drugs_with_branch_prices(

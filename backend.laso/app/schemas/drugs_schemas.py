@@ -2,14 +2,15 @@
 Drug Schemas
 Complete schemas for drug/product management
 """
-from pydantic import Field, field_validator, computed_field, ConfigDict
+from pydantic import Field, field_validator, computed_field, ConfigDict, AliasChoices
 from typing import Optional, List
 from decimal import Decimal
+from datetime import datetime
 import uuid
 import re
 
 from app.schemas.base_schemas import (
-    BaseSchema, TimestampSchema, SyncSchema, Money
+    BaseSchema, TimestampSchema, SyncSchema, Money, UnboundedMoney
 )
 
 
@@ -42,7 +43,7 @@ class DrugBase(BaseSchema):
     markup_percentage: Optional[Money] = Field(None,description="Markup percentage over cost price")
     tax_rate: Money = Field(default=0, description="Tax rate as percentage")
     reorder_level: int = Field(default=10, ge=0, description="Trigger reorder when stock falls below")
-    reorder_quantity: int = Field(default=50, ge=1, description="Suggested reorder quantity")
+    reorder_quantity: int = Field(default=50, ge=0, description="Suggested reorder quantity. 0 means 'do not suggest a reorder quantity'")
     max_stock_level: Optional[int] = Field(None, ge=0, description="Maximum stock to maintain")
     unit_of_measure: str = Field(
         default="unit",
@@ -100,7 +101,7 @@ class DrugUpdate(BaseSchema):
     markup_percentage: Optional[Money] = Field(None, ge=0)
     tax_rate: Optional[Money] = Field(None, ge=0, le=100)
     reorder_level: Optional[int] = Field(None, ge=0)
-    reorder_quantity: Optional[int] = Field(None, ge=1)
+    reorder_quantity: Optional[int] = Field(None, ge=0)
     max_stock_level: Optional[int] = None
     unit_of_measure: Optional[str] = None
     description: Optional[str] = None
@@ -112,11 +113,63 @@ class DrugUpdate(BaseSchema):
     is_active: Optional[bool] = None
 
 
-class DrugResponse(DrugBase, TimestampSchema, SyncSchema):
-    """Schema for drug API responses"""
+class DrugResponse(BaseSchema):
+    """Schema for drug API responses.
+
+    Deliberately NOT a subclass of DrugBase, DrugUpdate, TimestampSchema or
+    SyncSchema. Those carry input bounds (ge/le, pattern, min_length/max_length,
+    condecimal) and a row written outside them - directly by SQL, by a seed, or
+    before a bound was tightened - would raise ValidationError while the response
+    is being built, surfacing to the client as a 422 that blames the request for a
+    server-side data problem.
+
+    So every field is redeclared here with the same type but no bounds. Field
+    lists must be kept in step with DrugBase; tests/unit/test_drug_response_bounds.py
+    enforces that the response models carry no numeric/length/pattern constraints,
+    and integration tests cover the wire shape.
+    """
     id: uuid.UUID
     organization_id: uuid.UUID
-    
+
+    name: str
+    generic_name: Optional[str] = None
+    brand_name: Optional[str] = None
+    sku: Optional[str] = None
+    barcode: Optional[str] = None
+    category_id: Optional[uuid.UUID] = None
+    drug_type: str = "otc"
+    dosage_form: Optional[str] = None
+    strength: Optional[str] = None
+    manufacturer: Optional[str] = None
+    supplier: Optional[str] = None
+    ndc_code: Optional[str] = None
+    requires_prescription: bool = False
+    controlled_substance_schedule: Optional[str] = None
+    unit_price: UnboundedMoney
+    cost_price: Optional[UnboundedMoney] = None
+    markup_percentage: Optional[UnboundedMoney] = None
+    tax_rate: UnboundedMoney = Decimal("0")
+    reorder_level: int = 0
+    reorder_quantity: int = 0
+    max_stock_level: Optional[int] = None
+    unit_of_measure: str = "unit"
+    description: Optional[str] = None
+    usage_instructions: Optional[str] = None
+    side_effects: Optional[str] = None
+    contraindications: Optional[str] = None
+    storage_conditions: Optional[str] = None
+    image_url: Optional[str] = None
+    is_active: bool = True
+
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    sync_status: str = "synced"
+    sync_version: int = 0
+    synced_at: Optional[datetime] = Field(
+        None,
+        validation_alias=AliasChoices("synced_at", "last_synced_at"),
+    )
+
     @computed_field
     @property
     def profit_margin(self) -> Optional[float]:
@@ -124,7 +177,7 @@ class DrugResponse(DrugBase, TimestampSchema, SyncSchema):
         if self.cost_price and self.cost_price > 0:
             return float(((self.unit_price - self.cost_price) / self.cost_price) * 100)
         return None
-    
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -134,7 +187,7 @@ class DrugWithInventory(DrugResponse):
     available_quantity: int = 0
     reserved_quantity: int = 0
     inventory_status: str = "unknown"  # in_stock, low_stock, out_of_stock
-    
+
     @computed_field
     @property
     def needs_reorder(self) -> bool:

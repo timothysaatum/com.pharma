@@ -8,6 +8,8 @@ from sqlalchemy import Select, func, select
 from pydantic import BaseModel, Field, computed_field
 from math import ceil
 
+from app.core.response_building import build_responses
+
 
 T = TypeVar('T')
 
@@ -237,9 +239,11 @@ class Paginator:
         end = start + params.page_size
         page_items = items[start:end]
         
-        # Convert to schema if provided
+        # Convert to schema if provided.
+        # Uses build_responses so a row that cannot be serialized logs its id and
+        # the failing field paths, instead of surfacing as an unattributed 422.
         if schema:
-            page_items = [schema.model_validate(item) for item in page_items]
+            page_items = build_responses(schema, page_items, context="Paginator.paginate_list")
         
         return PaginatedResponse(
             items=page_items,
