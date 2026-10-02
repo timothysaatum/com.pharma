@@ -355,11 +355,48 @@ def test_handler_classifies_plain_validation_error_as_request_side():
     assert _is_response_side(exc, formatted) is False
 
 
-def test_corrupt_row_error_is_logged_with_row_id(caplog):
-    """The operator must be able to identify the offending record from logs."""
+class _CollectingHandler(logging.Handler):
+    """Captures records from ONE logger, independent of propagation."""
+
+    def __init__(self):
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def test_corrupt_row_error_is_logged_with_row_id():
+    """The operator must be able to identify the offending record from logs.
+
+    The handler is attached to the emitting logger directly rather than read
+    through pytest's `caplog`. `caplog` installs its handler on the ROOT logger,
+    but `app.core.logging_config.get_logging_config` configures the `app` logger
+    with `propagate: False` (logging_config.py:65-70). Importing `main` — which
+    any other test in the suite does — therefore makes every `app.*` record
+    invisible to `caplog`, so this assertion passed in isolation and failed in a
+    full-suite run. Attaching to the logger itself tests the behaviour we
+    actually care about: the offending row id reaches the log stream, whatever
+    the propagation chain happens to be.
+    """
     bad_id = uuid.uuid4()
     rows = [_row(name="Bad", id=bad_id, unit_price="not-a-number")]
-    with caplog.at_level(logging.ERROR):
+
+    from app.utils import response_building
+
+    target = logging.getLogger(response_building.__name__)
+    handler = _CollectingHandler()
+    previous_level = target.level
+    target.addHandler(handler)
+    target.setLevel(logging.ERROR)
+    try:
         with pytest.raises(ResponseBuildError):
             build_response_model(DrugResponse, rows, context="GET /drugs")
-    assert str(bad_id) in caplog.text
+    finally:
+        target.removeHandler(handler)
+        target.setLevel(previous_level)
+
+    logged = "\n".join(r.getMessage() for r in handler.records)
+    assert handler.records, "nothing was logged for a corrupt row"
+    assert str(bad_id) in logged
+    assert "1 of 1 row" in logged
