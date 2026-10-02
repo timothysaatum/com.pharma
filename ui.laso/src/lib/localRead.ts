@@ -318,13 +318,18 @@ export const localRead = {
     const db = await getDb();
     const qualifiers: string[] = ["d.is_deleted = 0"];
     const values: unknown[] = [];
-    let join = "";
 
-    if (params.branch_id) {
-      values.push(params.branch_id);
-      join = "LEFT JOIN branch_inventory bi ON bi.drug_id = d.id";
-      qualifiers.push(`bi.branch_id = $${values.length}`);
-    }
+    // The catalogue is organization-wide, so this read never joins
+    // branch_inventory. The previous version LEFT JOINed branch_inventory and
+    // pushed `bi.branch_id = $n` into WHERE, which demotes the LEFT JOIN to an
+    // inner join: a drug that is in the catalogue but has no branch_inventory
+    // row yet (added to the branch but not stocked) disappeared from the offline
+    // list, so the catalogue reported 0 while the server reported the full org
+    // list for identical data. Stock state belongs to Inventory and POS, not to
+    // catalogue membership.
+    //
+    // Scoping is therefore by organization_id only. branch_id is intentionally
+    // ignored here and is not pushed into the query.
     if (params.is_active !== undefined) {
       values.push(boolToInt(params.is_active));
       qualifiers.push(`is_active = $${values.length}`);
@@ -354,13 +359,13 @@ export const localRead = {
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
-    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${join} ${where}`, values);
+    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${where}`, values);
     const total = countRows[0]?.total ?? 0;
     console.log(`[LocalRead] searchDrugs: found ${total} total drugs`);
 
     const offset = (page - 1) * page_size;
     const rows = await db.select<Drug[]>(
-      `SELECT d.* FROM drugs d ${join} ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      `SELECT d.* FROM drugs d ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, page_size, offset]
     );
 

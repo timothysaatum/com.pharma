@@ -125,13 +125,17 @@ export default function DrugListPage() {
 
         try {
             if (!navigator.onLine || isBackendKnownUnreachable()) {
+                // Offline catalogue read: organization-scoped, never branch-scoped.
+                // branch_id is not passed because the catalogue is org-wide; a drug
+                // that has not been stocked at the active branch is still in the
+                // catalogue. Stock state is read by Inventory/POS instead.
                 const result = await localRead.searchDrugs(
                     {
                         search: debouncedSearch || undefined,
                         drug_type: filterType || undefined,
                         category_id: filterCategory || undefined,
                         is_active: filterActive === "" ? undefined : filterActive === "true",
-                        branch_id: activeBranchId || undefined,
+                        organization_id: user?.organization_id || undefined,
                     },
                     page,
                     PAGE_SIZE
@@ -164,7 +168,7 @@ export default function DrugListPage() {
                         drug_type: filterType || undefined,
                         category_id: filterCategory || undefined,
                         is_active: filterActive === "" ? undefined : filterActive === "true",
-                        branch_id: activeBranchId || undefined,
+                        organization_id: user?.organization_id || undefined,
                     },
                     page,
                     PAGE_SIZE
@@ -191,7 +195,7 @@ export default function DrugListPage() {
             // cancelled, which is exactly how this page hung.
             if (abortRef.current === controller) setIsLoading(false);
         }
-    }, [page, debouncedSearch, filterType, filterCategory, filterActive, activeBranchId]);
+    }, [page, debouncedSearch, filterType, filterCategory, filterActive, user?.organization_id]);
 
     useEffect(() => {
         fetchDrugs();
@@ -408,6 +412,25 @@ export default function DrugListPage() {
                 {isLoading ? (
                     <div className="flex items-center justify-center h-64">
                         <RefreshCw className="w-6 h-6 text-brand-500 animate-spin" />
+                    </div>
+                ) : error && drugs.length === 0 ? (
+                    // A failed load must not masquerade as an empty catalogue.
+                    // "No drugs found" reads as a fact about the org; it is not.
+                    <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">
+                        <AlertTriangle className="w-10 h-10 text-red-500 opacity-60" />
+                        <p className="text-sm font-medium text-ink">
+                            Couldn&apos;t load the drug catalogue
+                        </p>
+                        <p className="text-sm text-center max-w-md" data-testid="drug-list-error-detail">
+                            {error}
+                        </p>
+                        <button
+                            onClick={() => void fetchDrugs()}
+                            data-testid="drug-list-retry"
+                            className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white bg-brand-600 hover:bg-brand-700 rounded-xl transition-colors"
+                        >
+                            <RefreshCw className="w-4 h-4" /> Retry
+                        </button>
                     </div>
                 ) : drugs.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">
