@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 33;
+const MAX_KNOWN_SCHEMA_VERSION = 34;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -302,6 +302,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 31) await migrate_v31(db);
         if (user_version < 32) await migrate_v32(db);
         if (user_version < 33) await migrate_v33(db);
+        if (user_version < 34) await migrate_v34(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2325,27 +2326,47 @@ export async function getPendingOutboxCount(): Promise<number> {
   return rows?.[0]?.count ?? 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────��────────────────────────────
 // EVENT PULL CURSOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EVENT_PULL_SEQ_KEY = "event_pull_seq";
+/**
+ * `event_log.seq` is PER-ORGANISATION (UNIQUE (org_id, seq)), and the pull
+ * endpoint filters on org_id from the JWT alone — it is not branch-scoped. The
+ * cursor must therefore be scoped per org too.
+ *
+ * It previously lived in a single unscoped `sync_meta` row, so one device used
+ * against two orgs (or against a test org whose log had grown large) carried a
+ * high-water mark from one into the other and sat permanently above the head
+ * of the second, receiving nothing while reporting itself healthy.
+ */
+function eventPullSeqKey(orgId?: string | null): string {
+  return orgId ? `event_pull_seq:${orgId}` : "event_pull_seq:unknown-org";
+}
 
-/** Last event_log.seq successfully pulled and applied from the server. */
-export async function getEventPullSeq(): Promise<number> {
+/**
+ * Last `event_log.seq` successfully pulled and applied for `orgId`.
+ *
+ * The legacy unscoped `event_pull_seq` row is deliberately NOT read: its value
+ * is untrustworthy (it may belong to a different org entirely). A device that
+ * has never synced under the new key therefore starts from 0 and replays the
+ * org's log from the start, which is the safe direction. The old row is left in
+ * place untouched.
+ */
+export async function getEventPullSeq(orgId?: string | null): Promise<number> {
   const db = await getDb();
   const rows = await db.select<{ value: string }[]>(
     "SELECT value FROM sync_meta WHERE key = $1",
-    [EVENT_PULL_SEQ_KEY]
+    [eventPullSeqKey(orgId)]
   );
   return rows?.[0]?.value ? Number(rows[0].value) : 0;
 }
 
-export async function setEventPullSeq(seq: number): Promise<void> {
+export async function setEventPullSeq(seq: number, orgId?: string | null): Promise<void> {
   const db = await getDb();
   await db.execute(
     "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-    [EVENT_PULL_SEQ_KEY, String(seq)]
+    [eventPullSeqKey(orgId), String(seq)]
   );
 }
 
@@ -2629,6 +2650,94 @@ export async function migrate_v33(db: Database): Promise<void> {
     "CREATE INDEX IF NOT EXISTS idx_sync_event_failures_status ON sync_event_failures(status)"
   );
   await db.execute("PRAGMA user_version = 33");
+}
+
+// ──────────────────────────────────────────���──────────────────────────────────
+// MIGRATION v34 — per-org pull cursor key + applied_events replay guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Replay guard for the projectors that are NOT idempotent.
+ *
+ * `_saleVoided`, `_prescriptionRefillUsed`, `_stockAdjusted` and
+ * `_stockTransfer` apply pure increments/decrements with no existence check,
+ * so applying the same event twice double-applies it. Every other projector is
+ * an upsert or guarded by an existence check and is safe to replay.
+ *
+ * A cursor reset (or any re-pull after a stranded cursor) replays the log, so
+ * these four need to know whether they have already run for a given event_id.
+ * This table records that, written in the SAME local transaction as the
+ * projection.
+ *
+ * Deliberately scoped to those four event types only: one row per applied event
+ * for the whole log would grow without bound. `hasAppliedEvent` is consulted
+ * only by the four guarded projectors, so rows accumulate only for events of
+ * those types.
+ */
+export async function migrate_v34(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS applied_events (
+      event_id     TEXT NOT NULL PRIMARY KEY,
+      org_id       TEXT NOT NULL DEFAULT '',
+      seq          INTEGER NOT NULL DEFAULT 0,
+      event_type   TEXT NOT NULL DEFAULT '',
+      aggregate_id TEXT NOT NULL DEFAULT '',
+      applied_at   TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_applied_events_seq ON applied_events(seq)"
+  );
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_applied_events_type ON applied_events(event_type)"
+  );
+
+  // The unscoped `event_pull_seq` row is intentionally NOT migrated: its value
+  // may belong to a different organisation entirely, so carrying it forward
+  // would reproduce exactly the bug v34 fixes. It is left in place, unread.
+  await db.execute("PRAGMA user_version = 34");
+}
+
+/** True when this device has already applied the given event. */
+export async function hasAppliedEvent(eventId: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ event_id: string }[]>(
+    "SELECT event_id FROM applied_events WHERE event_id = $1 LIMIT 1",
+    [eventId]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Record that an event has been applied.
+ *
+ * MUST be called in the same local transaction as the projection it guards, so
+ * the marker and the mutation commit or roll back together. A marker written
+ * without its mutation would suppress the mutation on the next replay.
+ */
+export async function markEventApplied(
+  db: Database,
+  identity: {
+    event_id: string;
+    org_id?: string | null;
+    seq?: number | null;
+    event_type?: string | null;
+    aggregate_id?: string | null;
+  }
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO applied_events (event_id, org_id, seq, event_type, aggregate_id, applied_at)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT(event_id) DO NOTHING`,
+    [
+      identity.event_id,
+      identity.org_id ?? "",
+      Number(identity.seq ?? 0),
+      identity.event_type ?? "",
+      identity.aggregate_id ?? "",
+      new Date().toISOString(),
+    ]
+  );
 }
 
 /** Attempts allowed before an event is quarantined and never retried again. */

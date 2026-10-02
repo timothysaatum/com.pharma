@@ -150,6 +150,19 @@ class EventPullResponse(BaseModel):
     events: List[EventEnvelope]
     has_more: bool
     next_after_seq: int
+    server_head_seq: int = 0
+    """The true highest ``seq`` held for this organisation, ALWAYS present.
+
+    ``next_after_seq`` is a paging cursor and echoes the caller's own
+    ``after_seq`` when the page is empty, so it cannot answer "are you past
+    my log?". A device whose cursor had been stranded above the head would
+    adopt that echo as the head and conclude it was fully caught up while
+    silently receiving nothing.
+
+    This field is the real ``MAX(seq)`` for the org, so the client can detect
+    ``cursor > server_head_seq`` and recover. Additive and defaulted, so an
+    older client that ignores it is unaffected.
+    """
 
 
 # ── Canonical hashing (ADR 0007) ─────────────────────────────────────────────

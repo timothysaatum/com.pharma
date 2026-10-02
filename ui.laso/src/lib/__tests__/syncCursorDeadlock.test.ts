@@ -104,9 +104,18 @@ function goodEvent(seq: number, eventId: string, name: string): EventEnvelope {
   });
 }
 
+/**
+ * The stored pull cursor.
+ *
+ * As of migration v34 the key is scoped per organisation (`event_pull_seq:<org>`),
+ * because `event_log.seq` is per-org and the pull is org-wide — one unscoped row
+ * let a device carry one org's high-water mark into another and sit permanently
+ * above the second org's head. This engine is armed with org `org-1` (see
+ * armEngine), so that is the key read here.
+ */
 function readCursor(): number {
   const row = rawDb()
-    .prepare("SELECT value FROM sync_meta WHERE key = 'event_pull_seq'")
+    .prepare("SELECT value FROM sync_meta WHERE key = 'event_pull_seq:org-1'")
     .get() as { value: string } | undefined;
   return row ? Number(row.value) : 0;
 }

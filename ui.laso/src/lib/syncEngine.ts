@@ -61,7 +61,12 @@ export interface SyncHealth {
     stalled: boolean;
 }
 
-class SyncEngine {
+/**
+ * Exported for tests: the singleton below is the app's instance, but the
+ * cursor self-heal in `pullEvents` needs to be driven against a controlled
+ * server response without starting the background timer.
+ */
+export class SyncEngine {
     private branchId: string | null = null;
     private organizationId: string | null = null;
     private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -80,6 +85,17 @@ class SyncEngine {
     private _dbInitError: string | null = null;
     private _pulledSeq = 0;
     private _serverHeadSeq: number | null = null;
+    /**
+     * Set when this device found its stored cursor sitting above the server's
+     * head and rewound to 0. Kept for the current sync cycle so the reason is
+     * observable (the SyncIndicator logs it and the UI can explain a sudden
+     * full replay) rather than a silent repair.
+     */
+    private _cursorReset: {
+        from: number;
+        to: number;
+        reason: string;
+    } | null = null;
     private _syncHealth: SyncHealth = {
         pulledSeq: 0,
         serverHeadSeq: null,
@@ -200,6 +216,7 @@ class SyncEngine {
         // branch a false "stalled" reading.
         this._pulledSeq = 0;
         this._serverHeadSeq = null;
+        this._cursorReset = null;
         this._syncHealth = {
             pulledSeq: 0,
             serverHeadSeq: null,
@@ -244,6 +261,18 @@ class SyncEngine {
     get status(): SyncStatus { return this._status; }
     get lastSyncAt(): string | null { return this._lastSyncAt; }
     get syncHealth(): SyncHealth { return this._syncHealth; }
+
+    /**
+     * Why this device rewound its cursor, or null if it did not.
+     *
+     * Non-null only after a pull found the stored cursor above the server's
+     * head. A full replay of the org's log is expensive and surprising, so
+     * callers that want to explain it to the user (or assert on it in tests)
+     * read it here.
+     */
+    get cursorReset(): { from: number; to: number; reason: string } | null {
+        return this._cursorReset;
+    }
 
     // ── Main sync cycle: push events, then pull events ───────────────
 
@@ -418,11 +447,45 @@ class SyncEngine {
         // quarantined, so this cannot loop forever.
         await this.retryFailedProjections();
 
-        let afterSeq = await getEventPullSeq();
+        // The cursor is per-org: seq is per-org server-side and the pull is
+        // org-wide, so a single unscoped row let one org's high-water mark
+        // strand the device against another.
+        this._cursorReset = null;
+        let afterSeq = await getEventPullSeq(this.organizationId);
 
         // Page through server events. Cap at 50 pages per cycle.
         for (let page = 0; page < 50; page++) {
             const response = await syncApi.pullEvents(afterSeq);
+
+            // ── Self-heal a cursor stranded above the server head ────────
+            // The server always reports its true head in `server_head_seq`. If
+            // our cursor is beyond it, this device is reading from a log that
+            // no longer exists (the log was reseeded, or the cursor came from
+            // another environment). Reset to 0 and replay from the start.
+            //
+            // Without this the device received zero events forever and reported
+            // itself healthy, because the server echoed our own cursor back and
+            // `pulledSeq < serverHeadSeq` compared 225 < 225.
+            const head = typeof response.server_head_seq === "number"
+                ? response.server_head_seq
+                : null;
+            if (head !== null && afterSeq > head) {
+                console.warn(
+                    `[SyncEngine] Cursor ${afterSeq} is ahead of the server head ${head} ` +
+                    `(org ${this.organizationId ?? "unknown"}). The stored position cannot exist ` +
+                    `in this organisation's event log — most likely the log was reseeded or this ` +
+                    `device carried a cursor from another environment. Resetting to 0 and ` +
+                    `replaying the log from the start.`
+                );
+                this._serverHeadSeq = head;
+                this._cursorReset = { from: afterSeq, to: 0, reason: "cursor_ahead_of_head" };
+                await setEventPullSeq(0, this.organizationId);
+                afterSeq = 0;
+                // Re-pull from 0 on the next iteration of this same cycle.
+                // `lastSuccessSeq` is re-derived from `afterSeq` at the top of
+                // each page, so there is nothing else to reset here.
+                continue;
+            }
             let lastSuccessSeq = afterSeq;
 
             let db;
@@ -488,20 +551,23 @@ class SyncEngine {
                     ? response.next_after_seq
                     : lastSuccessSeq;
                 if (target > afterSeq) {
-                    await setEventPullSeq(target);
+                    await setEventPullSeq(target, this.organizationId);
                     afterSeq = target;
                 }
             }
 
             if (!response.has_more) {
-                // The server has nothing past next_after_seq, so that is the
-                // head. Used by the UI to show how far behind a device is.
-                this._serverHeadSeq = response.next_after_seq;
+                // Use the server's TRUE head, not next_after_seq. On an empty
+                // page next_after_seq is just our own cursor echoed back, which
+                // cannot distinguish "caught up" from "past my log".
+                this._serverHeadSeq = typeof response.server_head_seq === "number"
+                    ? response.server_head_seq
+                    : response.next_after_seq;
                 break;
             }
         }
 
-        this._pulledSeq = await getEventPullSeq();
+        this._pulledSeq = await getEventPullSeq(this.organizationId);
         await this.refreshSyncHealth();
 
         // Refresh the local conflict cache so the Conflicts page works offline.
@@ -656,7 +722,7 @@ class SyncEngine {
             const counts = await countEventProjectionFailures(db);
             failed = counts.failed;
             quarantined = counts.quarantined;
-            this._pulledSeq = await getEventPullSeq();
+            this._pulledSeq = await getEventPullSeq(this.organizationId);
         } catch {
             // Leave the previous numbers rather than reporting a false zero.
             return;

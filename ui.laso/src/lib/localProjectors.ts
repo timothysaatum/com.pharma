@@ -18,7 +18,7 @@
  *   - Deletes:  UPDATE SET is_deleted=1 (idempotent)
  */
 
-import { getDb, setVersionVector } from "@/lib/localDb";
+import { getDb, setVersionVector, markEventApplied } from "@/lib/localDb";
 import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
 import { refreshSellableQuantity, refreshSellableForPairs } from "@/lib/sellableQty";
@@ -125,6 +125,64 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
   }
 
   void p; // suppress unused var warning — p may not be used in dispatch
+}
+
+// ── Replay guard (non-idempotent projectors only) ───────────────────────────
+
+/**
+ * Event types whose local projectors apply raw increments and therefore
+ * double-apply if the same event is delivered twice.
+ *
+ * A cursor reset replays the log, and the server may re-deliver events the
+ * device already processed. Every other projector is an upsert, or guarded by
+ * an existence check (`_saleCreated` checks `sales`), so replaying is harmless.
+ * These four are not, so they consult `applied_events` first.
+ *
+ * Trade-off: the guard table only receives rows for these four types, so it
+ * stays small. The residual gap is documented — a device that applied one of
+ * these events BEFORE this table existed has no marker, so replaying that
+ * event still double-applies it once. The organisation's current 69-event log
+ * contains none of these types, so nothing is currently exposed; the exposure
+ * is for future logs that do.
+ */
+const REPLAY_GUARDED_TYPES = new Set([
+  "sale_voided",
+  "prescription_refill_used",
+  "stock_adjusted",
+  "stock_transfer",
+]);
+
+/**
+ * Returns true when this event must be SKIPPED because it was already applied.
+ *
+ * When it returns false the caller must call {@link recordGuardedApply} in the
+ * same transaction as its mutations, so the marker and the mutation commit or
+ * roll back together. Writing the marker without the mutation would suppress
+ * the mutation on the next replay.
+ */
+async function shouldSkipReplay(e: EventEnvelope): Promise<boolean> {
+  if (!REPLAY_GUARDED_TYPES.has(e.event_type)) return false;
+  if (!e.event_id) return false;
+  const db = await getDb();
+  const rows = await db.select<{ event_id: string }[]>(
+    "SELECT event_id FROM applied_events WHERE event_id = $1 LIMIT 1",
+    [String(e.event_id)]
+  );
+  return rows.length > 0;
+}
+
+/** Mark a guarded event applied. Call inside the same transaction as the mutation. */
+async function recordGuardedApply(e: EventEnvelope): Promise<void> {
+  if (!REPLAY_GUARDED_TYPES.has(e.event_type)) return;
+  if (!e.event_id) return;
+  const db = await getDb();
+  await markEventApplied(db, {
+    event_id: String(e.event_id),
+    org_id: e.org_id ?? "",
+    seq: e.seq ?? 0,
+    event_type: e.event_type,
+    aggregate_id: e.aggregate_id ?? "",
+  });
 }
 
 // ── Customer projectors ────────────────────────────────────────────────────
@@ -322,6 +380,9 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
 }
 
 async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: this projector restores stock with a raw `quantity = quantity + n`,
+  // so a replay would restore the same units twice.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
@@ -360,6 +421,7 @@ async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
     );
     touched.push({ branchId, drugId: String(p.drug_id) });
   }
+  await recordGuardedApply(e);
   await refreshSellableForPairs(db, touched);
 }
 
@@ -439,6 +501,9 @@ async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
 }
 
 async function _prescriptionRefillUsed(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: `refills_remaining - 1` is a raw decrement, so a replay would
+  // consume a second refill.
+  if (await shouldSkipReplay(e)) return;
   const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
     `UPDATE prescriptions
@@ -447,6 +512,7 @@ async function _prescriptionRefillUsed(db: Db, e: EventEnvelope): Promise<void> 
       WHERE id = $2`,
     [now, String(e.aggregate_id)]
   );
+  await recordGuardedApply(e);
 }
 
 // ── Price Contract projectors ──────────────────────────────────────────────
@@ -551,6 +617,9 @@ async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
 // ── Stock projectors ───────────────────────────────────────────────────────
 
 async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: `quantity = MAX(0, quantity + delta)` is relative, so a replay
+  // would double-count the adjustment.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const qtyChange = Number(p.quantity_change ?? 0);
   const drugId = p.drug_id != null ? String(p.drug_id) : null;
@@ -575,12 +644,16 @@ async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
       [Number(bc.quantity_change ?? 0), String(bc.batch_id)]
     );
   }
+  await recordGuardedApply(e);
   await refreshSellableQuantity(db, branchId, drugId);
 }
 
 // ── Stock transfer projector ───────────────────────────────────────────────
 
 async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: this projector moves stock with relative +/- updates on both
+  // branches, so a replay would move it twice.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const qty = Number(p.quantity ?? 0);
   const drugId = p.drug_id != null ? String(p.drug_id) : null;
@@ -616,6 +689,7 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
       [batchQty, String(bc.batch_id)]
     );
   }
+  await recordGuardedApply(e);
 
   // Stock left the source branch, so both its inventory row and the affected
   // batch rows moved.
@@ -885,7 +959,17 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   const now = e.authored_at ?? new Date().toISOString();
   const branchId = String(p.branch_id ?? e.branch_id);
   const drugId = String(p.drug_id ?? e.aggregate_id);
-  const qty = p.quantity != null ? Number(p.quantity) : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
+  // Does the payload actually state an absolute quantity?
+  //
+  // The device's own buildBranchInventoryEnvelope (localWrite.ts) deliberately
+  // omits `quantity` — it carries only branch-owned metadata. Reading a missing
+  // quantity as 0 meant that any such event, wherever it was projected, ZEROED
+  // existing stock. A branch_inventory event without a quantity must leave the
+  // stored quantity untouched; only an INSERT needs the 0 default.
+  const hasQty = p.quantity != null || p.sellable_quantity != null;
+  const qty = p.quantity != null
+    ? Number(p.quantity)
+    : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
   const sellingPrice = p.selling_price != null ? Number(p.selling_price) : (p.branch_selling_price != null ? Number(p.branch_selling_price) : null);
   const location = p.location != null ? String(p.location) : (p.shelf_location != null ? String(p.shelf_location) : null);
 
@@ -895,15 +979,25 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   );
 
   if (existing.length > 0) {
+    // On UPDATE, only write quantity when the event actually states one.
     await db.execute(
-      `UPDATE branch_inventory SET
-         quantity = $1,
-         location = COALESCE($2, location),
-         selling_price = COALESCE($3, selling_price),
-         updated_at = $4,
-         sync_status = 'synced'
-       WHERE id = $5`,
-      [qty, location, sellingPrice, now, existing[0].id]
+      hasQty
+        ? `UPDATE branch_inventory SET
+             quantity = $1,
+             location = COALESCE($2, location),
+             selling_price = COALESCE($3, selling_price),
+             updated_at = $4,
+             sync_status = 'synced'
+           WHERE id = $5`
+        : `UPDATE branch_inventory SET
+             location = COALESCE($1, location),
+             selling_price = COALESCE($2, selling_price),
+             updated_at = $3,
+             sync_status = 'synced'
+           WHERE id = $4`,
+      hasQty
+        ? [qty, location, sellingPrice, now, existing[0].id]
+        : [location, sellingPrice, now, existing[0].id]
     );
   } else {
     await db.execute(
