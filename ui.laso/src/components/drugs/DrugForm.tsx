@@ -40,7 +40,10 @@ const drugSchema = z.object({
     markup_percentage: z.coerce.number().min(0).max(100).optional(),
     tax_rate: z.coerce.number().min(0).max(100).default(0),
     reorder_level: z.coerce.number().int().min(0).default(10),
-    reorder_quantity: z.coerce.number().int().min(1).default(50),
+    // min(0), not min(1): reorder_quantity is a purchase suggestion. A drug
+    // that is stocked enough never needs reordering, so 0 ("do not reorder") is
+    // a meaningful value. The server accepts 0 too (drugs_schemas.py DrugBase).
+    reorder_quantity: z.coerce.number().int().min(0).default(50),
     // FIX: max_stock_level added
     max_stock_level: z.coerce.number().int().min(0).optional(),
     unit_of_measure: z.string().max(50).default("unit"),

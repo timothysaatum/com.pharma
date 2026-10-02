@@ -26,6 +26,20 @@ export interface TimeoutResult<T> {
     isFromCache: boolean;
     cached_at?: string;
     fetched_at?: string;
+    /**
+     * The error that caused the fallback, when one did.
+     *
+     * `withTimeout` catches EVERY error from the server call — not just
+     * timeouts and connection failures — and returns the local cache instead.
+     * That is the right default for a slow backend, but it made a 422 from a
+     * server-side data fault indistinguishable from an empty result: the page
+     * rendered "No drugs found" with no signal that the request had failed.
+     *
+     * Callers that need to tell the user the request failed read this and
+     * surface it (see DrugListPage's error state + Retry). Additive only: a
+     * caller that ignores it behaves exactly as before.
+     */
+    fallbackError?: Error;
 }
 
 export async function withTimeout<T>(
@@ -117,6 +131,7 @@ export async function withTimeout<T>(
                 data: cachedData,
                 isFromCache: true,
                 cached_at: new Date().toISOString(),
+                fallbackError: err instanceof Error ? err : new Error(String(err)),
             };
         } catch (cacheErr) {
             if (dataKey) {

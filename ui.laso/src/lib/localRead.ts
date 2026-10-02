@@ -309,6 +309,21 @@ function toPrescription(row: Record<string, unknown>): any {
 }
 
 export const localRead = {
+  /**
+   * Org-scoped drug catalogue, mirroring the server's `GET /drugs`.
+   *
+   * The catalogue is ORGANIZATION-WIDE. It deliberately does not join
+   * `branch_inventory` and accepts no branch filter: a branch carries only the
+   * drugs an admin explicitly added to it, so joining here made the offline
+   * catalogue show just those drugs while the online catalogue showed the whole
+   * org. A device that had never received a stock event therefore rendered the
+   * catalogue as empty (or as the handful of sentinel drugs a test had left
+   * behind) even though the org had a full formulary.
+   *
+   * Pass `organization_id` to scope to one tenant; the local `drugs` table has
+   * an `organization_id` column, populated by `_drugCreated` from the event
+   * payload. `is_deleted = 0` is always applied.
+   */
   async searchDrugs(
     params: DrugSearchParams = {},
     page = 1,
@@ -318,16 +333,10 @@ export const localRead = {
     const db = await getDb();
     const qualifiers: string[] = ["d.is_deleted = 0"];
     const values: unknown[] = [];
-    let join = "";
 
-    if (params.branch_id) {
-      values.push(params.branch_id);
-      join = "LEFT JOIN branch_inventory bi ON bi.drug_id = d.id";
-      qualifiers.push(`bi.branch_id = $${values.length}`);
-    }
     if (params.is_active !== undefined) {
       values.push(boolToInt(params.is_active));
-      qualifiers.push(`is_active = $${values.length}`);
+      qualifiers.push(`d.is_active = $${values.length}`);
     }
     if (params.organization_id) {
       values.push(params.organization_id);
@@ -335,32 +344,32 @@ export const localRead = {
     }
     if (params.drug_type) {
       values.push(params.drug_type);
-      qualifiers.push(`drug_type = $${values.length}`);
+      qualifiers.push(`d.drug_type = $${values.length}`);
     }
     if (params.category_id) {
       values.push(params.category_id);
-      qualifiers.push(`category_id = $${values.length}`);
+      qualifiers.push(`d.category_id = $${values.length}`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));
       qualifiers.push(`(
-        LOWER(name) LIKE $${values.length} OR
-        LOWER(generic_name) LIKE $${values.length} OR
-        LOWER(brand_name) LIKE $${values.length} OR
-        LOWER(sku) LIKE $${values.length} OR
-        LOWER(barcode) LIKE $${values.length} OR
-        LOWER(manufacturer) LIKE $${values.length}
+        LOWER(d.name) LIKE $${values.length} OR
+        LOWER(d.generic_name) LIKE $${values.length} OR
+        LOWER(d.brand_name) LIKE $${values.length} OR
+        LOWER(d.sku) LIKE $${values.length} OR
+        LOWER(d.barcode) LIKE $${values.length} OR
+        LOWER(d.manufacturer) LIKE $${values.length}
       )`);
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
-    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${join} ${where}`, values);
+    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${where}`, values);
     const total = countRows[0]?.total ?? 0;
     console.log(`[LocalRead] searchDrugs: found ${total} total drugs`);
 
     const offset = (page - 1) * page_size;
     const rows = await db.select<Drug[]>(
-      `SELECT d.* FROM drugs d ${join} ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      `SELECT d.* FROM drugs d ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, page_size, offset]
     );
 
