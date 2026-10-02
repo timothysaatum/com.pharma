@@ -256,11 +256,17 @@ async def pull_events(
 
     next_after_seq = page_rows[-1][2] if page_rows else after_seq
 
+    # The true per-org head, on every page including an empty one. Computed
+    # independently of the page so it cannot be confused with next_after_seq,
+    # which merely echoes after_seq when nothing was returned.
+    server_head_seq = await _current_tail_seq(db, org_id)
+
     return EventPullResponse(
         server_clock=datetime.now(timezone.utc),
         events=envelopes,
         has_more=has_more,
         next_after_seq=next_after_seq,
+        server_head_seq=server_head_seq,
     )
 
 

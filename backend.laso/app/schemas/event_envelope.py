@@ -150,6 +150,18 @@ class EventPullResponse(BaseModel):
     events: List[EventEnvelope]
     has_more: bool
     next_after_seq: int
+    server_head_seq: int = 0
+    """True per-org head: MAX(seq) for the org, or 0 when the log is empty.
+
+    Additive field, added alongside the existing ones so no client breaks.
+
+    The client used to infer the head from ``next_after_seq``, which echoes
+    ``after_seq`` unchanged on an empty page. A device whose cursor had drifted
+    above the real head therefore read its own cursor back as "the head" and
+    computed lag as ``head - cursor`` = 0, i.e. perfectly in sync, while being
+    permanently unable to make progress. The client now compares its cursor
+    against this value and resets when the cursor is ahead.
+    """
 
 
 # ── Canonical hashing (ADR 0007) ─────────────────────────────────────────────

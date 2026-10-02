@@ -38,6 +38,18 @@ describe("SyncIndicator", () => {
           local_data: {},
         },
       ],
+            // The component reads health.failedCount / serverHeadSeq / pulledSeq. These
+      // mocks predate that dependency and omitted health entirely, so every test
+      // here died with "Cannot read properties of undefined (reading
+      // 'failedCount')" while the suite reported three unrelated-looking failures.
+      // A synced, healthy device: cursor equal to head, no failed projections.
+      health: {
+        pulledSeq: 69,
+        serverHeadSeq: 69,
+        failedCount: 0,
+        quarantinedCount: 0,
+        stalled: false,
+      },
       syncNow: vi.fn(),
       resolveConflict: vi.fn(),
     });
@@ -57,6 +69,18 @@ describe("SyncIndicator", () => {
       lastSyncAt: new Date().toISOString(),
       conflicts: [],
       failures: [],
+            // The component reads health.failedCount / serverHeadSeq / pulledSeq. These
+      // mocks predate that dependency and omitted health entirely, so every test
+      // here died with "Cannot read properties of undefined (reading
+      // 'failedCount')" while the suite reported three unrelated-looking failures.
+      // A synced, healthy device: cursor equal to head, no failed projections.
+      health: {
+        pulledSeq: 69,
+        serverHeadSeq: 69,
+        failedCount: 0,
+        quarantinedCount: 0,
+        stalled: false,
+      },
       syncNow: vi.fn(),
       resolveConflict: vi.fn(),
     });
@@ -75,6 +99,18 @@ describe("SyncIndicator", () => {
       lastSyncAt: null,
       conflicts: [],
       failures: [],
+            // The component reads health.failedCount / serverHeadSeq / pulledSeq. These
+      // mocks predate that dependency and omitted health entirely, so every test
+      // here died with "Cannot read properties of undefined (reading
+      // 'failedCount')" while the suite reported three unrelated-looking failures.
+      // A synced, healthy device: cursor equal to head, no failed projections.
+      health: {
+        pulledSeq: 69,
+        serverHeadSeq: 69,
+        failedCount: 0,
+        quarantinedCount: 0,
+        stalled: false,
+      },
       syncNow: vi.fn(),
       resolveConflict: vi.fn(),
     });

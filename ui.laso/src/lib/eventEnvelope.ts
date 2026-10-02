@@ -85,6 +85,16 @@ export interface EventPullResponse {
   events: EventEnvelope[];
   has_more: boolean;
   next_after_seq: number;
+  /**
+   * True per-org head: MAX(seq) for the org, 0 when the log is empty.
+   *
+   * Optional because the field was added after the first release of this shape;
+   * a server that does not send it is tolerated by falling back to
+   * next_after_seq. Do not make the fallback the normal path: next_after_seq
+   * echoes after_seq on an empty page, which is how a drifted cursor came to be
+   * mistaken for the head.
+   */
+  server_head_seq?: number;
 }
 
 // ── ULID generation ────────────────────────────────────────────────────────

@@ -18,12 +18,80 @@
  *   - Deletes:  UPDATE SET is_deleted=1 (idempotent)
  */
 
-import { getDb, setVersionVector } from "@/lib/localDb";
+import { getDb, setVersionVector, wasEventApplied } from "@/lib/localDb";
 import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
 import { refreshSellableQuantity, refreshSellableForPairs } from "@/lib/sellableQty";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
+
+/**
+ * Run a non-idempotent projector at most once.
+ *
+ * These four add or subtract quantities instead of assigning an absolute value,
+ * so a second application moves stock a second time. They are the only
+ * projectors that need this guard; everything else either assigns an absolute
+ * value or is a no-op when repeated.
+ *
+ * The guard row and the projection are written in ONE local transaction. Writing
+ * them separately would allow the guard to commit for a projection that then
+ * failed, permanently skipping an event; or the projection to commit twice if
+ * the guard write failed after it.
+ *
+ * Nested transactions are avoided: if we are already inside one (a caller batched
+ * several events), the work joins it rather than issuing a second BEGIN.
+ */
+async function applyGuarded(
+  db: Db,
+  envelope: EventEnvelope,
+  project: () => Promise<void>
+): Promise<void> {
+  if (await wasEventApplied(envelope.event_id)) {
+    // Already applied on this device. Replaying it would move stock again.
+    return;
+  }
+
+  let inTransaction = false;
+  try {
+    inTransaction = await _beginGuardedTransaction(db);
+    await project();
+    await db.execute(
+      `INSERT INTO applied_events(event_id, org_id, seq, applied_at)
+       VALUES($1,$2,$3,$4)
+       ON CONFLICT(event_id) DO NOTHING`,
+      [
+        envelope.event_id,
+        envelope.org_id ?? "",
+        envelope.seq ?? 0,
+        new Date().toISOString(),
+      ]
+    );
+    if (inTransaction) await db.execute("COMMIT");
+  } catch (err) {
+    if (inTransaction) {
+      try {
+        await db.execute("ROLLBACK");
+      } catch {
+        /* best effort: the guard row must not outlive a failed projection */
+      }
+    }
+    throw err;
+  }
+}
+
+/** BEGIN IMMEDIATE, or report that we are already inside a transaction. */
+async function _beginGuardedTransaction(db: Db): Promise<boolean> {
+  try {
+    await db.execute("BEGIN IMMEDIATE");
+    return true;
+  } catch (err) {
+    const msg = err && typeof err === "object" && "message" in err ? String((err as { message: unknown }).message) : String(err);
+    if (/transaction within a transaction|already in a transaction/i.test(msg)) {
+      return false;
+    }
+    throw err;
+  }
+}
 
 // ── Dispatch ──────────────────────────────────────────────────────────────
 
@@ -49,7 +117,7 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
       await _saleCreated(db, envelope);
       break;
     case "sale_voided":
-      await _saleVoided(db, envelope);
+      await applyGuarded(db, envelope, () => _saleVoided(db, envelope));
       break;
 
     // ── Prescription ────────────────────────────────────────────────────
@@ -63,17 +131,17 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
       await _prescriptionCancelled(db, envelope);
       break;
     case "prescription_refill_used":
-      await _prescriptionRefillUsed(db, envelope);
+      await applyGuarded(db, envelope, () => _prescriptionRefillUsed(db, envelope));
       break;
 
     // ── Stock ───────────────────────────────────────────────────────────
     case "stock_adjusted":
-      await _stockAdjusted(db, envelope);
+      await applyGuarded(db, envelope, () => _stockAdjusted(db, envelope));
       break;
 
     // ── Stock Transfer ──────────────────────────────────────────────────
     case "stock_transfer":
-      await _stockTransfer(db, envelope);
+      await applyGuarded(db, envelope, () => _stockTransfer(db, envelope));
       break;
 
     // ── Drug ────────────────────────────────────────────────────────────
@@ -885,7 +953,14 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   const now = e.authored_at ?? new Date().toISOString();
   const branchId = String(p.branch_id ?? e.branch_id);
   const drugId = String(p.drug_id ?? e.aggregate_id);
-  const qty = p.quantity != null ? Number(p.quantity) : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
+
+  // Whether this event actually states a quantity. Distinguishing "states 0" from
+  // "states nothing" is the whole point, so the check is `!= null` and not
+  // truthiness: a payload carrying quantity: 0 must still be honoured.
+  const hasQty = p.quantity != null;
+  const hasSellable = p.sellable_quantity != null;
+  const qty = hasQty ? Number(p.quantity) : hasSellable ? Number(p.sellable_quantity) : 0;
+
   const sellingPrice = p.selling_price != null ? Number(p.selling_price) : (p.branch_selling_price != null ? Number(p.branch_selling_price) : null);
   const location = p.location != null ? String(p.location) : (p.shelf_location != null ? String(p.shelf_location) : null);
 
@@ -895,17 +970,36 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   );
 
   if (existing.length > 0) {
-    await db.execute(
-      `UPDATE branch_inventory SET
-         quantity = $1,
-         location = COALESCE($2, location),
-         selling_price = COALESCE($3, selling_price),
-         updated_at = $4,
-         sync_status = 'synced'
-       WHERE id = $5`,
-      [qty, location, sellingPrice, now, existing[0].id]
-    );
+    if (hasQty || hasSellable) {
+      await db.execute(
+        `UPDATE branch_inventory SET
+           quantity = $1,
+           location = COALESCE($2, location),
+           selling_price = COALESCE($3, selling_price),
+           updated_at = $4,
+           sync_status = 'synced'
+         WHERE id = $5`,
+        [qty, location, sellingPrice, now, existing[0].id]
+      );
+    } else {
+      // The event carries no quantity. Writing the `?? 0` default here would
+      // zero real stock: this device's own buildBranchInventoryEnvelope() emits
+      // no quantity, so any event built from it wiped the branch's stock
+      // wherever it was projected. Metadata is still refreshed; quantity is
+      // left exactly as it is.
+      await db.execute(
+        `UPDATE branch_inventory SET
+           location = COALESCE($1, location),
+           selling_price = COALESCE($2, selling_price),
+           updated_at = $3,
+           sync_status = 'synced'
+         WHERE id = $4`,
+        [location, sellingPrice, now, existing[0].id]
+      );
+    }
   } else {
+    // No row yet: nothing to preserve, so the default stands and a row with no
+    // quantity is created at 0.
     await db.execute(
       `INSERT OR IGNORE INTO branch_inventory
          (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,

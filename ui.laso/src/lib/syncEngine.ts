@@ -418,12 +418,42 @@ class SyncEngine {
         // quarantined, so this cannot loop forever.
         await this.retryFailedProjections();
 
-        let afterSeq = await getEventPullSeq();
+        const orgId = this.organizationId;
+        let afterSeq = await getEventPullSeq(orgId);
 
         // Page through server events. Cap at 50 pages per cycle.
         for (let page = 0; page < 50; page++) {
             const response = await syncApi.pullEvents(afterSeq);
             let lastSuccessSeq = afterSeq;
+
+            // ── Cursor self-healing ───────────────────────────────────────
+            // The server reports the true per-org head on every page, including
+            // an empty one. Previously the head was inferred from
+            // next_after_seq, which echoes after_seq unchanged when the page is
+            // empty: a cursor that had drifted ABOVE the real head read itself
+            // back as the head, lag computed as 0, and the device looked
+            // perfectly in sync while being permanently unable to advance.
+            //
+            // A cursor above the head cannot be honoured by a pull that returns
+            // `seq > after_seq`, so it is treated as invalid and reset to 0 to
+            // re-pull from the start. Re-applying is safe: every projector is
+            // idempotent except four, which are guarded by applied_events.
+            const serverHead = response.server_head_seq;
+            if (typeof serverHead === "number" && afterSeq > serverHead) {
+                console.warn(
+                    `[SyncEngine] cursor ${afterSeq} is ahead of the server head ${serverHead} ` +
+                    `(org ${orgId ?? "none"}); the cursor is invalid. ` +
+                    `Resetting to 0 and re-pulling from the start.`,
+                );
+                afterSeq = 0;
+                await setEventPullSeq(0, orgId);
+                lastSuccessSeq = 0;
+                // Re-fetch rather than falling through: the page just received was
+                // built for the stale cursor and is empty, so processing it would
+                // skip straight to the has_more break and the reset would never
+                // actually pull anything.
+                continue;
+            }
 
             let db;
         try {
@@ -488,20 +518,23 @@ class SyncEngine {
                     ? response.next_after_seq
                     : lastSuccessSeq;
                 if (target > afterSeq) {
-                    await setEventPullSeq(target);
+                    await setEventPullSeq(target, orgId);
                     afterSeq = target;
                 }
             }
 
             if (!response.has_more) {
-                // The server has nothing past next_after_seq, so that is the
-                // head. Used by the UI to show how far behind a device is.
-                this._serverHeadSeq = response.next_after_seq;
+                // The head is what the server says it is, not the echoed cursor.
+                // Falling back to next_after_seq keeps older servers working.
+                this._serverHeadSeq =
+                    typeof response.server_head_seq === "number"
+                        ? response.server_head_seq
+                        : response.next_after_seq;
                 break;
             }
         }
 
-        this._pulledSeq = await getEventPullSeq();
+        this._pulledSeq = await getEventPullSeq(orgId);
         await this.refreshSyncHealth();
 
         // Refresh the local conflict cache so the Conflicts page works offline.
@@ -656,7 +689,7 @@ class SyncEngine {
             const counts = await countEventProjectionFailures(db);
             failed = counts.failed;
             quarantined = counts.quarantined;
-            this._pulledSeq = await getEventPullSeq();
+            this._pulledSeq = await getEventPullSeq(this.organizationId);
         } catch {
             // Leave the previous numbers rather than reporting a false zero.
             return;
@@ -669,7 +702,9 @@ class SyncEngine {
             quarantinedCount: quarantined,
             stalled:
                 this._serverHeadSeq !== null &&
-                (failed > 0 || quarantined > 0 || this._pulledSeq < this._serverHeadSeq),
+                (failed > 0 ||
+                    quarantined > 0 ||
+                    this._pulledSeq !== this._serverHeadSeq),
         };
     }
 

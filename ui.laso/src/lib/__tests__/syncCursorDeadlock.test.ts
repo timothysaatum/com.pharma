@@ -105,9 +105,12 @@ function goodEvent(seq: number, eventId: string, name: string): EventEnvelope {
 }
 
 function readCursor(): number {
+  // The cursor is scoped per organization (`event_pull_seq:<org_id>`): seq is
+  // assigned per org, so one unscoped row cannot describe two orgs. This engine
+  // is armed with organizationId "org-1" in armEngine().
   const row = rawDb()
-    .prepare("SELECT value FROM sync_meta WHERE key = 'event_pull_seq'")
-    .get() as { value: string } | undefined;
+    .prepare("SELECT value FROM sync_meta WHERE key = ?")
+    .get("event_pull_seq:org-1") as { value: string } | undefined;
   return row ? Number(row.value) : 0;
 }
 

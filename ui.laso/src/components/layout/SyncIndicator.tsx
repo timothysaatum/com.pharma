@@ -41,9 +41,20 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
     // device while stock figures quietly disagreed with the server.
     const projectionFailures = health.failedCount + health.quarantinedCount;
     const isProjectionStalled = projectionFailures > 0;
+
+    // Lag is signed, and BOTH directions mean the device is not in step with the
+    // server:
+    //   head > cursor  the device is behind and has not pulled the newer events
+    //   cursor > head  the cursor is invalid. A pull returns seq > cursor, so it
+    //                  can never return anything, and the device is frozen with
+    //                  no error. Previously the lag term was one-sided, so this
+    //                  case computed head - cursor = 0 and rendered as healthy.
     const behindBy =
         health.serverHeadSeq !== null ? health.serverHeadSeq - health.pulledSeq : null;
     const isBehind = behindBy !== null && behindBy > 0;
+    const isCursorAhead = behindBy !== null && behindBy < 0;
+    const isLagStalled = isBehind || isCursorAhead;
+    const lagPosition = `${health.pulledSeq} of ${health.serverHeadSeq}`;
 
     // This device has never completed a sync, so every local read is served
     // from an empty or partial cache. Showing that as "healthy" is actively
@@ -64,6 +75,8 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
             return <WifiOff className="w-3.5 h-3.5 text-amber-400" />;
         if (status === "error" || hasConflicts || hasFailures || isProjectionStalled)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
+        if (isLagStalled)
+            return <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />;
         if (neverSynced)
             return <AlertTriangle className="w-3.5 h-3.5 text-red-400" />;
         if (isStale)
@@ -78,7 +91,12 @@ export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
         if (isProjectionStalled) {
             return `${projectionFailures} unapplied`;
         }
-        if (isBehind) return `Behind by ${behindBy}`;
+        if (isLagStalled) {
+            // Name both numbers so the state is diagnosable from the chip alone.
+            return isCursorAhead
+                ? `Sync stalled at ${lagPosition}`
+                : `Behind by ${behindBy}`;
+        }
         if (hasFailures) {
             if (blockedFailures > 0) {
                 return `${blockedFailures} blocked`;
