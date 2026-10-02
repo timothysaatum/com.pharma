@@ -60,6 +60,12 @@ from app.schemas.inventory_schemas import (
     LowStockReport,
 )
 from app.utils.pagination import PaginatedResponse, PaginationParams
+from app.schemas.event_envelope import AggregateType
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    branch_inventory_payload,
+    drug_batch_payload,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +566,7 @@ class InventoryService:
         organization_id: uuid.UUID,
         location: Optional[str] = None,
         selling_price: Optional[Decimal] = None,
+        authored_by: Optional[uuid.UUID] = None,
     ) -> BranchInventory:
         """Make an organization catalogue drug available for sale at a branch."""
         drug = await db.scalar(
@@ -598,6 +605,29 @@ class InventoryService:
         )
         inventory.mark_as_pending_sync()
         db.add(inventory)
+
+        # Publish inside this transaction, not after it. A device that never hears
+        # about this row keeps showing the drug as not stocked at the branch.
+        # quantity is explicit (0) so the projector cannot default it.
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=organization_id,
+            event_type="branch_inventory_created",
+            aggregate_type=AggregateType.BRANCH_INVENTORY,
+            aggregate_id=inventory.id,
+            payload=branch_inventory_payload(
+                inventory_id=inventory.id,
+                branch_id=branch_id,
+                drug_id=drug_id,
+                quantity=0,
+                reserved_quantity=0,
+                location=location,
+                selling_price=selling_price,
+            ),
+            authored_by=authored_by or uuid.UUID(int=0),
+            branch_id=branch_id,
+        )
+
         await db.commit()
         await db.refresh(inventory)
         return inventory
