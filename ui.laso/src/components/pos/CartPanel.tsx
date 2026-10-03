@@ -314,6 +314,13 @@ interface CartPanelProps {
     contract: AvailableContract | null;
     contracts: AvailableContract[];
     contractsLoading: boolean;
+    /**
+     * Why the contract list is empty when it is. Drives an explicit message
+     * plus a Retry button, so a failed load is never mistaken for "pick a
+     * contract". `kind: null` means there is nothing to report.
+     */
+    contractsIssue?: { kind: 'offline' | 'error' | 'empty' | null; message: string | null } | null;
+    onRetryContracts?: () => void;
     customerName: string;
     customerId: string | null;
     paymentMethod: PaymentMethod;
@@ -364,6 +371,7 @@ function SectionLabel({ icon: Icon, children }: { icon: React.ElementType; child
 
 export function CartPanel({
     items, contract, contracts, contractsLoading,
+    contractsIssue, onRetryContracts,
     customerName, customerId, paymentMethod, amountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
     insuranceVerified, notes, totals, validationErrors, checkoutError,
@@ -622,6 +630,29 @@ export function CartPanel({
                                     </select>
                                     <ChevronDown className="absolute right-3 top-3 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
                                 </div>
+                                {contractsIssue?.message && (
+                                    <div
+                                        role="alert"
+                                        data-testid="contract-load-issue"
+                                        className={`mt-1.5 flex items-start gap-2 rounded-md border px-2 py-1.5 text-[11px] leading-snug ${
+                                            contractsIssue.kind === "error"
+                                                ? "border-red-300 bg-red-50 text-red-800"
+                                                : "border-amber-300 bg-amber-50 text-amber-900"
+                                        }`}
+                                    >
+                                        <span className="flex-1">{contractsIssue.message}</span>
+                                        {onRetryContracts && (
+                                            <button
+                                                type="button"
+                                                onClick={onRetryContracts}
+                                                data-testid="contract-retry"
+                                                className="shrink-0 rounded border border-current px-1.5 py-0.5 font-semibold uppercase tracking-wide"
+                                            >
+                                                Retry
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
                                 {contract && (
                                     <div className="flex items-center gap-2 mt-2 flex-wrap">
                                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${CONTRACT_TYPE_COLORS[contract.type] ?? "bg-slate-100 text-slate-600"}`}>
