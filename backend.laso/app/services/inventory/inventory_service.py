@@ -608,7 +608,13 @@ class InventoryService:
 
         # Publish inside this transaction, not after it. A device that never hears
         # about this row keeps showing the drug as not stocked at the branch.
-        # quantity is explicit (0) so the projector cannot default it.
+        #
+        # quantity is explicit (0) because adding a drug to a branch stocks
+        # nothing. Under C-hybrid the device only USES this value when it holds no
+        # batch rows for the pair; once it has them, quantity is derived from them
+        # and this 0 is ignored. That is the correct outcome here: a device that
+        # already has batches for this drug at this branch has real stock, and must
+        # not be zeroed by a "added to branch" event.
         await StockEventEmitter.emit_in_transaction(
             db,
             org_id=organization_id,

@@ -91,7 +91,11 @@ describe("Phase 2 — projector replay safety", () => {
     // ── sale_voided ────────────────────────────────────────────────────────
 
     it("restores stock once, not twice, when sale_voided is replayed", async () => {
-        insertInventory(rawDb(), { quantity: 40 });
+        // quantity MUST equal the batch sum for this pair: quantity is derived
+        // from the batches wherever any exist (see recomputeQuantityFromBatches),
+        // so a fixture with quantity 40 against a 100 batch would be asserting
+        // against a state the invariant says cannot exist.
+        insertInventory(rawDb(), { quantity: 100 });
         insertBatch(rawDb(), { remaining: 100 });
 
         const e = envelope({
@@ -108,14 +112,15 @@ describe("Phase 2 — projector replay safety", () => {
         });
 
         await applyEventLocally(e);
-        expect(qtyOf(TEST_BRANCH, GEBEDOL)).toBe(52);
+        // The batch is the fact (100 -> 112); quantity follows it.
         expect(insertBatchRemaining()).toBe(112);
+        expect(qtyOf(TEST_BRANCH, GEBEDOL)).toBe(112);
 
         // The server re-delivers the same event (rewind, retry, duplicate push).
         await applyEventLocally(e);
         // Unchanged: a second restore would be stock that never left.
-        expect(qtyOf(TEST_BRANCH, GEBEDOL)).toBe(52);
         expect(insertBatchRemaining()).toBe(112);
+        expect(qtyOf(TEST_BRANCH, GEBEDOL)).toBe(112);
     });
 
     // ── prescription_refill_used ───────────────────────────────────────────
@@ -252,6 +257,41 @@ describe("Phase 2 — projector replay safety", () => {
             .prepare("SELECT COUNT(*) AS n FROM applied_events")
             .get() as { n: number };
         expect(markers.n).toBe(0);
+    });
+
+    // ── the guard marker must not outlive a failed projection ──────────────
+
+    it("writes no guard row when the projector bails out before mutating", async () => {
+        // Ported from origin/fix/stock-sync's replayGuards.test.ts
+        // ("rolls back the guard row when the projection throws"), which I did
+        // not have. A guard row written for an event that never actually
+        // applied is worse than no guard at all: it permanently suppresses the
+        // real projection on the next replay.
+        insertInventory(rawDb(), { quantity: 100 });
+
+        // A transfer with no destination branch makes _stockTransfer return
+        // before touching any stock.
+        await applyEventLocally(
+            envelope({
+                event_id: "01ARZ3NDEKTSV4RRFFQ69G5HAZ",
+                event_type: "stock_transfer",
+                aggregate_type: "stock",
+                aggregate_id: "stk-3",
+                payload: {
+                    drug_id: GEBEDOL,
+                    source_branch_id: TEST_BRANCH,
+                    quantity: 5,
+                    batch_changes: [],
+                },
+            })
+        );
+
+        const markers = rawDb()
+            .prepare("SELECT event_id FROM applied_events WHERE event_id = ?")
+            .all("01ARZ3NDEKTSV4RRFFQ69G5HAZ") as unknown[];
+        expect(markers).toHaveLength(0);
+        // And the stock really was untouched.
+        expect(qtyOf(TEST_BRANCH, GEBEDOL)).toBe(100);
     });
 
     // ── branch_inventory quantity guard ────────────────────────────────────

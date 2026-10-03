@@ -1,15 +1,34 @@
 /**
- * Determines the emission ORDER that makes a device's branch_inventory match the
- * server, by running the real projectors rather than reasoning about them.
+ * Stock events must be order-INDEPENDENT (C-hybrid).
  *
- * The two stock projectors do opposite things:
- *   _branchInventoryUpserted  ASSIGNS quantity = payload.quantity  (absolute)
- *   _drugBatchUpserted        ADDS   quantity += remaining_quantity on create,
- *                                and quantity += (new - known_old) on update
+ * ORIGINAL PURPOSE, KEPT AS HISTORY. This file was ported from
+ * origin/fix/stock-sync, where it existed to determine which emission ORDER made
+ * a device's branch_inventory match the server. Its finding was that the two
+ * stock projectors contradicted each other:
  *
- * So the same events in a different order produce a different final quantity, and
- * the order used by the Phase 4 backfill (branch_inventory first, then batches)
- * double-counts. This file measures it.
+ *   _branchInventoryUpserted  ASSIGNED quantity = payload.quantity  (absolute)
+ *   _drugBatchUpserted        ADDED    quantity += remaining_quantity on create
+ *
+ * so the same event set gave a different answer per order. branch_inventory
+ * first then overshot: 117 -> 234, and 247 -> 494. The conclusion that branch
+ * was to prescribe "batches first, inventory last".
+ *
+ * WHY THAT IS NO LONGER THE DESIGN. Prescribing an order only works when the
+ * whole set is delivered in one ordered pass. It does not cover:
+ *
+ *   - a cursor rewind, which replays the log in seq order regardless of
+ *     whichever order the emitter chose;
+ *   - a device that already holds the branch_inventory row receiving a batch
+ *     event later, which inflated 247 to 347.
+ *
+ * branch_inventory.quantity is now DERIVED from the local drug_batches rows
+ * wherever any exist (recomputeQuantityFromBatches, mirroring the server's
+ * _recalculate_inventory_quantity), and the batch projector no longer writes
+ * quantity at all. One writer, so delivery order cannot matter.
+ *
+ * The two tests that asserted 234 and 494 as the EXPECTED outcome are rewritten
+ * below to assert the same server quantity in both orders. That inversion is the
+ * record that the defect is gone.
  */
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
@@ -17,6 +36,8 @@ import {
   GEBEDOL,
   OTHER_BRANCH,
   TEST_BRANCH,
+  insertBatch,
+  insertInventory,
   installRealDb,
   rawDb,
   resetTables,
@@ -149,17 +170,34 @@ describe("single batch: which emission order reproduces the server quantity", ()
     expect(batchRemaining(batch)).toBe(117);
   });
 
-  it("branch_inventory FIRST then batch: device quantity is doubled", async () => {
+  it("branch_inventory FIRST then batch: device quantity is now ALSO 117", async () => {
     const batch = "33333333-3333-3333-3333-333333333333";
     const inv = "44444444-4444-4444-4444-444444444444";
 
     await applyEventLocally(biEvent(inv, GEBEDOL, 117));
     await applyEventLocally(batchEvent(batch, GEBEDOL, 117));
 
-    // 117 assigned by the inventory projector, then 117 ADDED by the batch
-    // projector: 234 against a server truth of 117.
-    expect(qty(GEBEDOL)).toBe(234);
-    expect(qty(GEBEDOL)).not.toBe(117);
+    // Previously 234. The batch projector no longer adds to quantity: it writes
+    // the batch row, then quantity is derived from it. The absolute 117 in the
+    // payload is a snapshot and is replaced by the live batch sum, which is the
+    // same 117.
+    expect(qty(GEBEDOL)).toBe(117);
+    expect(batchRemaining(batch)).toBe(117);
+  });
+
+  it("a partial device receiving the last batch later does not inflate", async () => {
+    // The case the ordering rule never covered: the device already had the
+    // inventory row and an earlier batch, and the final batch event arrives on a
+    // later sync. Used to land on 347 against a server truth of 247.
+    insertInventory(rawDb(), { id: "inv-partial", drugId: AMOX_ID, quantity: 147 });
+    insertBatch(rawDb(), {
+      id: "b-partial-1",
+      drugId: AMOX_ID,
+      remaining: 147,
+    });
+
+    await applyEventLocally(batchEvent("b-partial-2", AMOX_ID, 100));
+    expect(qty(AMOX_ID)).toBe(247);
   });
 });
 
@@ -179,7 +217,7 @@ describe("two batches: Amoxicilin 147 + 100 = 247", () => {
     expect(batchRemaining(b2)).toBe(100);
   });
 
-  it("the prescribed order (inventory first) overshoots to 494", async () => {
+  it("the previously-overshooting order (inventory first) now yields 247", async () => {
     const b1 = "77777777-7777-7777-7777-777777777771";
     const b2 = "77777777-7777-7777-7777-777777777702";
     const inv = "88888888-8888-8888-8888-888888888888";
@@ -188,7 +226,8 @@ describe("two batches: Amoxicilin 147 + 100 = 247", () => {
     await applyEventLocally(batchEvent(b1, AMOX_ID, 147));
     await applyEventLocally(batchEvent(b2, AMOX_ID, 100));
 
-    expect(qty(AMOX_ID)).toBe(494);
+    // Previously 494: 247 assigned, then 147 and 100 added on top.
+    expect(qty(AMOX_ID)).toBe(247);
   });
 });
 

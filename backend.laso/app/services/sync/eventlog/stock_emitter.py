@@ -187,11 +187,31 @@ def branch_inventory_payload(
 ) -> Dict[str, Any]:
     """Payload for branch_inventory_created / branch_inventory_updated.
 
-    Carries an EXPLICIT ABSOLUTE quantity. The device's _branchInventoryUpserted
-    projector assigns quantity directly, so it must never be handed an event with
-    no quantity: it used to default that to 0 and zeroed real stock. It also
-    carries branch_id and drug_id so the projector can key the row, and
-    selling_price so the local POS shows the branch price.
+    Carries an EXPLICIT ABSOLUTE quantity, plus branch_id and drug_id so the
+    projector can key the row, and selling_price so the local POS shows the branch
+    price.
+
+    HOW THE DEVICE USES `quantity` (C-hybrid, changed 2026-10-02)
+    -----------------------------------------------------------
+    It is a FALLBACK, not the authority. For any (branch, drug) where the device
+    already holds at least one drug_batches row, the device IGNORES this value
+    and derives quantity from its own batch rows:
+
+        quantity = SUM(drug_batches.remaining_quantity WHERE remaining_quantity > 0)
+
+    which mirrors the server's _recalculate_inventory_quantity
+    (inventory_service.py:2027). Only a pair with NO batch rows uses the number
+    here — a drug added to a branch at 0 and stocked by adjustment, or one whose
+    batches have not synced yet.
+
+    So this field is still worth sending (it is the only way a batchless pair
+    ever gets a quantity), but it is no longer a double-count risk: the device
+    previously ASSIGNED it and then the batch projector ADDED to it, reaching 234
+    for a server truth of 117. That relative bump has been removed, so delivery
+    order no longer matters.
+
+    Keep sending the true server quantity anyway. It is what makes a device that
+    has never seen a batch row correct on the first sync.
     """
     return {
         "branch_inventory_id": str(inventory_id),
@@ -224,6 +244,14 @@ def drug_batch_payload(
     The device's _drugBatchUpserted projector upserts by batch id and assigns
     remaining_quantity directly, so it needs every field it will write rather
     than a delta.
+
+    THE DEVICE NO LONGER READS A QUANTITY DELTA FROM THIS EVENT. It used to add
+    remaining_quantity to branch_inventory.quantity on create and
+    (new - known_old) on update, which double-counted on replay and inflated a
+    device that already held the inventory row. It now writes only this batch row
+    and derives branch_inventory.quantity from the batch set. `remaining_quantity`
+    must therefore be the batch's CURRENT truth on the server at the moment the
+    event is appended, not the value it had when the delivery was booked.
     """
     return {
         "batch_id": str(batch_id),
