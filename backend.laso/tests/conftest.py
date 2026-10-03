@@ -51,6 +51,34 @@ async def db():
                 await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
                 await conn.execute(text("CREATE SCHEMA public"))
             await conn.run_sync(Base.metadata.create_all)
+            if DATABASE_URL_TEST.startswith("postgresql"):
+                # The event-sourced spine is owned by Alembic, not by an ORM model,
+                # so Base.metadata.create_all never builds it. Any test that reaches
+                # a stock write path now publishes an event inside the caller's
+                # transaction, so the table has to exist for those tests to run.
+                # Tests that need it with specific columns still drop and recreate
+                # it themselves; IF NOT EXISTS keeps both paths working.
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS event_log (
+                        event_id TEXT NOT NULL,
+                        org_id UUID NOT NULL,
+                        seq BIGINT NOT NULL,
+                        aggregate_id UUID NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        schema_version SMALLINT NOT NULL DEFAULT 1,
+                        payload JSONB NOT NULL,
+                        dependencies TEXT[] NOT NULL DEFAULT '{}',
+                        authored_at TIMESTAMPTZ NOT NULL,
+                        authored_by UUID NOT NULL,
+                        branch_id UUID NOT NULL,
+                        hash_self TEXT NOT NULL,
+                        hash_prev TEXT NOT NULL,
+                        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (org_id, event_id),
+                        UNIQUE (org_id, seq)
+                    )
+                """))
     finally:
         for table, index in postgres_only_indexes:
             table.indexes.add(index)

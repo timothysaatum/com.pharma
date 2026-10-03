@@ -1,10 +1,72 @@
 import { Pool } from 'pg';
 
+/** Database names that must never be used by a test run. */
+const FORBIDDEN_DATABASES = new Set(['atlasdb', 'postgres', 'template0', 'template1']);
+
+/**
+ * Resolve the connection string this helper will use, and refuse anything unsafe.
+ *
+ * Two failure modes are closed here:
+ *
+ * 1. There used to be no default and no check: with TEST_DATABASE_URL unset the
+ *    helper silently connected to the PRODUCTION database (atlasdb). Every test
+ *    that constructs BackendDatabase without an argument therefore talked to
+ *    live pharmacy data, and any write it performed hit production.
+ * 2. Even with the variable set, it could still be pointed at production.
+ *
+ * So: no default, and an explicit refusal for the databases a test must never
+ * touch. `postgres` is refused too because a stray DROP against the maintenance
+ * database is unrecoverable.
+ */
+export function resolveTestDatabaseUrl(explicit?: string): string {
+  const url = explicit ?? process.env.TEST_DATABASE_URL;
+
+  if (!url) {
+    throw new Error(
+      'TEST_DATABASE_URL is not set.\n' +
+        'These tests must never fall back to a real database, so there is no default.\n' +
+        'Point it at a disposable cluster, for example:\n' +
+        '  TEST_DATABASE_URL=postgresql://laso@localhost:5432/laso_test\n' +
+        'Do NOT point it at atlasdb.'
+    );
+  }
+
+  let database: string;
+  let host: string;
+  try {
+    const parsed = new URL(url);
+    host = parsed.hostname;
+    database = decodeURIComponent(parsed.pathname.replace(/^\//, ''));
+  } catch {
+    throw new Error(
+      `TEST_DATABASE_URL is not a parseable URL: ${url}\n` +
+        'Expected something like postgresql://user@host:5432/laso_test'
+    );
+  }
+
+  if (FORBIDDEN_DATABASES.has(database.toLowerCase())) {
+    throw new Error(
+      `Refusing to run against database "${database}" (host ${host}).\n` +
+        'These are production or maintenance databases. Running a test suite ' +
+        'against atlasdb issues DROP SCHEMA ... CASCADE and destroys real data.\n' +
+      'Create a disposable database instead, e.g.:\n' +
+        '  createdb laso_test\n' +
+        '  TEST_DATABASE_URL=postgresql://laso@localhost:5432/laso_test'
+    );
+  }
+
+  if (!database) {
+    throw new Error(`TEST_DATABASE_URL names no database: ${url}`);
+  }
+
+  return url;
+}
+
 export class BackendDatabase {
   private pool: Pool;
 
-  constructor(connectionString = process.env.TEST_DATABASE_URL || 'postgresql://cassie1:SatumCassie25@localhost:5432/atlasdb') {
-    this.pool = new Pool({ connectionString });
+  constructor(connectionString?: string) {
+    this.pool = new Pool({ connectionString: resolveTestDatabaseUrl(connectionString) });
   }
 
   async query<T = any>(sql: string, params: any[] = []): Promise<T[]> {
@@ -19,6 +81,19 @@ export class BackendDatabase {
 
   async close() {
     await this.pool.end();
+  }
+
+  /** Drop the event_log rows this helper created. Never touches other rows. */
+  async deleteEventsWhere(eventIds: string[]): Promise<number> {
+    if (eventIds.length === 0) return 0;
+    // Scoped by explicit event_id. This helper never issues an unqualified
+    // DELETE FROM event_log: event_log is the audit trail and rows are only
+    // removable when the caller knows exactly which ones it created.
+    const res = await this.pool.query(
+      'DELETE FROM event_log WHERE event_id = ANY($1::text[])',
+      [eventIds]
+    );
+    return res.rowCount ?? 0;
   }
 
   async getEvents(orgId: string, afterSeq = 0) {
