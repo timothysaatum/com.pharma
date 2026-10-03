@@ -123,7 +123,19 @@ apiClient.interceptors.response.use(
         }
 
         if (isRefreshing) {
-            // Queue this request until refresh completes
+            // Queue this request until refresh completes.
+            //
+            // `_retry` MUST be set here too. It was only set on the request that
+            // kicked off the refresh, so a QUEUED request retried with the new
+            // token and then 401'd again was treated as a brand-new failure: it
+            // started a SECOND refresh. Because the server rotates the refresh
+            // token on every use (auth_service.refresh_access_token revokes the
+            // old session), that second refresh presented an already-rotated token
+            // and got 401 — and several concurrent retries could each consume one,
+            // which is how the console fills with 401s on POST /auth/refresh and
+            // the session is destroyed while the client still believes it is signed
+            // in. One refresh per 401 burst, one retry per request.
+            original._retry = true;
             return new Promise((resolve, reject) => {
                 pendingQueue.push({
                     resolve: (token) => {
@@ -164,16 +176,32 @@ apiClient.interceptors.response.use(
             }
             return apiClient(original);
         } catch (refreshError) {
-            refreshPromise = null;
             if (isOfflineError(refreshError)) {
+                // Offline: keep the tokens so a later retry can refresh when the
+                // network returns. Clearing them here would sign the cashier out
+                // for a transient dropout.
                 flushQueue(null, refreshError);
                 return Promise.reject(refreshError);
             }
+            // A genuine refresh rejection (expired/revoked/rotated-away token).
+            // The session is unusable, so sign out rather than looping 401s.
             flushQueue(null, refreshError);
             await authStorage.clearTokens();
             window.dispatchEvent(new Event("auth:logout"));
             return Promise.reject(refreshError);
         } finally {
+            // Release the refresh gate HERE, when the refresh itself has settled.
+            //
+            // It used to be released in this request's `finally`, which runs as
+            // soon as THIS caller stops awaiting — while queued retries were still
+            // in flight. A 401 arriving in that window saw `isRefreshing === false`
+            // and started another refresh against a token that had already been
+            // rotated. Tying the release to the shared promise closes that window.
+            try {
+                await refreshPromise;
+            } catch {
+                /* already handled above; this only gates the release */
+            }
             isRefreshing = false;
             refreshPromise = null;
         }
