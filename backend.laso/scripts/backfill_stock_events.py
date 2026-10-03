@@ -157,6 +157,9 @@ class PlannedEvent:
 
 @dataclass
 class Plan:
+    # Price contracts come FIRST: a POS with no contract cannot complete a sale,
+    # so this is the one event class that is worth having ahead of the drugs.
+    contracts: list[PlannedEvent] = field(default_factory=list)
     categories: list[PlannedEvent] = field(default_factory=list)
     drugs: list[PlannedEvent] = field(default_factory=list)
     inventories: list[PlannedEvent] = field(default_factory=list)
@@ -167,9 +170,17 @@ class Plan:
 
     @property
     def everything(self) -> list[PlannedEvent]:
-        return self.categories + self.drugs + self.inventories + self.batches
+        return (
+            self.contracts
+            + self.categories
+            + self.drugs
+            + self.inventories
+            + self.batches
+        )
 
     def for_drug(self, drug_id: str) -> list[PlannedEvent]:
+        # Org-wide (contracts, categories) events are NOT repeated per drug;
+        # they are listed once by the printer.
         out: list[PlannedEvent] = []
         for e in self.categories:
             if str(e.aggregate_id) in self._drug_to_categories.get(drug_id, set()):
@@ -422,31 +433,130 @@ def build_plan(conn) -> Plan:
             )
         )
 
-    # ── price contracts: REPORTED, never backfilled ──────────────────────
+    # ── price contracts ─────────────────────────────────────────────────
+    # Authored as events so the POS picker has something to select.
+    #
+    # The payload mirrors the server row field for field, because
+    # `_priceContractCreated` writes straight from the payload and
+    # `getAvailableContractsForPos` then filters on organization_id, status,
+    # is_active, the effective window and branch applicability. A payload missing
+    # any of those silently produces a contract the POS will not offer.
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """
-            SELECT id, contract_code, contract_type, status, is_active
+            SELECT id, contract_code, contract_name, contract_type, status,
+                   is_active, is_deleted, is_default_contract, discount_type,
+                   discount_percentage, applies_to_prescription_only,
+                   applies_to_otc, applies_to_all_branches, applicable_branch_ids,
+                   effective_from, effective_to, requires_verification,
+                   requires_approval, requires_preauthorization, copay_amount,
+                   copay_percentage, insurance_provider_id, daily_usage_limit,
+                   minimum_purchase_amount, maximum_purchase_amount,
+                   per_customer_usage_limit, description
               FROM price_contracts
-             WHERE organization_id = %s
+             WHERE organization_id = %s AND is_deleted = false
              ORDER BY contract_code
             """,
             (str(ORG_ID),),
         )
         for pc in cur.fetchall():
-            if ("price_contract", str(pc["id"])) not in have_agg:
-                plan.contract_gap.append(
-                    f"price_contract {pc['contract_code']} "
-                    f"({pc['contract_type']}, status={pc['status']}) "
-                    f"id={pc['id']} — NOT BACKFILLED"
+            cid = str(pc["id"])
+            eid = deterministic_event_id("price_contract_created", cid, VERSION_TAG)
+            already = ("price_contract", cid) in have_agg or eid in have_events
+            if already:
+                plan.already_present.append(f"price_contract {pc['contract_code']}")
+                continue
+            branches = pc["applicable_branch_ids"] or []
+            if isinstance(branches, str):
+                import json as _json
+
+                try:
+                    branches = _json.loads(branches)
+                except Exception:
+                    branches = []
+            plan.contracts.append(
+                PlannedEvent(
+                    event_type="price_contract_created",
+                    aggregate_id=pc["id"],
+                    label=f"price_contract {pc['contract_code']}",
+                    payload={
+                        "id": cid,
+                        "organization_id": str(ORG_ID),
+                        "contract_code": pc["contract_code"],
+                        "contract_name": pc["contract_name"],
+                        "contract_type": pc["contract_type"],
+                        "status": pc["status"],
+                        "is_active": bool(pc["is_active"]),
+                        "is_default_contract": bool(pc["is_default_contract"]),
+                        "discount_type": pc["discount_type"],
+                        "discount_percentage": float(pc["discount_percentage"] or 0),
+                        "applies_to_prescription_only": bool(
+                            pc["applies_to_prescription_only"]
+                        ),
+                        "applies_to_otc": bool(pc["applies_to_otc"]),
+                        "applies_to_all_branches": bool(pc["applies_to_all_branches"]),
+                        "applicable_branch_ids": list(branches),
+                        "effective_from": (
+                            pc["effective_from"].isoformat()
+                            if pc["effective_from"]
+                            else None
+                        ),
+                        "effective_to": (
+                            pc["effective_to"].isoformat()
+                            if pc["effective_to"]
+                            else None
+                        ),
+                        "requires_verification": bool(pc["requires_verification"]),
+                        "requires_approval": bool(pc["requires_approval"]),
+                        "requires_preauthorization": bool(
+                            pc["requires_preauthorization"]
+                        ),
+                        "copay_amount": (
+                            float(pc["copay_amount"])
+                            if pc["copay_amount"] is not None
+                            else None
+                        ),
+                        "copay_percentage": (
+                            float(pc["copay_percentage"])
+                            if pc["copay_percentage"] is not None
+                            else None
+                        ),
+                        "insurance_provider_id": (
+                            str(pc["insurance_provider_id"])
+                            if pc["insurance_provider_id"]
+                            else None
+                        ),
+                        "daily_usage_limit": (
+                            int(pc["daily_usage_limit"])
+                            if pc["daily_usage_limit"] is not None
+                            else None
+                        ),
+                        "minimum_purchase_amount": (
+                            float(pc["minimum_purchase_amount"])
+                            if pc["minimum_purchase_amount"] is not None
+                            else None
+                        ),
+                        "maximum_purchase_amount": (
+                            float(pc["maximum_purchase_amount"])
+                            if pc["maximum_purchase_amount"] is not None
+                            else None
+                        ),
+                        "per_customer_usage_limit": (
+                            int(pc["per_customer_usage_limit"])
+                            if pc["per_customer_usage_limit"] is not None
+                            else None
+                        ),
+                        "description": pc["description"],
+                    },
                 )
+            )
 
     plan.totals = {
+        "price_contract": len(plan.contracts),
         "drug_category": len(plan.categories),
         "drug": len(plan.drugs),
         "branch_inventory": len(plan.inventories),
         "drug_batch": len(plan.batches),
-        "contract (reported only)": len(plan.contract_gap),
         "already published": len(plan.already_present),
     }
     return plan
@@ -576,6 +686,18 @@ def print_dry_run_table(conn, plan: Plan, current_seq: int) -> None:
 
     seq = current_seq
     print()
+
+    if plan.contracts:
+        print("organization-wide events (listed once, not per drug):")
+        print(f"  branch: {BRANCH_ID}")
+        print(f"  events that would be created: {len(plan.contracts)}")
+        for e in plan.contracts:
+            print(f"    - {e.event_type:<28} aggregate_id={e.aggregate_id}")
+        first, last = seq + 1, seq + len(plan.contracts)
+        print(f"  resulting seq range: {first}..{last}")
+        seq = last
+        print()
+
     for inv in invs:
         did = str(inv["drug_id"])
         mine = plan.for_drug(did)
