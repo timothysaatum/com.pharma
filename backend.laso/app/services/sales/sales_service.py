@@ -45,8 +45,10 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
-from app.services.sync.eventlog.server_emitter import ServerEventEmitter
-from app.services.sync.eventlog.stock_emitter import publish_stock_change
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    publish_stock_change,
+)
 from app.schemas.event_envelope import AggregateType
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
@@ -1247,7 +1249,35 @@ class SalesService:
             }
 
         # ----------------------------------------------------------------------
-        # 20. Commit — outside the savepoint context
+        # 20. Publish sale_created — INSIDE the transaction, before the commit
+        # ----------------------------------------------------------------------
+        # This used to run at step 21.5, after the commit and through
+        # ServerEventEmitter, which swallows exceptions. A sale could therefore
+        # commit with no event at all: every device kept showing the pre-sale
+        # stock and nothing was logged anywhere. Now the append is part of the
+        # same unit of work as the sale, so a failed append aborts the sale.
+        #
+        # Placed after the savepoint exits (so the sale's own rollback semantics
+        # are untouched) but before the commit, which is what makes it atomic.
+        #
+        # NOTE: sale_created is the ONLY event this method publishes. It carries
+        # no drug_batch_* or branch_inventory_* of its own; the lot deductions
+        # travel as batch_changes inside its payload and are applied by the
+        # device relative to lot rows it already holds. A device that has not
+        # yet received those lots silently applies nothing.
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=sale.organization_id,
+            event_type="sale_created",
+            aggregate_type=AggregateType.SALE,
+            aggregate_id=_sale_id_for_event,
+            payload=_event_payload,
+            authored_by=user.id,
+            branch_id=sale_data.branch_id,
+        )
+
+        # ----------------------------------------------------------------------
+        # 21. Commit — outside the savepoint context
         # ----------------------------------------------------------------------
         await db.commit()
 
@@ -1278,21 +1308,6 @@ class SalesService:
         except Exception:
             logger.exception("Failed to write process_sale audit log for sale %s", sale.id)
             await db.rollback()
-
-        # ----------------------------------------------------------------------
-        # 21.5 Emit sale_created event so other devices can pull it
-        # ----------------------------------------------------------------------
-        await ServerEventEmitter.emit(
-            db=db,
-            org_id=user.organization_id,
-            event_type="sale_created",
-            aggregate_type=AggregateType.SALE,
-            aggregate_id=_sale_id_for_event,
-            payload=_event_payload,
-            authored_by=user.id,
-            branch_id=sale_data.branch_id,
-        )
-        await db.commit()
 
         # ----------------------------------------------------------------------
         # 22. Build and return response

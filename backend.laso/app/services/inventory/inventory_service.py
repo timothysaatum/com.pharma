@@ -2133,6 +2133,43 @@ class InventoryService:
 
             # Resolve any existing alerts if the new quantity is healthy
             await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, new_qty)
+        else:
+            # No aggregate row for a pair that HAS lots. Previously this silently
+            # did nothing, which left quantity == SUM(lots) false with no trace —
+            # the invariant the device's C-hybrid derivation depends on. Three
+            # of the five callers would later raise somewhere unhelpful
+            # (update_batch's scalar_one -> NoResultFound, consume_from_batch and
+            # _apply_adjustment -> HTTPException 404/400), so the defect surfaced
+            # far from its cause.
+            #
+            # CREATE rather than raise: create_batch already creates the row when
+            # it is missing, so this is established behaviour here, and raising
+            # would turn currently-working paths into failures. The row is a
+            # faithful projection of the lots, which is exactly what this
+            # function exists to compute.
+            #
+            # Only ever reached when new_qty > 0 in practice — callers that
+            # validate the aggregate exists do so before getting here — but the
+            # row is created either way so the pair is never left inconsistent.
+            inventory = BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=drug_id,
+                quantity=new_qty,
+                reserved_quantity=0,
+                sync_status="pending",
+                sync_version=1,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            inventory.mark_as_pending_sync()
+            db.add(inventory)
+            await db.flush()
+            logger.info(
+                "Created missing branch_inventory aggregate for branch=%s drug=%s "
+                "quantity=%s from %s lot(s)",
+                branch_id, drug_id, new_qty, "existing",
+            )
 
         return new_qty
 

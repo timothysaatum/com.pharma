@@ -818,6 +818,247 @@ async def test_operation_that_raises_publishes_nothing(db, stock_scenario):
     assert [b["remaining_quantity"] for b in server["drug_batches"]] == [10]
 
 
+# ── A lot must never exist without its aggregate row ─────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_lot_never_ends_up_without_an_aggregate_row(db, stock_scenario):
+    """quantity == SUM(lots) must hold for every pair, always.
+
+    _recalculate_inventory_quantity used to do nothing at all when the
+    BranchInventory row was missing, so a pair could hold lots while the
+    aggregate tracked nothing. That breaks the invariant the device's C-hybrid
+    derivation relies on, and it surfaced far from its cause: the next caller
+    raised NoResultFound or a 404 instead.
+    """
+    org, branch, user, drugs, seed_batch, _make_lot, _contract = stock_scenario
+    drug = drugs[0]
+
+    # A lot written straight to the database, with NO aggregate row: the state
+    # that used to break silently.
+    await seed_batch(branch.id, drug.id, batch_number="ORPHAN-1", quantity=64)
+    orphan = (
+        await db.execute(
+            text(
+                "SELECT COUNT(*) FROM branch_inventory "
+                "WHERE branch_id = :b AND drug_id = :d"
+            ),
+            {"b": str(branch.id), "d": str(drug.id)},
+        )
+    ).scalar_one()
+    assert orphan == 0, "precondition: no aggregate row yet"
+
+    qty = await InventoryService._recalculate_inventory_quantity(
+        db=db, branch_id=branch.id, drug_id=drug.id
+    )
+    await db.commit()
+
+    # The aggregate now exists and equals the lot sum.
+    assert qty == 64
+    server = await _server_state(db, branch.id, drug.id)
+    assert server["branch_inventory"] is not None
+    assert server["branch_inventory"]["quantity"] == 64
+    assert await _batch_sum(db, branch.id, drug.id) == 64
+
+    # And it is idempotent: a second call changes nothing.
+    again = await InventoryService._recalculate_inventory_quantity(
+        db=db, branch_id=branch.id, drug_id=drug.id
+    )
+    await db.commit()
+    assert again == 64
+    rows = (
+        await db.execute(
+            text(
+                "SELECT COUNT(*) FROM branch_inventory "
+                "WHERE branch_id = :b AND drug_id = :d"
+            ),
+            {"b": str(branch.id), "d": str(drug.id)},
+        )
+    ).scalar_one()
+    assert rows == 1, "must not create a second aggregate row"
+
+
+@pytest.mark.asyncio
+async def test_every_pair_with_lots_has_an_aggregate(db, stock_scenario):
+    """Sweep the seeded pairs: no lot anywhere without its aggregate."""
+    org, branch, user, drugs, seed_batch, _make_lot, _contract = stock_scenario
+
+    for i, drug in enumerate(drugs):
+        await seed_batch(branch.id, drug.id, batch_number=f"SWEEP-{i}", quantity=10 + i)
+        await InventoryService._recalculate_inventory_quantity(
+            db=db, branch_id=branch.id, drug_id=drug.id
+        )
+    await db.commit()
+
+    orphans = (
+        await db.execute(
+            text(
+                """
+                SELECT db.drug_id, SUM(db.remaining_quantity) AS lot_sum
+                  FROM drug_batches db
+                  LEFT JOIN branch_inventory bi
+                    ON bi.branch_id = db.branch_id AND bi.drug_id = db.drug_id
+                 WHERE db.branch_id = :b
+                 GROUP BY db.drug_id, bi.id
+                HAVING bi.id IS NULL OR bi.quantity <> SUM(db.remaining_quantity)
+                """
+            ),
+            {"b": str(branch.id)},
+        )
+    ).mappings().all()
+    assert orphans == [], f"lots without a matching aggregate: {orphans}"
+
+
+# ── process_sale: the emit must be inside the sale's transaction ──────────────
+
+
+@pytest.mark.asyncio
+async def test_forced_append_failure_rolls_back_the_whole_sale(
+    db, stock_scenario, monkeypatch
+):
+    """A failed append must undo the sale: rows, stock and allocations alike.
+
+    The emit used to run AFTER the commit through ServerEventEmitter, which
+    swallows exceptions, so a sale could commit with no event and every device
+    would keep showing the pre-sale stock with nothing logged.
+    """
+    org, branch, user, drugs, seed_batch, make_lot, seed_contract = stock_scenario
+    drug = drugs[0]
+    contract = await seed_contract()
+
+    await make_lot(branch.id, drug.id, "SALE-RB", 100)
+    before = await _server_state(db, branch.id, drug.id)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("simulated append failure")
+
+    from app.services.sync.eventlog import append_service
+    from app.services.sync.eventlog.stock_emitter import StockEventEmitter
+
+    monkeypatch.setattr(StockEventEmitter, "_append_one", _boom, raising=False)
+    monkeypatch.setattr(
+        append_service.AppendService, "_append_one", _boom, raising=False
+    )
+
+    with pytest.raises(RuntimeError):
+        try:
+            await SalesService.process_sale(
+                db=db,
+                sale_data=_sale_payload(branch.id, contract.id, drug.id, quantity=40),
+                user=user,
+            )
+        finally:
+            await db.execute(text("ROLLBACK"))
+
+    # No sale survived...
+    sale_count = (
+        await db.execute(
+            text("SELECT COUNT(*) FROM sales WHERE branch_id = :b"),
+            {"b": str(branch.id)},
+        )
+    ).scalar_one()
+    assert sale_count == 0
+
+    # ...no allocations...
+    alloc = (
+        await db.execute(
+            text("SELECT COUNT(*) FROM sale_item_batch_allocations"),
+        )
+    ).scalar_one()
+    assert alloc == 0
+
+    # ...and the stock is exactly as it was.
+    after = await _server_state(db, branch.id, drug.id)
+    assert after["drug_batches"] == before["drug_batches"]
+    assert after["branch_inventory"]["quantity"] == 100
+
+
+@pytest.mark.asyncio
+async def test_successful_sale_still_publishes_and_replays(db, stock_scenario):
+    """The non-swallowing emit must not break the happy path."""
+    org, branch, user, drugs, seed_batch, make_lot, seed_contract = stock_scenario
+    drug = drugs[1]
+    contract = await seed_contract()
+
+    await make_lot(branch.id, drug.id, "SALE-OK-NEAR", 30)
+    await make_lot(branch.id, drug.id, "SALE-OK-FAR", 70)
+
+    # Everything before this point came from the fixture's own create_batch
+    # calls. Only the events appended by process_sale itself are under test.
+    before_ids = {e["event_id"] for e in await _append_events(db, org.id)}
+
+    result = await SalesService.process_sale(
+        db=db,
+        sale_data=_sale_payload(branch.id, contract.id, drug.id, quantity=50),
+        user=user,
+    )
+    assert result.success is True
+
+    events = await _append_events(db, org.id)
+    mine = [e for e in events if e["event_id"] not in before_ids]
+    assert [e["event_type"] for e in mine] == ["sale_created"], mine
+    # sale_created is still the ONLY carrier from this path: it publishes no
+    # drug_batch_* or branch_inventory_* of its own, so the lot deductions travel
+    # solely inside its payload's batch_changes.
+    assert not [e for e in mine if e["aggregate_type"] in ("drug_batch", "branch_inventory")]
+    assert len(mine[0]["payload"]["batch_changes"]) == 2  # the multi-lot spill
+
+    server = await _server_state(db, branch.id, drug.id)
+    assert server["branch_inventory"]["quantity"] == 50
+
+    _record(
+        "process_sale atomic emit",
+        events=events,
+        server=server,
+        branch_id=branch.id,
+        drug_id=drug.id,
+        note="sale_created published inside the sale's transaction",
+    )
+    await _flush_contract()
+
+
+@pytest.mark.asyncio
+async def test_audit_log_failure_still_does_not_abort_the_sale(
+    db, stock_scenario, monkeypatch
+):
+    """Audit-log behaviour must be unchanged: log loud, keep the sale.
+
+    The audit write keeps its own try/except and its own commit precisely so a
+    logging failure cannot undo a completed sale. Moving the emit must not have
+    dragged that inside the sale's transaction.
+    """
+    org, branch, user, drugs, seed_batch, make_lot, seed_contract = stock_scenario
+    drug = drugs[2]
+    contract = await seed_contract()
+
+    await make_lot(branch.id, drug.id, "SALE-AUDIT", 100)
+
+    import app.services.sales.sales_service as svc
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("simulated audit failure")
+
+    monkeypatch.setattr(svc, "create_audit_log", _boom)
+
+    result = await SalesService.process_sale(
+        db=db,
+        sale_data=_sale_payload(branch.id, contract.id, drug.id, quantity=10),
+        user=user,
+    )
+    assert result.success is True
+
+    sale_count = (
+        await db.execute(
+            text("SELECT COUNT(*) FROM sales WHERE branch_id = :b"),
+            {"b": str(branch.id)},
+        )
+    ).scalar_one()
+    assert sale_count == 1
+    # And the event still made it out.
+    events = await _append_events(db, org.id)
+    assert [e["event_type"] for e in events].count("sale_created") == 1
+
+
 # ── Payload builders ─────────────────────────────────────────────────────────
 
 

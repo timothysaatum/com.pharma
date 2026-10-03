@@ -228,39 +228,21 @@ describe("stock events drive a device to the server's state", () => {
   });
 
   afterAll(() => {
-    const pad = (s: string, n: number) => s.padEnd(n);
-    const padL = (s: string, n: number) => s.padStart(n);
+    // Plain text, pipe-delimited: padded columns run together in a terminal and
+    // the last three columns get lost when the output is pasted into a review.
     let out = "";
-    out += "\n\n" + "=".repeat(112) + "\n";
-    out += "STOCK EVENT PARITY — real service call replayed on a real device\n";
-    out += "=".repeat(112) + "\n";
-    out +=
-      pad("scenario", 40) +
-      pad("device", 9) +
-      padL("server", 8) +
-      padL("local", 8) +
-      pad("  lots", 8) +
-      pad("sellable", 10) +
-      "verdict\n";
-    out += "-".repeat(112) + "\n";
+    out += "\nSTOCK EVENT PARITY - real service call replayed on a real device\n";
+    out += "scenario | device | server qty | local qty | batches match | verdict\n";
     for (const r of rows) {
       out +=
-        pad(r.scenario.slice(0, 39), 40) +
-        pad(r.device, 9) +
-        padL(String(r.serverQty), 8) +
-        padL(String(r.localQty), 8) +
-        pad(r.lotsMatch ? "match" : "DIFFER", 8) +
-        pad(r.sellableMatch ? "match" : "DIFFER", 10) +
-        (r.ok ? "OK" : "MISMATCH") +
-        (r.detail ? `  ${r.detail}` : "") +
-        "\n";
+        `${r.scenario} | ${r.device} | ${r.serverQty} | ${r.localQty} | ` +
+        `${r.lotsMatch ? "yes" : "NO"} | ${r.ok ? "OK" : "MISMATCH"}\n`;
+      if (r.detail) out += `    detail: ${r.detail}\n`;
     }
-    out += "-".repeat(112) + "\n";
     const bad = rows.filter((r) => !r.ok);
     out += bad.length
-      ? `${bad.length} of ${rows.length} scenario/device combinations DISAGREE with the server.\n`
-      : `all ${rows.length} scenario/device combinations agree with the server.\n`;
-    out += "=".repeat(112) + "\n";
+      ? `${bad.length} of ${rows.length} combinations DISAGREE with the server\n`
+      : `all ${rows.length} combinations agree with the server\n`;
     console.error(out);
   });
 
