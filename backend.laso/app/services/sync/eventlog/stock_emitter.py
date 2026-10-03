@@ -32,7 +32,7 @@ import hashlib
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -268,3 +268,109 @@ def drug_batch_payload(
         "purchase_order_id": str(purchase_order_id) if purchase_order_id else None,
         "location": location,
     }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The batch-detail rule
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# RULING (2026-10-02): a stock correction MUST be published with batch detail.
+# For every affected batch an absolute remaining_quantity, plus a
+# branch_inventory_updated carrying the server's absolute quantity AFTER the
+# change. Delta-only corrections are not published.
+#
+# Why the ruling exists. Under C-hybrid the device derives
+# branch_inventory.quantity from its own drug_batches rows wherever it holds any.
+# An inventory event alone therefore cannot correct a device: it would be
+# ignored, and the device would keep deriving from a stale batch set. Only the
+# batch events move the number that the device actually reads.
+#
+# Every helper here appends INSIDE the caller's transaction and does not swallow
+# exceptions, so a failed append rolls the stock change back with it.
+
+
+async def publish_stock_change(
+    db: AsyncSession,
+    *,
+    org_id: uuid.UUID,
+    branch_id: uuid.UUID,
+    inventory: Any,
+    batches: List[Tuple[Any, bool]],
+    authored_by: uuid.UUID,
+) -> List[AppendResult]:
+    """Append the batch events for a stock change, then the inventory event.
+
+    Args:
+        inventory: the BranchInventory row AFTER the change. Its ``quantity`` is
+            read here, so this must be called after the row has been updated and
+            flushed.
+        batches: ``(batch_row, was_created)`` pairs for every lot the change
+            touched. Each becomes a ``drug_batch_created`` or
+            ``drug_batch_updated`` carrying that lot's absolute
+            remaining_quantity. Batches the change did not touch are not sent.
+
+    Returns:
+        The AppendResults, in emission order, for the caller's assertions.
+
+    Raises:
+        Whatever the append path raises. Deliberately not caught: a stock row
+        committed without its event leaves every device permanently wrong with
+        nothing logged anywhere.
+    """
+    results: List[AppendResult] = []
+
+    for batch, was_created in batches:
+        results.append(
+            await StockEventEmitter.emit_in_transaction(
+                db,
+                org_id=org_id,
+                event_type=(
+                    "drug_batch_created" if was_created else "drug_batch_updated"
+                ),
+                aggregate_type=AggregateType.DRUG_BATCH,
+                aggregate_id=batch.id,
+                payload=drug_batch_payload(
+                    batch_id=batch.id,
+                    drug_id=batch.drug_id,
+                    branch_id=batch.branch_id,
+                    batch_number=batch.batch_number,
+                    quantity=batch.quantity,
+                    remaining_quantity=batch.remaining_quantity,
+                    cost_price=batch.cost_price,
+                    selling_price=batch.selling_price,
+                    expiry_date=(
+                        batch.expiry_date.isoformat()
+                        if getattr(batch, "expiry_date", None) else None
+                    ),
+                    supplier=batch.supplier,
+                    purchase_order_id=batch.purchase_order_id,
+                    # DrugBatch has no `location` column, so this is always None.
+                    location=getattr(batch, "location", None),
+                ),
+                authored_by=authored_by,
+                branch_id=branch_id,
+            )
+        )
+
+    # The inventory event carries the server's absolute quantity after the
+    # change. The device uses it only when it holds no batch rows for the pair.
+    results.append(
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=org_id,
+            event_type="branch_inventory_updated",
+            aggregate_type=AggregateType.BRANCH_INVENTORY,
+            aggregate_id=inventory.id,
+            payload=branch_inventory_payload(
+                inventory_id=inventory.id,
+                branch_id=inventory.branch_id,
+                drug_id=inventory.drug_id,
+                quantity=inventory.quantity,
+                reserved_quantity=inventory.reserved_quantity,
+                location=inventory.location,
+                selling_price=inventory.selling_price,
+            ),
+            authored_by=authored_by,
+            branch_id=branch_id,
+        )
+    )
+    return results

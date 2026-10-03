@@ -46,6 +46,7 @@ from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
 from app.services.sync.eventlog.server_emitter import ServerEventEmitter
+from app.services.sync.eventlog.stock_emitter import publish_stock_change
 from app.schemas.event_envelope import AggregateType
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
@@ -1581,6 +1582,12 @@ class SalesService:
                 inventory          = inv_res.scalar_one()
                 previous_qty       = inventory.quantity
                 running_inventory_qty = previous_qty
+                # Every lot this refund puts stock back into, as (row, was_created).
+                # Restocking into the ORIGINAL lots matters: the device derives
+                # quantity from its own lots, so a refund published against a
+                # fabricated RETURN- lot would leave the device's original lots
+                # short and its derived quantity wrong.
+                restored_batches: List[Tuple[Any, bool]] = []
                 inventory_restored += 1
 
                 qty_to_restore = refund_item.quantity
@@ -1600,6 +1607,7 @@ class SalesService:
                             .with_for_update()
                         )
                         batch = batch_res.scalar_one_or_none()
+                    batch_created = batch is None
 
                     if batch is None:
                         batch = DrugBatch(
@@ -1629,6 +1637,7 @@ class SalesService:
                     batch.updated_at = datetime.now(timezone.utc)
                     batch.mark_as_pending_sync()
                     batches_restored += 1
+                    restored_batches.append((batch, batch_created))
 
                     movement_before = running_inventory_qty
                     running_inventory_qty += restore_qty
@@ -1695,6 +1704,20 @@ class SalesService:
                     branch_id=sale.branch_id,
                     drug_id=sale_item.drug_id,
                 )
+
+                # Publish inside the refund's savepoint, before its commit. The
+                # recalculation above has already fixed inventory.quantity, so the
+                # event carries the post-refund absolute value.
+                mine = [b for b in restored_batches if b[0].drug_id == sale_item.drug_id]
+                if mine:
+                    await publish_stock_change(
+                        db,
+                        org_id=sale.organization_id,
+                        branch_id=sale.branch_id,
+                        inventory=inventory,
+                        batches=mine,
+                        authored_by=user.id,
+                    )
 
             # Reverse loyalty points + recalculate tier
             loyalty_points_deducted = 0

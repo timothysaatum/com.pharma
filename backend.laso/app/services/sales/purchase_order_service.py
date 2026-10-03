@@ -51,6 +51,12 @@ from app.models.sales.sales_model import PurchaseOrder, PurchaseOrderItem, Suppl
 from app.models.system_md.sys_models import AuditLog
 from app.models.user.user_model import User
 from app.services.inventory.inventory_service import InventoryService
+from app.schemas.event_envelope import AggregateType
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    branch_inventory_payload,
+    drug_batch_payload,
+)
 from app.schemas.purchase_order_schemas import (
     PurchaseOrderCreate,
     PurchaseOrderItemCreate,
@@ -660,6 +666,7 @@ class PurchaseOrderService:
                 )
                 inventory = inv_result.scalar_one_or_none()
                 previous_quantity = 0
+                inventory_created = inventory is None
 
                 if inventory:
                     previous_quantity = inventory.quantity
@@ -693,6 +700,7 @@ class PurchaseOrderService:
                             .with_for_update()
                         )
                         inventory = inv_result.scalar_one()
+                        inventory_created = False
                         previous_quantity = inventory.quantity
                         inventory.quantity += item_receive.quantity_received
                         inventory.updated_at = _now()
@@ -717,6 +725,7 @@ class PurchaseOrderService:
                     )
                     .with_for_update()
                 )
+                batch_existed = existing_batch is not None
                 if existing_batch:
                     if existing_batch.expiry_date != item_receive.expiry_date:
                         raise HTTPException(
@@ -782,6 +791,70 @@ class PurchaseOrderService:
                 )
                 db.add(adjustment)
                 await db.flush()
+
+                # ── Publish the stock change, in this transaction ──────────
+                # Inside the savepoint, before the commit at the end of this
+                # method, so a failed append rolls the receipt back.
+                #
+                # Batch detail is mandatory: under C-hybrid the device derives
+                # branch_inventory.quantity from its own drug_batches rows, so a
+                # delivery that published only an inventory event would leave the
+                # device deriving from a stale batch set.
+                await StockEventEmitter.emit_in_transaction(
+                    db,
+                    org_id=po.organization_id,
+                    event_type=(
+                        "drug_batch_updated" if batch_existed
+                        else "drug_batch_created"
+                    ),
+                    aggregate_type=AggregateType.DRUG_BATCH,
+                    aggregate_id=batch.id,
+                    payload=drug_batch_payload(
+                        batch_id=batch.id,
+                        drug_id=batch.drug_id,
+                        branch_id=batch.branch_id,
+                        batch_number=batch.batch_number,
+                        quantity=batch.quantity,
+                        remaining_quantity=batch.remaining_quantity,
+                        cost_price=batch.cost_price,
+                        selling_price=batch.selling_price,
+                        expiry_date=(
+                            batch.expiry_date.isoformat()
+                            if batch.expiry_date else None
+                        ),
+                        supplier=batch.supplier,
+                        purchase_order_id=batch.purchase_order_id,
+                        # DrugBatch has no `location` column, so this is always None.
+                    location=getattr(batch, "location", None),
+                    ),
+                    authored_by=user.id,
+                    branch_id=po.branch_id,
+                )
+
+                # The server's absolute quantity AFTER the change. The device
+                # only uses it when it holds no batch rows for the pair, but it is
+                # the sole source of truth for a drug stocked without lots.
+                await StockEventEmitter.emit_in_transaction(
+                    db,
+                    org_id=po.organization_id,
+                    event_type=(
+                        "branch_inventory_created" if inventory_created
+                        else "branch_inventory_updated"
+                    ),
+                    aggregate_type=AggregateType.BRANCH_INVENTORY,
+                    aggregate_id=inventory.id,
+                    payload=branch_inventory_payload(
+                        inventory_id=inventory.id,
+                        branch_id=inventory.branch_id,
+                        drug_id=inventory.drug_id,
+                        quantity=inventory.quantity,
+                        reserved_quantity=inventory.reserved_quantity,
+                        location=inventory.location,
+                        selling_price=inventory.selling_price,
+                    ),
+                    authored_by=user.id,
+                    branch_id=po.branch_id,
+                )
 
                 await InventoryService._record_inventory_movement(
                     db=db,
