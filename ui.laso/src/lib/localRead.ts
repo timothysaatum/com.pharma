@@ -869,10 +869,18 @@ export const localRead = {
            OR applicable_branch_ids LIKE $2
          )`;
 
-    if (organizationId) {
-      values.push(organizationId);
-      query += ` AND organization_id = $${values.length}`;
+    // NEVER offer another organization's contract.
+    //
+    // This used to be conditional on `organizationId` being provided, so a
+    // caller without a loaded user got every contract on the device with no
+    // tenant filter at all. A POS must never be able to price a sale against
+    // another org's contract, so the filter is now mandatory: with no
+    // organizationId the query returns nothing rather than everything.
+    if (!organizationId) {
+      return [];
     }
+    values.push(organizationId);
+    query += ` AND organization_id = $${values.length}`;
 
     query += ` ORDER BY is_default_contract DESC, contract_name ASC`;
 

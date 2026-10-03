@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 34;
+const MAX_KNOWN_SCHEMA_VERSION = 35;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -303,6 +303,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 32) await migrate_v32(db);
         if (user_version < 33) await migrate_v33(db);
         if (user_version < 34) await migrate_v34(db);
+        if (user_version < 35) await migrate_v35(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2738,6 +2739,64 @@ export async function markEventApplied(
       new Date().toISOString(),
     ]
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v35 — one-time purge of cross-organization price contracts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * REMOVES price_contracts rows that belong to an organization other than the
+ * signed-in one.
+ *
+ * WHY THIS IS NEEDED
+ * ------------------
+ * `_priceContractCreated` uses `INSERT OR IGNORE`, so replaying an event for a
+ * contract that already exists locally never UPDATES it. An E2E fixture had
+ * seeded NHIS-2026 into this device under a test organization id
+ * (11111111-...). The real log later replayed the same contract id carrying the
+ * real org, and the projector silently kept the poisoned row.
+ *
+ * `getAvailableContractsForPos` filters on the signed-in org, so that row is
+ * invisible: the POS shows "Select a price contract" and the sale button stays
+ * disabled, with nothing on screen to explain it. A replay cannot repair it,
+ * because the projector will not overwrite an existing row — so the fix has to
+ * happen once, here.
+ *
+ * Deletion, not relabelling: an earlier draft of this migration rewrote foreign
+ * rows to the current org, which is strictly worse — it would have made another
+ * organization's contract OFFERABLE to this cashier. These rows belong to a
+ * different tenant and this device has no use for them; if that org is ever
+ * signed into on this device again, its contracts return with the next sync.
+ */
+export async function migrate_v35(db: Database, organizationId?: string | null): Promise<void> {
+  if (organizationId) {
+    await db.execute(
+      "DELETE FROM price_contracts WHERE organization_id IS NULL OR organization_id <> $1",
+      [organizationId]
+    );
+  }
+  await db.execute("PRAGMA user_version = 35");
+}
+
+/**
+ * Runs the v35 repair once the signed-in organization is known.
+ *
+ * Returns how many foreign rows were removed, so the caller can log it. Safe to
+ * call repeatedly: after the first run there is nothing left to delete.
+ */
+export async function repairCrossOrgPriceContracts(organizationId: string): Promise<number> {
+  const db = await getDb();
+  const before = await db.select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM price_contracts "
+    + "WHERE organization_id IS NULL OR organization_id <> $1",
+    [organizationId]
+  );
+  const removed = Number(before?.[0]?.n ?? 0);
+  if (removed > 0) {
+    await migrate_v35(db, organizationId);
+  }
+  return removed;
 }
 
 /** Attempts allowed before an event is quarantined and never retried again. */
