@@ -638,6 +638,7 @@ async def apply_plan(plan: Plan) -> dict[str, int]:
 
     engine = create_async_engine(_db_url(), future=True)
     counts: dict[str, int] = {"appended": 0, "already_appended": 0, "skipped": 0}
+    logger_unexpected: list[str] = []
     try:
         async with engine.begin() as conn:
             from sqlalchemy.ext.asyncio import AsyncSession
@@ -660,15 +661,22 @@ async def apply_plan(plan: Plan) -> dict[str, int]:
                 )
                 status = getattr(res, "status", None)
                 name = getattr(status, "value", status)
+                # AppendStatus values are "appended" / "already_appended" /
+                # "hash_mismatch". Comparing against "accepted" (which is what
+                # the EventRouter's own vocabulary uses) silently funnelled every
+                # real append into "skipped", so a successful run reported
+                # "appended: 0, skipped: 15" while having written 15 events.
                 if name == "already_appended":
                     counts["already_appended"] += 1
-                elif name == "accepted":
+                elif name == "appended":
                     counts["appended"] += 1
                 else:
                     counts["skipped"] += 1
+                    logger_unexpected.append(f"{e.event_type} -> {name}")
             await db.commit()
     finally:
         await engine.dispose()
+    counts["_unexpected"] = logger_unexpected  # type: ignore[assignment]
     return counts
 
 
@@ -724,9 +732,14 @@ def main() -> int:
         print()
         print(f"appending {len(plan.everything)} events in ONE transaction...")
         counts = asyncio_run(apply_plan(plan))
+        unexpected = counts.pop("_unexpected", [])
         print(f"  appended:        {counts['appended']}")
         print(f"  already_appended:{counts['already_appended']}")
         print(f"  skipped:         {counts['skipped']}")
+        if unexpected:
+            print("  UNEXPECTED outcomes:")
+            for u in unexpected:
+                print(f"    {u}")
         return 0
     finally:
         conn.rollback()
