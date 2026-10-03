@@ -82,6 +82,11 @@ async def event_log_table(db: AsyncSession):
     migration = _load_migration("e1f2a3b4c5d6_add_event_sourced_sync_spine.py")
     conn = await db.connection()
 
+    # The shared `db` fixture now creates a minimal event_log for tests that
+    # touch a stock write path, and the migration's create_table has no
+    # IF NOT EXISTS — so drop it first and let the real migration own the table.
+    await conn.execute(text("DROP TABLE IF EXISTS event_log CASCADE"))
+
     def _apply(sync_conn):
         # `run_sync` hands the callback a *synchronous* Connection facade, which
         # is what Alembic's Operations needs (its DDL calls conn.execute, not
