@@ -374,6 +374,36 @@ function SectionLabel({ icon: Icon, children }: { icon: React.ElementType; child
     );
 }
 
+/**
+ * Sanitise a typed quantity draft: digits only, no leading zeros.
+ *
+ * Empty is allowed and returned as-is, because the field must be clearable.
+ * Anything else non-numeric collapses to "" so a stray letter can never become
+ * NaN and then silently commit as 1.
+ */
+export function sanitiseDraft(raw: string): string {
+    const digits = raw.replace(/[^0-9]/g, "");
+    if (digits === "") return "";
+    const stripped = digits.replace(/^0+/, "");
+    return stripped === "" ? "0" : stripped;
+}
+
+/**
+ * Turn a draft into the quantity to commit.
+ *
+ * empty / NaN / < 1  -> 1
+ * known available     -> clamped to available (the "max" state follows)
+ * available unknown   -> the value, up to the reducer's existing 1000 cap
+ */
+export function commitDraft(draft: string, available: number | undefined, cap = 1000): number {
+    const n = Number(draft);
+    if (draft === "" || Number.isNaN(n) || n < 1) return 1;
+    if (available !== undefined && !Number.isNaN(available)) {
+        return Math.min(n, available);
+    }
+    return Math.min(n, cap);
+}
+
 export function CartPanel({
     items, contract, contracts, contractsLoading,
     contractsIssue, onRetryContracts,
@@ -387,6 +417,20 @@ export function CartPanel({
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
 }: CartPanelProps) {
     const autoSelectedRef = useRef(false);
+
+    // ── Quantity draft (per cart line) ──────────────────────────────────
+    //
+    // The committed quantity lives in the cart; while the field has focus it
+    // shows a local draft string instead. Without this the input cannot be
+    // cleared (parseInt("") || 1 snapped it straight back to 1), and typing
+    // "133" into "1" without a select-on-focus produced 1133.
+    const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
+    const qtyFocused = useRef<string | null>(null);
+    // Set when a key handler has already settled the line (Enter) or abandoned
+    // it (Escape), so the blur that follows does not commit the draft again.
+    // Escape used to blur and then let onBlur commit the very draft it had just
+    // discarded, because setQtyDraft has not applied yet inside that closure.
+    const skipNextCommitRef = useRef<string | null>(null);
 
     // FIX: Track whether the user has manually edited the amount tendered.
     // When true, we stop auto-syncing so their typed value is preserved.
@@ -534,24 +578,128 @@ export function CartPanel({
                                                 <div className="flex items-center justify-between">
                                                     <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
                                                         <button
-                                                            onClick={() => onSetQuantity(item.drug.id, item.quantity - 1)}
+                                                            onClick={() => {
+                                                                const next = Math.max(1, item.quantity - 1);
+                                                                onSetQuantity(item.drug.id, next);
+                                                                // Keep any open draft in step with the cart, so a
+                                                                // subsequent blur cannot resurrect a stale number.
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(next),
+                                                                }));
+                                                            }}
                                                             type="button"
+                                                            aria-label={`Decrease quantity for ${item.drug.name}`}
                                                             className="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-ink hover:bg-slate-100 transition-colors"
                                                         >
                                                             <Minus className="w-3 h-3" />
                                                         </button>
                                                         <input
-                                                            type="number"
+                                                            type="text"
+                                                            inputMode="numeric"
+                                                            data-testid={`qty-input-${item.drug.id}`}
+                                                            aria-label={`Quantity for ${item.drug.name}`}
                                                             min={1}
                                                             max={maxQty}
-                                                            value={item.quantity}
-                                                            onChange={(e) =>
-                                                                onSetQuantity(item.drug.id, parseInt(e.target.value) || 1)
+                                                            value={
+                                                                qtyFocused.current === item.drug.id
+                                                                    ? (qtyDraft[item.drug.id] ?? String(item.quantity))
+                                                                    : String(item.quantity)
                                                             }
+                                                            onFocus={(e) => {
+                                                                // (a) Select the whole number so typing replaces it
+                                                                // instead of appending (133 into 1 -> 1133).
+                                                                qtyFocused.current = item.drug.id;
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(item.quantity),
+                                                                }));
+                                                                // Synchronous: select() during focus is what
+                                                                // makes typing replace rather than append.
+                                                                e.target.select();
+                                                                requestAnimationFrame(() => e.target.select());
+                                                            }}
+                                                            onChange={(e) => {
+                                                                // (d) digits only, no leading zeros.
+                                                                const clean = sanitiseDraft(e.target.value);
+                                                                setQtyDraft((d) => ({ ...d, [item.drug.id]: clean }));
+                                                                // (d) A valid value within available stock may commit as
+                                                                // you type; empty/0/over-limit wait for blur or Enter.
+                                                                const n = Number(clean);
+                                                                const withinLimit =
+                                                                    resolvedStock === undefined
+                                                                        ? n >= 1 && n <= 1000
+                                                                        : n >= 1 && n <= resolvedStock;
+                                                                if (withinLimit && Number.isFinite(n)) {
+                                                                    onSetQuantity(item.drug.id, n);
+                                                                }
+                                                            }}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === "Enter") {
+                                                                    e.preventDefault();
+                                                                    onSetQuantity(
+                                                                        item.drug.id,
+                                                                        commitDraft(
+                                                                            sanitiseDraft(
+                                                                                qtyDraft[item.drug.id] ??
+                                                                                    String(item.quantity)
+                                                                            ),
+                                                                            resolvedStock
+                                                                        )
+                                                                    );
+                                                                    qtyFocused.current = null;
+                                                                    skipNextCommitRef.current = item.drug.id;
+                                                                    setQtyDraft((d) => {
+                                                                        const { [item.drug.id]: _drop, ...rest } = d;
+                                                                        return rest;
+                                                                    });
+                                                                    (e.target as HTMLInputElement).blur();
+                                                                } else if (e.key === "Escape") {
+                                                                    // (e) Revert to the committed value. The blur that
+                                                                    // follows must NOT commit the abandoned draft.
+                                                                    e.preventDefault();
+                                                                    qtyFocused.current = null;
+                                                                    skipNextCommitRef.current = item.drug.id;
+                                                                    setQtyDraft((d) => {
+                                                                        const { [item.drug.id]: _drop, ...rest } = d;
+                                                                        return rest;
+                                                                    });
+                                                                    (e.target as HTMLInputElement).blur();
+                                                                }
+                                                            }}
+                                                            onBlur={() => {
+                                                                if (skipNextCommitRef.current === item.drug.id) {
+                                                                    skipNextCommitRef.current = null;
+                                                                    return;
+                                                                }
+                                                                // (c) Commit on blur, including tab/click-away.
+                                                                onSetQuantity(
+                                                                    item.drug.id,
+                                                                    commitDraft(
+                                                                        sanitiseDraft(
+                                                                            qtyDraft[item.drug.id] ??
+                                                                                String(item.quantity)
+                                                                        ),
+                                                                        resolvedStock
+                                                                    )
+                                                                );
+                                                                qtyFocused.current = null;
+                                                                setQtyDraft((d) => {
+                                                                    const { [item.drug.id]: _drop, ...rest } = d;
+                                                                    return rest;
+                                                                });
+                                                            }}
                                                             className="w-12 h-8 text-center text-sm font-bold bg-white border-x border-slate-200 focus:outline-none focus:bg-white"
                                                         />
                                                         <button
-                                                            onClick={() => onSetQuantity(item.drug.id, Math.min(item.quantity + 1, maxQty))}
+                                                            onClick={() => {
+                                                                const next = Math.min(item.quantity + 1, maxQty);
+                                                                onSetQuantity(item.drug.id, next);
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(next),
+                                                                }));
+                                                            }}
                                                             type="button"
                                                             disabled={atStockLimit}
                                                             title={
