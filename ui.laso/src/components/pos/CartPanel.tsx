@@ -20,6 +20,11 @@ import {
     Receipt, Banknote, Tag, Search, UserCheck, X, Loader2,
 } from "lucide-react";
 import type { AvailableContract } from "@/api/contracts";
+import {
+    getLineStockState,
+    stockLabelClass,
+    stockLabelText,
+} from "@/lib/cartStockState";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient, isBackendKnownUnreachable } from "@/api/client";
@@ -515,6 +520,15 @@ export function CartPanel({
                                             ?? (typeof drugAny.valid_batch_quantity === "number" ? drugAny.valid_batch_quantity : undefined)
                                             ?? (typeof drugAny.quantity === "number" ? drugAny.quantity : undefined);
                                         const maxQty = resolvedStock ?? 1000;
+                                        // One source of truth for "how does this
+                                        // line read", shared with the input's clamp.
+                                        const stockState = getLineStockState(
+                                            item.quantity,
+                                            resolvedStock
+                                        );
+                                        const atStockLimit =
+                                            resolvedStock !== undefined &&
+                                            item.quantity >= resolvedStock;
                                         return (
                                             <>
                                                 <div className="flex items-center justify-between">
@@ -539,13 +553,36 @@ export function CartPanel({
                                                         <button
                                                             onClick={() => onSetQuantity(item.drug.id, Math.min(item.quantity + 1, maxQty))}
                                                             type="button"
-                                                            className="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-ink hover:bg-slate-100 transition-colors"
+                                                            disabled={atStockLimit}
+                                                            title={
+                                                                atStockLimit
+                                                                    ? `Only ${resolvedStock} available`
+                                                                    : undefined
+                                                            }
+                                                            aria-label={
+                                                                atStockLimit
+                                                                    ? `Increase quantity, limit reached: only ${resolvedStock} available`
+                                                                    : "Increase quantity"
+                                                            }
+                                                            className={`w-8 h-8 flex items-center justify-center hover:text-ink hover:bg-slate-100 transition-colors ${
+                                                                atStockLimit
+                                                                    ? "text-slate-300 cursor-not-allowed"
+                                                                    : "text-slate-500"
+                                                            }`}
                                                         >
                                                             <Plus className="w-3 h-3" />
                                                         </button>
                                                     </div>
-                                                    <span className="text-xs text-ink-muted ml-1">
-                                                        /{resolvedStock ?? "?"}
+                                                    {/* Stock state. aria-live so a
+                                                        screen reader announces the
+                                                        change when stock refreshes. */}
+                                                    <span
+                                                        aria-live="polite"
+                                                        data-testid={`stock-label-${item.drug.id}`}
+                                                        data-state={stockState}
+                                                        className={`text-xs ml-1 whitespace-nowrap truncate tabular-nums ${stockLabelClass(stockState)}`}
+                                                    >
+                                                        {stockLabelText(stockState, resolvedStock)}
                                                     </span>
 
                                                     <button
