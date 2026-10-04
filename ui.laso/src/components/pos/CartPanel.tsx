@@ -374,6 +374,9 @@ function SectionLabel({ icon: Icon, children }: { icon: React.ElementType; child
     );
 }
 
+/** Ceiling for one cart line when stock is unknown. Matches useCart's cap. */
+export const LINE_QUANTITY_CAP = 1000;
+
 /**
  * Sanitise a typed quantity draft: digits only, no leading zeros.
  *
@@ -395,7 +398,11 @@ export function sanitiseDraft(raw: string): string {
  * known available     -> clamped to available (the "max" state follows)
  * available unknown   -> the value, up to the reducer's existing 1000 cap
  */
-export function commitDraft(draft: string, available: number | undefined, cap = 1000): number {
+export function commitDraft(
+    draft: string,
+    available: number | undefined,
+    cap = LINE_QUANTITY_CAP
+): number {
     const n = Number(draft);
     if (draft === "" || Number.isNaN(n) || n < 1) return 1;
     if (available !== undefined && !Number.isNaN(available)) {
@@ -431,6 +438,15 @@ export function CartPanel({
     // Escape used to blur and then let onBlur commit the very draft it had just
     // discarded, because setQtyDraft has not applied yet inside that closure.
     const skipNextCommitRef = useRef<string | null>(null);
+
+    /**
+     * Lines whose typed quantity hit the 1000 ceiling, so the cashier is told
+     * rather than left wondering why 5000 became 1000.
+     *
+     * Only the ceiling earns a note: a clamp to available stock is already
+     * explained by the "Max reached (N)" label beside the stepper.
+     */
+    const [cappedLines, setCappedLines] = useState<Record<string, boolean>>({});
 
     // FIX: Track whether the user has manually edited the amount tendered.
     // When true, we stop auto-syncing so their typed value is preserved.
@@ -673,16 +689,32 @@ export function CartPanel({
                                                                     return;
                                                                 }
                                                                 // (c) Commit on blur, including tab/click-away.
-                                                                onSetQuantity(
-                                                                    item.drug.id,
-                                                                    commitDraft(
-                                                                        sanitiseDraft(
-                                                                            qtyDraft[item.drug.id] ??
-                                                                                String(item.quantity)
-                                                                        ),
+                                                                (() => {
+                                                                    const raw = sanitiseDraft(
+                                                                        qtyDraft[item.drug.id] ??
+                                                                            String(item.quantity)
+                                                                    );
+                                                                    const committed = commitDraft(
+                                                                        raw,
                                                                         resolvedStock
-                                                                    )
-                                                                );
+                                                                    );
+                                                                    onSetQuantity(item.drug.id, committed);
+                                                                    // Only the 1000 ceiling is silent-unexpected: a
+                                                                    // clamp to available is already explained by the
+                                                                    // "Max reached (N)" label right beside it.
+                                                                    setCappedLines((prev) => {
+                                                                        const next = { ...prev };
+                                                                        if (
+                                                                            resolvedStock === undefined &&
+                                                                            Number(raw) > LINE_QUANTITY_CAP
+                                                                        ) {
+                                                                            next[item.drug.id] = true;
+                                                                        } else {
+                                                                            delete next[item.drug.id];
+                                                                        }
+                                                                        return next;
+                                                                    });
+                                                                })();
                                                                 qtyFocused.current = null;
                                                                 setQtyDraft((d) => {
                                                                     const { [item.drug.id]: _drop, ...rest } = d;
@@ -709,8 +741,8 @@ export function CartPanel({
                                                             }
                                                             aria-label={
                                                                 atStockLimit
-                                                                    ? `Increase quantity, limit reached: only ${resolvedStock} available`
-                                                                    : "Increase quantity"
+                                                                    ? `Increase quantity for ${item.drug.name}, limit reached: only ${resolvedStock} available`
+                                                                    : `Increase quantity for ${item.drug.name}`
                                                             }
                                                             className={`w-8 h-8 flex items-center justify-center hover:text-ink hover:bg-slate-100 transition-colors ${
                                                                 atStockLimit
@@ -743,6 +775,15 @@ export function CartPanel({
                                                     </button>
                                                 </div>
 
+                                                {cappedLines[item.drug.id] && (
+                                                    <p
+                                                        role="status"
+                                                        data-testid={`qty-cap-note-${item.drug.id}`}
+                                                        className="text-[11px] text-amber-600 mt-1"
+                                                    >
+                                                        Maximum {LINE_QUANTITY_CAP} per line
+                                                    </p>
+                                                )}
                                                 {/* Stock warning */}
                                                 {resolvedStock !== undefined && item.quantity > resolvedStock && (
                                                     <div className="flex items-center gap-2 mt-2.5 px-3 py-2 rounded-lg text-xs border bg-red-50 border-red-100 text-red-700">

@@ -272,7 +272,7 @@ describe("editing the quantity field", () => {
 
     it("+/- keep the field in step with the cart", () => {
         const { input, state } = setup({ quantity: 5, available: 113 });
-        const plus = screen.getByLabelText("Increase quantity");
+        const plus = screen.getByLabelText(/^Increase quantity/);
         fireEvent.click(plus);
         expect(state.quantity).toBe(6);
         fireEvent.click(screen.getByLabelText("Decrease quantity for Gebedol"));
@@ -288,7 +288,7 @@ describe("editing the quantity field", () => {
         const el = input();
         fireEvent.focus(el);
         fireEvent.change(el, { target: { value: "200" } });
-        fireEvent.click(screen.getByLabelText("Increase quantity"));
+        fireEvent.click(screen.getByLabelText(/^Increase quantity/));
         expect(state.quantity).toBe(6);
         fireEvent.blur(el);
         expect(onSetQuantity).not.toHaveBeenLastCalledWith("d1", 200);
@@ -301,5 +301,69 @@ describe("editing the quantity field", () => {
         const { view } = setup({ quantity: 20, available: 10 });
         expect(screen.getByText("Only 10 available (requested 20)")).toBeTruthy();
         view.unmount();
+    });
+});
+
+
+describe("leftovers: the 1000 cap is never silent", () => {
+    it("shows a note when an unknown-stock line is typed above 1000", () => {
+        const { input } = setup({ quantity: 1, available: undefined });
+        const el = input();
+        fireEvent.focus(el);
+        fireEvent.change(el, { target: { value: "5000" } });
+        fireEvent.blur(el);
+        expect(screen.getByTestId("qty-cap-note-d1").textContent).toContain(
+            "Maximum 1000 per line"
+        );
+    });
+
+    it("shows no note when the value is within the cap", () => {
+        const { input } = setup({ quantity: 1, available: undefined });
+        const el = input();
+        fireEvent.focus(el);
+        fireEvent.change(el, { target: { value: "500" } });
+        fireEvent.blur(el);
+        expect(screen.queryByTestId("qty-cap-note-d1")).toBeNull();
+    });
+
+    it("shows no note when the clamp is to available stock, not the cap", () => {
+        // 133 -> 113 is already explained by "Max reached (113)".
+        const { input } = setup({ quantity: 1, available: 113 });
+        const el = input();
+        fireEvent.focus(el);
+        fireEvent.change(el, { target: { value: "133" } });
+        fireEvent.blur(el);
+        expect(screen.queryByTestId("qty-cap-note-d1")).toBeNull();
+    });
+
+    it("clears the note once the cashier types a value within the cap", () => {
+        const { input } = setup({ quantity: 1, available: undefined });
+        const el = input();
+        fireEvent.focus(el);
+        fireEvent.change(el, { target: { value: "5000" } });
+        fireEvent.blur(el);
+        expect(screen.queryByTestId("qty-cap-note-d1")).toBeTruthy();
+
+        fireEvent.focus(input());
+        fireEvent.change(input(), { target: { value: "20" } });
+        fireEvent.blur(input());
+        expect(screen.queryByTestId("qty-cap-note-d1")).toBeNull();
+    });
+});
+
+describe("leftovers: the +/- buttons name the drug for screen readers", () => {
+    it("both buttons include the drug name", () => {
+        setup({ quantity: 1, available: 113 });
+        const plus = screen.getByLabelText("Increase quantity for Gebedol");
+        const minus = screen.getByLabelText("Decrease quantity for Gebedol");
+        expect(plus.getAttribute("aria-label")).toContain("Gebedol");
+        expect(minus.getAttribute("aria-label")).toContain("Gebedol");
+    });
+
+    it("the at-limit label still names the drug and the limit", () => {
+        setup({ quantity: 113, available: 113 });
+        expect(
+            screen.getByLabelText(/Increase quantity for Gebedol, limit reached/)
+        ).toBeTruthy();
     });
 });
