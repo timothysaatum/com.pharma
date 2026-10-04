@@ -1,7 +1,7 @@
 from app.db.base import Base
 from sqlalchemy import (
     String, Integer, Boolean, DateTime, Numeric, Text,
-    ForeignKey, Index, CheckConstraint, Date
+    ForeignKey, Index, CheckConstraint, Date, text
 )
 from app.models.db_types import UUID, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -341,6 +341,17 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
     # ==================== TABLE CONSTRAINTS ====================
     
     __table_args__ = (
+        # Declared here as well as in migration 6d967f66b097 so that
+        # `Base.metadata.create_all` — which is what the test suite builds its
+        # schema from — produces the same index a migrated database has. Without
+        # it the derived dispense count is index-backed in production and
+        # full-scanning in tests, which is the worst combination: the test passes
+        # and production is slow.
+        Index(
+            "ix_sales_prescription_id",
+            "prescription_id",
+            postgresql_where=text("prescription_id IS NOT NULL"),
+        ),
         CheckConstraint(
             "payment_method IN ('cash', 'card', 'mobile_money', 'insurance', 'credit', 'split')",
             name='check_payment_method'

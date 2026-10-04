@@ -588,6 +588,13 @@ export default function POSPage() {
             // Notify inventory page to refresh its counts
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
+            // A sale that consumed a refill changed the local prescriptions row
+            // (offline: inside the transaction; online: it has not yet, which is
+            // what the refill event arriving over sync will do). Emitting
+            // unconditionally would refetch the whole list on every cash sale.
+            if (payload.prescription_id) {
+                appEvents.emit("prescriptions:changed");
+            }
             } catch (err) {
             const shouldRecordOffline = shouldFallbackToOfflineSaleAfterError({
                 offlineError: isOfflineError(err),
@@ -607,6 +614,13 @@ export default function POSPage() {
                     setSuccessResult(result);
                     appEvents.emit("inventory:changed");
                     appEvents.emit("sales:changed");
+            // A sale that consumed a refill changed the local prescriptions row
+            // (offline: inside the transaction; online: it has not yet, which is
+            // what the refill event arriving over sync will do). Emitting
+            // unconditionally would refetch the whole list on every cash sale.
+            if (payload.prescription_id) {
+                appEvents.emit("prescriptions:changed");
+            }
                 } catch (offlineError) {
                     setCheckoutError(parseApiError(offlineError));
                 }

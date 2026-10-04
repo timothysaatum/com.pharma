@@ -7,6 +7,7 @@ import { customersApi, type CustomerQuickLookup } from "@/api/customers";
 import { drugApi } from "@/api/drugs";
 import { prescriptionsApi } from "@/api/prescriptions";
 import { localRead } from "@/lib/localRead";
+import { useAppEvent } from "@/lib/events";
 import { writeLocal } from "@/lib/localWrite";
 import { isBackendKnownUnreachable, isOfflineOrUnreachable, isOfflineError, parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
@@ -29,8 +30,18 @@ const STATUS_STYLE: Record<string, { label: string; cls: string; icon: React.Ele
 
 type PrescriptionRow = Prescription & {
   customer_name?: string | null;
+  /** Computed server-side. Absent offline: the local schema has no such column,
+   *  so `isExpired` falls back to comparing the date rather than leaving the
+   *  expiry styling permanently dead. */
   is_expired?: boolean;
 };
+
+/** Server truth when online, local comparison when offline. */
+function isExpired(rx: PrescriptionRow): boolean {
+  if (typeof rx.is_expired === "boolean") return rx.is_expired;
+  if (!rx.expiry_date) return false;
+  return new Date(rx.expiry_date).getTime() < Date.now();
+}
 
 const inputCls =
   "w-full h-10 px-3 rounded-lg border border-slate-200 text-sm text-ink bg-white " +
@@ -186,6 +197,19 @@ export default function PrescriptionsPage() {
     const timer = setTimeout(() => void load(), 250);
     return () => clearTimeout(timer);
   }, [load]);
+
+  // Refetch when a refill is consumed or a prescription changes anywhere on this
+  // device — including a sale made at the POS, and a `prescription_refill_used`
+  // event arriving over sync.
+  //
+  // Until P1 this page subscribed to nothing, and no prescription event type
+  // existed to subscribe to, so it kept showing the pre-sale refill count until
+  // someone pressed Refresh. Same shape as the product list's fix
+  // (DrugSearchPanel.tsx:294-316), minus the debounce: this page already
+  // debounces its own load by 250ms, and a refill is a single event per dispense,
+  // so a second debounce would only add latency.
+  useAppEvent("prescriptions:changed", () => void load());
+  useAppEvent("sales:changed", () => void load());
 
   const updateStatus = async (rx: PrescriptionRow, nextStatus: PrescriptionStatus) => {
     setUpdatingId(rx.id);
@@ -695,12 +719,27 @@ export default function PrescriptionsPage() {
                 </td>
                 <td className="px-6 py-4 text-slate-500">
                   <p>{formatDate(rx.issue_date)}</p>
-                  <p className={rx.is_expired ? "text-amber-700 text-xs font-semibold" : "text-xs text-slate-400"}>
+                  <p className={isExpired(rx) ? "text-amber-700 text-xs font-semibold" : "text-xs text-slate-400"}>
                     Expires {formatDate(rx.expiry_date)}
                   </p>
                 </td>
                 <td className="px-6 py-4 font-semibold text-slate-700">
                   {rx.refills_remaining} / {rx.refills_allowed}
+                  {/* Had no render site anywhere in the app before this change,
+                      even though the server wrote it on every dispense. */}
+                  {rx.last_refill_date && (
+                    <p className="text-xs font-normal text-slate-400">
+                      Last {formatDate(rx.last_refill_date)}
+                    </p>
+                  )}
+                </td>
+                <td className="px-6 py-4 text-slate-500">
+                  {/* Derived from linked sales, so it cannot drift the way the
+                      refills counter did. */}
+                  <span className="font-semibold text-slate-700">
+                    {rx.dispensed_count ?? 0}
+                  </span>
+                  <span className="text-xs text-slate-400"> sale(s)</span>
                 </td>
                 <td className="px-6 py-4">
                   <div className="flex flex-col items-start gap-1">

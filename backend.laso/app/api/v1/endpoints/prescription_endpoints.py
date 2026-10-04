@@ -13,8 +13,8 @@ Features:
 
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, text, bindparam, false
-from typing import Optional, List
+from sqlalchemy import select, and_, or_, text, bindparam, false, func
+from typing import Dict, Optional, List
 from datetime import date, datetime, timezone
 import uuid
 
@@ -24,6 +24,7 @@ from app.models.user.user_model import User
 from app.models.prescriptions.prescription_model import Prescription
 from app.models.customer.customer_model import Customer
 from app.models.pharmacy.pharmacy_model import Organization
+from app.models.sales.sales_model import Sale
 from app.schemas.sales_schemas import SaleCreate
 from app.schemas.base_schemas import TimestampSchema, SyncSchema
 from app.utils.pagination import PaginatedResponse, Paginator, PaginationParams
@@ -153,6 +154,16 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
     
     issue_date: date
     expiry_date: date
+    dispensed_count: int = Field(
+        default=0,
+        description="Completed sales linked to this prescription. Derived, never stored.",
+    )
+    last_refill_date: Optional[date] = Field(
+        default=None, description="Date of the most recent refill recorded server-side"
+    )
+    prescriber_address: Optional[str] = Field(
+        default=None, description="The prescriber's facility / practice address"
+    )
     is_expired: bool = Field(..., description="True if expiry_date < today")
     
     medications: List[dict]
@@ -434,6 +445,34 @@ async def delete_prescription(
     return await cancel_prescription(prescription_id, db, current_user)
 
 
+async def _dispensed_counts(
+    db: AsyncSession, prescription_ids: List[uuid.UUID]
+) -> Dict[uuid.UUID, int]:
+    """How many times each prescription was actually dispensed.
+
+    DERIVED, not stored. The mutable `refills_remaining` counter drifts whenever
+    a dispense happens where the counter is not authoritative — which is exactly
+    what P1 was: the server never counted an offline dispense, so the page showed
+    a prescription as untouched. A count of the linked sales cannot drift that
+    way, because the sale row is the one thing every path agrees on.
+
+    One grouped query for the whole page, never per row: this is the busiest table
+    in the database and `sales.prescription_id` only became indexed in migration
+    6d967f66b097. N+1 here would be a full scan of `sales` per prescription row.
+    """
+    if not prescription_ids:
+        return {}
+    rows = await db.execute(
+        select(Sale.prescription_id, func.count(Sale.id))
+        .where(Sale.prescription_id.in_(prescription_ids))
+        # A voided or draft sale is not a dispense. Matches the counter, which is
+        # only touched by completed sales.
+        .where(Sale.status == "completed")
+        .group_by(Sale.prescription_id)
+    )
+    return {row[0]: int(row[1]) for row in rows}
+
+
 @router.get(
     "/",
     response_model=PaginatedResponse[PrescriptionResponse],
@@ -544,12 +583,15 @@ async def list_prescriptions(
             str(row.loser_id): row for row in audit_result
         }
 
+    dispensed = await _dispensed_counts(db, [p.id for p in result.items])
+
     items = [
         PrescriptionResponse(
             **{
                 **p.__dict__,
                 "is_expired": p.expiry_date < date.today(),
                 "customer_name": _customer_display_name(customers.get(p.customer_id)),
+                "dispensed_count": dispensed.get(p.id, 0),
                 "renumbered_from": getattr(renumber_audits.get(str(p.id)), "old_business_key", None),
                 "renumbered_to": getattr(renumber_audits.get(str(p.id)), "new_business_key", None),
                 "renumbered_at": getattr(renumber_audits.get(str(p.id)), "renumbered_at", None),

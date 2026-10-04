@@ -305,6 +305,8 @@ function toPrescription(row: Record<string, unknown>): any {
     medications: parseJsonArray(row.medications),
     refills_allowed: toNumber(row.refills_allowed),
     refills_remaining: toNumber(row.refills_remaining),
+    dispensed_count: toNumber(row.dispensed_count),
+    is_expired: row.is_expired === true || row.is_expired === 1,
   };
 }
 
@@ -1401,8 +1403,25 @@ async searchPrescriptions(
     const effectivePage = params.page ?? page;
     const effectivePageSize = params.page_size ?? page_size;
     const offset = (effectivePage - 1) * effectivePageSize;
+    // dispensed_count comes from a correlated subquery rather than a second
+    // round trip, so the list stays one query on this path.
+    //
+    // It MUST agree with the server's `_dispensed_counts`
+    // (prescription_endpoints.py): same source table, same
+    // `status = 'completed'` filter, same per-prescription grouping. If the two
+    // ever diverge, the same prescription shows a different dispense count
+    // depending on whether the device happens to be online, which is the whole
+    // failure mode the offline-first architecture is meant to avoid.
+    //
+    // No local index backs this. `localRead.searchPrescriptions` already
+    // full-scans `prescriptions` (the table has no indexes at all), and the
+    // correlated subquery is evaluated once per returned row rather than once per
+    // row in the table, so it is bounded by page_size.
     const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name${auditSelect}
+      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name,
+              (SELECT COUNT(*) FROM sales s
+                WHERE s.prescription_id = p.id AND s.status = 'completed') as dispensed_count
+       ${auditSelect}
        FROM prescriptions p
        LEFT JOIN customers c ON c.id = p.customer_id
        ${auditJoin}

@@ -21,6 +21,11 @@ describe("offline prescription historical-number search", () => {
         medications TEXT, refills_allowed INTEGER, refills_remaining INTEGER,
         status TEXT, expiry_date TEXT, created_at TEXT
       );
+      -- searchPrescriptions derives dispensed_count from this table (P1), so the
+      -- fixture has to have it even though this test does not assert on it.
+      CREATE TABLE sales (
+        id TEXT PRIMARY KEY, prescription_id TEXT, status TEXT
+      );
       CREATE TABLE crr_renumber_audit (
         id INTEGER PRIMARY KEY, table_name TEXT, winner_id TEXT, loser_id TEXT,
         old_business_key TEXT, new_business_key TEXT, renumbered_at TEXT
