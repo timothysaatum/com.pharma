@@ -13,6 +13,7 @@ import DrugListPage from './DrugListPage';
 import InventoryPage from './InventoryPage';
 import PurchasesPage from './PurchasesPage';
 import ContractsPage from './ContractsPage';
+import PrescriptionsPage from './PrescriptionsPage';
 
 export default function AdminPage() {
   const user = useAuthStore((state) => state.user);
@@ -21,11 +22,13 @@ export default function AdminPage() {
   const [activeTab, setActiveTab] = useState<AdminTabId>(() => parseAdminTab(tab));
 
   useEffect(() => {
+    // No redirect for any tab, including 'prescriptions'. There used to be one:
+    // the tab existed in ADMIN_TABS but navigated away to /prescriptions, so
+    // clicking it silently left Admin. PrescriptionsPage already satisfies the tab
+    // contract — its root is `flex flex-col h-full bg-surface`, identical to the
+    // four pages that render below, and it uses no router hooks — so it renders
+    // in place like the others.
     const nextTab = parseAdminTab(tab);
-    if (nextTab === 'prescriptions') {
-      navigate('/prescriptions', { replace: true });
-      return;
-    }
     setActiveTab(nextTab);
     if (tab && tab !== nextTab) {
       navigate(`/admin/${nextTab}`, { replace: true });
@@ -56,10 +59,6 @@ export default function AdminPage() {
   };
 
   const selectTab = (nextTab: AdminTabId) => {
-    if (nextTab === 'prescriptions') {
-      navigate('/prescriptions');
-      return;
-    }
     setActiveTab(nextTab);
     navigate(nextTab === 'drugs' ? '/admin' : `/admin/${nextTab}`);
   };
@@ -90,6 +89,7 @@ export default function AdminPage() {
         {activeTab === 'inventory' && <InventoryPage />}
         {activeTab === 'purchases' && <PurchasesPage />}
         {activeTab === 'contracts' && <ContractsPage />}
+        {activeTab === 'prescriptions' && <PrescriptionsPage />}
       </div>
     </div>
   );
