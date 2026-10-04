@@ -20,6 +20,7 @@ import {
     Receipt, Banknote, Tag, Search, UserCheck, X, Loader2,
 } from "lucide-react";
 import type { AvailableContract } from "@/api/contracts";
+import { pickDefaultContract } from "@/lib/pickDefaultContract";
 import {
     getLineStockState,
     stockLabelClass,
@@ -423,8 +424,6 @@ export function CartPanel({
     onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
 }: CartPanelProps) {
-    const autoSelectedRef = useRef(false);
-
     // ── Quantity draft (per cart line) ──────────────────────────────────
     //
     // The committed quantity lives in the cart; while the field has focus it
@@ -454,12 +453,62 @@ export function CartPanel({
     // so the field tracks the total again on the next fresh session.
     const amountManuallyEdited = useRef(false);
 
+    /**
+     * Always keep a contract selected.
+     *
+     * THE BUG THIS REPLACES
+     * --------------------
+     * The previous version latched with `autoSelectedRef`, set to true on the
+     * first successful selection and never reset anywhere. `contract` was in the
+     * deps, so the effect DID re-run after a cart reset — but the latch
+     * short-circuited it, so nothing was re-selected. Observed 2026-10-04: the
+     * list loaded and held "STANDARD PRICE (Standard)", the cashier completed
+     * sales, `clearCart()` nulled `contract`, and the picker sat on
+     * "— Select contract —" with "Select a price contract" and a disabled sale
+     * button for the rest of the session. Earlier in the same session it had
+     * auto-selected, which is what made it look intermittent.
+     *
+     * THE RULE, IN ONE PLACE
+     * ----------------------
+     * Select the default when there is nothing valid selected. "Valid" means the
+     * selected id is still in the current list, which covers every trigger with
+     * one condition instead of one condition per trigger:
+     *
+     *   - initial load          contracts go [] -> [x], nothing selected
+     *   - contract list change  a new list arrives
+     *   - cart reset            CLEAR_CART -> INITIAL_STATE -> contract null.
+     *                           Covers "New Sale", the success modal's close,
+     *                           Clear, and the branch-change clear, because they
+     *                           all dispatch the same action.
+     *   - branch change         both of the above
+     *   - selection no longer offered  selected id is absent from the list
+     *
+     * It goes through `onSetContract`, the same dispatch the picker's onChange
+     * uses, so the payment-method and amountPaid side effects in
+     * `SET_CONTRACT` (useCart.ts:189-215) still happen. Firing a bespoke
+     * "just set the id" action here would silently skip the insurance ->
+     * cash reset and leave the cashier on a payment method the new contract
+     * does not accept.
+     *
+     * A valid selection is never overridden, so a contract the cashier chose for
+     * this cart survives re-renders and list refreshes; it only gives way when
+     * the cart resets or the contract stops being offered.
+     *
+     * An empty list selects nothing. That is also what keeps a FAILED load
+     * (POSPage sets kind:'error'/'offline'/'empty' only when the list came back
+     * empty) from quietly auto-picking something: no contracts, no selection,
+     * error band stays, and Retry re-runs this once the list arrives.
+     */
     useEffect(() => {
-        if (!autoSelectedRef.current && contracts.length > 0 && !contract) {
-            const def = contracts.find((c) => c.is_default) ?? contracts[0];
-            onSetContract(def);
-            autoSelectedRef.current = true;
-        }
+        if (contracts.length === 0) return;
+        // Compare by id, not by object identity: a reload hands back new objects
+        // for the same contracts, and that must not read as "selection changed".
+        const stillOffered =
+            contract !== null &&
+            contract !== undefined &&
+            contracts.some((c) => c.id === contract.id);
+        if (stillOffered) return;
+        onSetContract(pickDefaultContract(contracts));
     }, [contracts, contract, onSetContract]);
 
     // FIX: Reset the manual-edit flag when the payment method changes or the
@@ -835,6 +884,11 @@ export function CartPanel({
                                 <SectionLabel icon={Tag}>Price Contract</SectionLabel>
                                 <div className="relative">
                                     <select
+                                        // The visible SectionLabel is a sibling, not an
+                                        // associated <label>, so this combobox had NO
+                                        // accessible name — a screen reader announced
+                                        // two anonymous dropdowns in the checkout form.
+                                        aria-label="Price contract"
                                         value={contract?.id ?? ""}
                                         onChange={(e) => {
                                             const c = contracts.find((x) => x.id === e.target.value) ?? null;
@@ -847,7 +901,16 @@ export function CartPanel({
                                             <option>Loading…</option>
                                         ) : (
                                             <>
-                                                <option value="">— Select contract —</option>
+                                                {/*
+                                                  (e) The placeholder is a dead end: picking it clears
+                                                  the selection, which puts the cart back into
+                                                  "Select a price contract". So it exists only when
+                                                  there is nothing to select, and the rule above
+                                                  guarantees a value otherwise.
+                                                */}
+                                                {contracts.length === 0 && (
+                                                    <option value="">— Select contract —</option>
+                                                )}
                                                 {contracts.map((c) => (
                                                     <option key={c.id} value={c.id}>{c.display}</option>
                                                 ))}
