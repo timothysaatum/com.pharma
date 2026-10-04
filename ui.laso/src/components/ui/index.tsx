@@ -256,3 +256,35 @@ export const Badge = ({
         </span>
     );
 };
+/**
+ * A persistent label for a form control.
+ *
+ * Exists because most inputs in the prescription forms were placeholder-only.
+ * A placeholder is not a label: it disappears on the first keystroke, so once the
+ * field has a value the control is anonymous. Two `<input type="date">` fields
+ * had no text at all, so the only thing distinguishing "issue" from "expiry" was
+ * their position in a grid. A `title` attribute is not a label either — it only
+ * shows on hover, which the touch kiosk this app ships as never produces.
+ *
+ * `htmlFor` is required so clicking the label focuses the control and screen
+ * readers announce it; an unassociated label helps neither.
+ */
+export const FieldLabel = ({
+    htmlFor,
+    children,
+    className,
+}: {
+    htmlFor: string;
+    children: React.ReactNode;
+    className?: string;
+}) => (
+    <label
+        htmlFor={htmlFor}
+        className={cn(
+            "block text-[11px] font-semibold text-slate-500 mb-1",
+            className
+        )}
+    >
+        {children}
+    </label>
+);

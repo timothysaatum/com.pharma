@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FieldLabel } from "@/components/ui";
 import {
   AlertTriangle, CheckCircle2, Clock, Edit2, FileText, Loader2,
   Plus, RefreshCw, Search, Trash2, X, XCircle,
@@ -42,6 +43,7 @@ function isExpired(rx: PrescriptionRow): boolean {
   if (!rx.expiry_date) return false;
   return new Date(rx.expiry_date).getTime() < Date.now();
 }
+
 
 const inputCls =
   "w-full h-10 px-3 rounded-lg border border-slate-200 text-sm text-ink bg-white " +
@@ -131,6 +133,22 @@ export default function PrescriptionsPage() {
   const [prescriberName, setPrescriberName] = useState("");
   const [prescriberLicense, setPrescriberLicense] = useState("");
   const [prescriberPhone, setPrescriberPhone] = useState("");
+  /**
+   * The prescriber's own place of work (P2).
+   *
+   * Reuses the long-plumbed `prescriber_address` column rather than adding a
+   * `prescriber_facility` one. That column already exists on the server model,
+   * both pydantic schemas, the response schema, both projectors' updatable
+   * whitelists, the legacy sync whitelist, the local DDL and the envelope — it
+   * was simply hardcoded to `null` by both forms and had no UI at all.
+   *
+   * Named "facility" in the UI on purpose, with the label spelling out whose it
+   * is: in this codebase "facility" already means our own dispensing branch
+   * (`prescriptions.branch_id` is commented "Branch/facility that created/owns
+   * this prescription"), so an unqualified label would invite clerks to record
+   * the wrong thing.
+   */
+  const [prescriberFacility, setPrescriberFacility] = useState("");
   const [issueDate, setIssueDate] = useState(today);
   const [expiryDate, setExpiryDate] = useState(() => addDays(30));
   const [refillsAllowed, setRefillsAllowed] = useState(0);
@@ -292,6 +310,7 @@ export default function PrescriptionsPage() {
     setPrescriberName(rx.prescriber_name);
     setPrescriberLicense(rx.prescriber_license ?? "");
     setPrescriberPhone(rx.prescriber_phone ?? "");
+    setPrescriberFacility(rx.prescriber_address ?? "");
     setIssueDate(rx.issue_date);
     setExpiryDate(rx.expiry_date);
     setRefillsAllowed(rx.refills_allowed);
@@ -434,6 +453,7 @@ export default function PrescriptionsPage() {
     setPrescriberName("");
     setPrescriberLicense("");
     setPrescriberPhone("");
+    setPrescriberFacility("");
     setIssueDate(today());
     setExpiryDate(addDays(30));
     setRefillsAllowed(0);
@@ -531,6 +551,8 @@ export default function PrescriptionsPage() {
         // form hands to writeLocal is already canonical.
         prescriber_license: prescriberLicense.trim() || null,
         prescriber_phone: prescriberPhone.trim() || null,
+        // The prescriber's facility (P2) — see the state declaration.
+        prescriber_address: prescriberFacility.trim() || null,
         issue_date: issueDate,
         expiry_date: expiryDate,
         medications: cleanedMedications,
@@ -575,7 +597,6 @@ export default function PrescriptionsPage() {
           id,
           branch_id: activeBranchId ?? "",
           organization_id: user?.organization_id ?? "",
-          prescriber_address: null,
           diagnosis: null,
           special_instructions: null,
           refills_remaining: refillsAllowed,
@@ -720,6 +741,13 @@ export default function PrescriptionsPage() {
                 <td className="px-6 py-4">
                   <p className="font-semibold text-slate-700">{rx.prescriber_name}</p>
                   <p className="text-xs text-slate-400">{rx.prescriber_license || "—"}</p>
+                  {/* The prescriber's facility (P2). Labelled inline because the
+                      column header just says "Prescriber". */}
+                  {rx.prescriber_address && (
+                    <p className="text-xs text-slate-400 truncate" title={rx.prescriber_address}>
+                      {rx.prescriber_address}
+                    </p>
+                  )}
                 </td>
                 <td className="px-6 py-4 text-slate-500">
                   <p>{formatDate(rx.issue_date)}</p>
@@ -859,12 +887,44 @@ export default function PrescriptionsPage() {
               </div>
 
               <div className="grid grid-cols-2 gap-3">
-                <input value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="Prescription number *" />
-                <input value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="Prescriber name *" />
-                <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License number (optional)" />
-                <input value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="Prescriber phone" />
-                <input type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
-                <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />
+                <div>
+                  <FieldLabel htmlFor="rx-number">Prescription number *</FieldLabel>
+                  <input id="rx-number" value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="e.g. RX-2026-0042" />
+                </div>
+                <div>
+                  <FieldLabel htmlFor="rx-prescriber">Prescriber name *</FieldLabel>
+                  <input id="rx-prescriber" value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="e.g. Dr. Ama Boateng" />
+                </div>
+                <div>
+                  <FieldLabel htmlFor="rx-license">License number (optional)</FieldLabel>
+                  <input id="rx-license" value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="e.g. MED-12345" />
+                </div>
+                <div>
+                  <FieldLabel htmlFor="rx-phone">Prescriber phone (optional)</FieldLabel>
+                  <input id="rx-phone" value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="e.g. 024 555 1234" />
+                </div>
+                {/* The prescriber's place of work, NOT our dispensing branch.
+                    In this codebase "facility" already means the latter (see the
+                    comment on prescriptions.branch_id), so the label is explicit
+                    to avoid a clerk recording the wrong thing. */}
+                <div className="col-span-2">
+                  <FieldLabel htmlFor="rx-facility">Prescriber&apos;s facility (optional)</FieldLabel>
+                  <input
+                    id="rx-facility"
+                    value={prescriberFacility}
+                    onChange={(e) => setPrescriberFacility(e.target.value)}
+                    className={inputCls}
+                    placeholder="Hospital or clinic the prescriber works at, e.g. Korle Bu Teaching Hospital"
+                  />
+                </div>
+                <div>
+                  <FieldLabel htmlFor="rx-issue">Issue date *</FieldLabel>
+                  <input id="rx-issue" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
+                </div>
+                <div>
+                  <FieldLabel htmlFor="rx-expiry">Expiry date *</FieldLabel>
+                  <input id="rx-expiry" type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />
+                </div>
               </div>
 
               <div className="space-y-2">
@@ -951,9 +1011,26 @@ export default function PrescriptionsPage() {
                 ))}
               </div>
 
-              <div className="grid grid-cols-[1fr_120px] gap-3">
-                <input value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Notes" />
-                <input type="number" min={0} max={10} value={refillsAllowed} onChange={(e) => setRefillsAllowed(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} className={inputCls} title="Refills allowed" />
+              <div className="grid grid-cols-[1fr_140px] gap-3">
+                <div>
+                  <FieldLabel htmlFor="rx-notes">Notes (optional)</FieldLabel>
+                  <input id="rx-notes" value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Anything the pharmacist should know" />
+                </div>
+                {/* This was the bare "0" beside Notes, labelled only by a hover
+                    `title`. It is the DENOMINATOR of the Refills column, so a
+                    mis-entry is invisible until someone reads the list. */}
+                <div>
+                  <FieldLabel htmlFor="rx-refills">Refills allowed (0–10)</FieldLabel>
+                  <input
+                    id="rx-refills"
+                    type="number"
+                    min={0}
+                    max={10}
+                    value={refillsAllowed}
+                    onChange={(e) => setRefillsAllowed(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                    className={inputCls}
+                  />
+                </div>
               </div>
 
               {createError && (

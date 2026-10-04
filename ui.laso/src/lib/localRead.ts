@@ -1371,6 +1371,7 @@ async searchPrescriptions(
       qualifiers.push(`(
         LOWER(p.prescription_number) LIKE $${likeIndex} OR
         LOWER(p.prescriber_name) LIKE $${likeIndex} OR
+        LOWER(p.prescriber_address) LIKE $${likeIndex} OR
         EXISTS (
           SELECT 1 FROM crr_renumber_audit history
           WHERE history.table_name = 'prescriptions'

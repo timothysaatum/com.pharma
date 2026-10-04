@@ -18,7 +18,8 @@ describe("offline prescription historical-number search", () => {
       CREATE TABLE prescriptions (
         id TEXT PRIMARY KEY, organization_id TEXT, branch_id TEXT,
         prescription_number TEXT, customer_id TEXT, prescriber_name TEXT,
-        medications TEXT, refills_allowed INTEGER, refills_remaining INTEGER,
+        medications TEXT, prescriber_address TEXT,
+        refills_allowed INTEGER, refills_remaining INTEGER,
         status TEXT, expiry_date TEXT, created_at TEXT
       );
       -- searchPrescriptions derives dispensed_count from this table (P1), so the
@@ -33,7 +34,7 @@ describe("offline prescription historical-number search", () => {
       INSERT INTO customers VALUES ('customer-1', 'Ada', 'Patient');
       INSERT INTO prescriptions VALUES (
         'rx-loser', 'org-1', 'branch-1', 'RX-7-C', 'customer-1', 'Dr Example',
-        '[]', 2, 2, 'active', '2027-01-01', '2026-01-02'
+        '[]', NULL, 2, 2, 'active', '2027-01-01', '2026-01-02'
       );
       INSERT INTO crr_renumber_audit VALUES (
         1, 'prescriptions', 'rx-winner', 'rx-loser',

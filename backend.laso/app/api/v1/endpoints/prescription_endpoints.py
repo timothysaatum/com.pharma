@@ -489,7 +489,7 @@ async def list_prescriptions(
     customer_id: Optional[uuid.UUID] = Query(None),
     status_filter: Optional[str] = Query(None, description="Filter by status: active, filled, expired, cancelled"),
     include_expired: bool = Query(True),
-    search: Optional[str] = Query(None, description="Search prescription number, prescriber, or customer name"),
+    search: Optional[str] = Query(None, description="Search prescription number, prescriber, prescriber facility, or customer name"),
     branch_id: Optional[uuid.UUID] = Query(None, description="Filter by specific branch"),
 ):
     """
@@ -544,6 +544,11 @@ async def list_prescriptions(
                 or_(
                     Prescription.prescription_number.ilike(term),
                     Prescription.prescriber_name.ilike(term),
+                    # The prescriber's facility (P2). In the SAME or_() as
+                    # prescriber_name so the server query and the local one in
+                    # localRead.searchPrescriptions stay equivalent — the same
+                    # search string must return the same rows online or offline.
+                    Prescription.prescriber_address.ilike(term),
                     Customer.first_name.ilike(term),
                     Customer.last_name.ilike(term),
                     Customer.phone.ilike(term),
