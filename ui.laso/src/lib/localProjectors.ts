@@ -22,8 +22,21 @@ import { getDb, setVersionVector, markEventApplied } from "@/lib/localDb";
 import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
 import { refreshQuantities, refreshQuantitiesForPairs } from "@/lib/sellableQty";
+import { appEvents } from "@/lib/events";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
+
+/**
+ * Tell the UI the local prescriptions read model moved.
+ *
+ * Without this the Prescriptions page had no way to learn that a refill had been
+ * consumed: it subscribes to nothing, and the event type did not even exist. The
+ * `reason` is accepted and currently ignored by the bus (it carries no payload);
+ * it is here so the call site documents itself at the point of the write.
+ */
+function emitPrescriptionsChanged(): void {
+  appEvents.emit("prescriptions:changed");
+}
 
 // ── Dispatch ──────────────────────────────────────────────────────────────
 
@@ -457,6 +470,7 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
       now,
     ]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
@@ -482,6 +496,7 @@ async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
     `UPDATE prescriptions SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
     [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
@@ -490,21 +505,99 @@ async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
     "UPDATE prescriptions SET status = 'cancelled', updated_at = $1 WHERE id = $2",
     [now, String(e.aggregate_id)]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionRefillUsed(db: Db, e: EventEnvelope): Promise<void> {
   // Guarded: `refills_remaining - 1` is a raw decrement, so a replay would
   // consume a second refill.
+  //
+  // A device that made the sale offline has ALREADY applied this decrement
+  // locally, in the same transaction that recorded the marker in
+  // `applied_events` (offlineSalesManager.ts). So the skip below is what stops
+  // the originating device from decrementing twice when the server's echo of its
+  // own dispense comes back over the next sync pull. That is the whole reason the
+  // marker is written there rather than after the commit.
   if (await shouldSkipReplay(e)) return;
+
   const now = e.authored_at ?? new Date().toISOString();
-  await db.execute(
-    `UPDATE prescriptions
-        SET refills_remaining = MAX(0, refills_remaining - 1),
-            updated_at = $1
-      WHERE id = $2`,
-    [now, String(e.aggregate_id)]
-  );
+  const p = e.payload ?? {};
+
+  // The server sends ABSOLUTE post-state, so a device converges on the server's
+  // number instead of re-deriving it. Every key is read defensively: this event
+  // type has existed in the projectors for a long time without a single emitter,
+  // so events already sitting in a device outbox carry none of these keys, and a
+  // hard subscript would throw and abort the projection.
+  const absoluteRemaining = toOptionalNumber(p.refills_remaining);
+  const absoluteStatus = typeof p.status === "string" ? p.status : null;
+  const lastRefillDate =
+    typeof p.last_refill_date === "string" && p.last_refill_date.length > 0
+      ? p.last_refill_date
+      : now.slice(0, 10);
+  const verifiedBy =
+    typeof p.verified_by === "string" && p.verified_by.length > 0 ? p.verified_by : null;
+  const verifiedAt =
+    typeof p.verified_at === "string" && p.verified_at.length > 0 ? p.verified_at : now;
+
+  if (absoluteRemaining !== null) {
+    // Absolute path. `status` comes from the server when it sent one; when it did
+    // not, COALESCE falls back to setting 'filled' at zero and otherwise LEAVES
+    // the local status alone. The server's own relative path uses
+    // `CASE WHEN refills_remaining <= 1 THEN 'filled' ELSE status END`
+    // (projectors/prescription.py:320-347), which preserves a non-active status;
+    // the older device SQL set 'active' unconditionally and would resurrect a
+    // prescription this device had cancelled while the server still had it
+    // active.
+    const clamped = Math.max(0, absoluteRemaining);
+    await db.execute(
+      `UPDATE prescriptions
+          SET refills_remaining = $1,
+              status = COALESCE($2, CASE WHEN $1 <= 0 THEN 'filled' ELSE status END),
+              last_refill_date = $3,
+              verified_by = $4,
+              verified_at = $5,
+              updated_at = $6
+        WHERE id = $7`,
+      [
+        clamped,
+        absoluteStatus,
+        lastRefillDate,
+        verifiedBy,
+        verifiedAt,
+        now,
+        String(e.aggregate_id),
+      ]
+    );
+  } else {
+    // Relative path, for an event with no post-state. Mirrors the server's
+    // `_apply_refill_used`, including its `IN ('active','filled')` guard.
+    await db.execute(
+      `UPDATE prescriptions
+          SET refills_remaining = MAX(0, refills_remaining - 1),
+              status = CASE WHEN refills_remaining <= 1 THEN 'filled' ELSE status END,
+              last_refill_date = $1,
+              verified_by = COALESCE($2, verified_by),
+              verified_at = COALESCE($3, verified_at),
+              updated_at = $4
+        WHERE id = $5
+          AND status IN ('active', 'filled')
+          AND refills_remaining > 0`,
+      [lastRefillDate, verifiedBy, verifiedAt, now, String(e.aggregate_id)]
+    );
+  }
+
   await recordGuardedApply(e);
+  emitPrescriptionsChanged();
+}
+
+/** Parse a number that may arrive as a number or a numeric string. */
+function toOptionalNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 // ── Price Contract projectors ──────────────────────────────────────────────
