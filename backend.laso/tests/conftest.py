@@ -25,6 +25,40 @@ from app.models.customer.customer_model import Customer
 
 DATABASE_URL_TEST = os.environ["DATABASE_URL"]
 
+
+def _assert_not_production_database(url: str) -> None:
+    """Refuse to run the suite against the live clinic database.
+
+    The `db` fixture below runs `DROP SCHEMA IF EXISTS public CASCADE` on every
+    PostgreSQL target. That is correct for a disposable cluster and catastrophic
+    for production, and nothing in the URL distinguishes the two by itself.
+
+    This has already happened: atlasdb carried 9 `prescription_created` events
+    using fixture UUIDs (aggregate `aaaaaaaa-…`, author `44444444…`), which can
+    only have come from the integration suite running against it.
+
+    So the fence is explicit rather than clever: name the database, and refuse
+    anything that is not obviously a throwaway.
+    """
+    if not url.startswith("postgresql"):
+        return
+    # The database name is the last path segment before any query string.
+    db_name = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1].lower()
+    forbidden = {"atlasdb", "postgres", "template0", "template1"}
+    if db_name in forbidden:
+        raise RuntimeError(
+            f"REFUSING TO RUN: the test database is named {db_name!r}. "
+            "tests/conftest.py drops the public schema on every PostgreSQL "
+            "target, so this would destroy live data. Point "
+            "TEST_DATABASE_URL at a disposable cluster, e.g. "
+            "postgresql+asyncpg://postgres@/rx_impl?host=/tmp/... "
+            "(see /tmp/pharmacare-investigation/pg.sh)."
+        )
+
+
+_assert_not_production_database(DATABASE_URL_TEST)
+
+
 @pytest_asyncio.fixture(scope="function")
 async def db():
     engine_kwargs = {}
