@@ -45,6 +45,9 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
+from app.services.sync.eventlog.refill_event_id import (
+    prescription_refill_used_event_id,
+)
 from app.services.sync.eventlog.stock_emitter import (
     StockEventEmitter,
     publish_stock_change,
@@ -1132,6 +1135,9 @@ class SalesService:
             # ------------------------------------------------------------------
             # 18. Prescription refill decrement
             # ------------------------------------------------------------------
+            # Post-state snapshot for the refill event emitted at step 20. Kept as
+            # a plain dict taken while the ORM object is still in the session.
+            _rx_refill_snapshot: Optional[Dict[str, Any]] = None
             if prescription:
                 prescription.refills_remaining -= 1
                 prescription.last_refill_date   = date.today()
@@ -1142,6 +1148,27 @@ class SalesService:
                 )
                 prescription.updated_at = datetime.now(timezone.utc)
                 prescription.mark_as_pending_sync()
+
+                # Snapshot the post-state while the ORM object is still in the
+                # session, for the event payload below (step 20).
+                _rx_refill_snapshot = {
+                    "refills_remaining": prescription.refills_remaining,
+                    "refills_allowed": prescription.refills_allowed,
+                    "status": prescription.status,
+                    "last_refill_date": (
+                        prescription.last_refill_date.isoformat()
+                        if prescription.last_refill_date
+                        else None
+                    ),
+                    "verified_by": (
+                        str(prescription.verified_by) if prescription.verified_by else None
+                    ),
+                    "verified_at": (
+                        prescription.verified_at.isoformat()
+                        if prescription.verified_at
+                        else None
+                    ),
+                }
 
             # ------------------------------------------------------------------
             # 19. Loyalty points + tier recalculation
@@ -1275,6 +1302,58 @@ class SalesService:
             authored_by=user.id,
             branch_id=sale_data.branch_id,
         )
+
+        # ----------------------------------------------------------------------
+        # 20. Prescription refill event
+        # ------------------------------------------------------------------
+        # The decrement at step 18 changed a row every device caches, and until
+        # this existed nothing told them. The device's Prescriptions page and the
+        # POS pre-flight both read the LOCAL prescriptions row, so after an online
+        # sale the cart showed the pre-sale refill count and the page showed the
+        # prescription as untouched. That was P1.
+        #
+        # Emitted here, in the same transaction as the decrement and immediately
+        # after sale_created, so the row change and the event that announces it
+        # commit or roll back together. A failed append aborts the sale, which is
+        # the same trade sale_created already makes.
+        #
+        # Emitting absolute post-state (not a delta) is deliberate: a device that
+        # receives this twice, or receives it after having already applied its own
+        # offline decrement, converges on the server's number instead of drifting.
+        if _rx_refill_snapshot is not None and prescription is not None:
+            await StockEventEmitter.emit_in_transaction(
+                db,
+                org_id=sale.organization_id,
+                event_type="prescription_refill_used",
+                aggregate_type=AggregateType.PRESCRIPTION,
+                aggregate_id=prescription.id,
+                # Derived from the sale id, never random: one dispense must yield
+                # exactly one event id or the counter drops twice.
+                event_id=prescription_refill_used_event_id(prescription.id, sale.id),
+                payload={
+                    "prescription_id": str(prescription.id),
+                    "sale_id": str(sale.id),
+                    "sale_number": sale_number,
+                    "organization_id": str(sale.organization_id),
+                    "branch_id": str(sale_data.branch_id) if sale_data.branch_id else None,
+                    # Absolute post-state.
+                    **_rx_refill_snapshot,
+                    # How this dispense reached the server, so a reader can tell an
+                    # online dispense from one replayed off a device.
+                    "source": "online_sale",
+                    "over_dispensed": False,
+                },
+                authored_by=user.id,
+                branch_id=sale_data.branch_id,
+                # No `dependencies`: entries must be 26-char ULIDs
+                # (event_envelope.py:101) and a sale id is a UUID, so the sale
+                # cannot be named here at all. Ordering does not need it — this
+                # event is appended after sale_created so it carries a higher seq,
+                # and a device applies the log in seq order. Dependencies exist to
+                # park a client event whose FK target has not arrived yet, which
+                # does not apply: the prescription row is already on the server,
+                # mutated above in this same transaction.
+            )
 
         # ----------------------------------------------------------------------
         # 21. Commit — outside the savepoint context
