@@ -290,7 +290,7 @@ export default function PrescriptionsPage() {
     });
     setPrescriptionNumber(rx.prescription_number);
     setPrescriberName(rx.prescriber_name);
-    setPrescriberLicense(rx.prescriber_license);
+    setPrescriberLicense(rx.prescriber_license ?? "");
     setPrescriberPhone(rx.prescriber_phone ?? "");
     setIssueDate(rx.issue_date);
     setExpiryDate(rx.expiry_date);
@@ -489,8 +489,10 @@ export default function PrescriptionsPage() {
       setCreateError("Select a registered customer.");
       return;
     }
-    if (!prescriptionNumber.trim() || !prescriberName.trim() || !prescriberLicense.trim()) {
-      setCreateError("Prescription number, prescriber name, and license are required.");
+    // prescriber_license is NOT required (P2). It was, and this check duplicated
+    // the server schema, so a missing licence blocked the save in two places.
+    if (!prescriptionNumber.trim() || !prescriberName.trim()) {
+      setCreateError("Prescription number and prescriber name are required.");
       return;
     }
 
@@ -525,7 +527,9 @@ export default function PrescriptionsPage() {
         customer_id: selectedCustomer.id,
         branch_id: activeBranchId ?? undefined,
         prescriber_name: prescriberName.trim(),
-        prescriber_license: prescriberLicense.trim(),
+        // Normalised here as well as in the envelope writer, so the object the
+        // form hands to writeLocal is already canonical.
+        prescriber_license: prescriberLicense.trim() || null,
         prescriber_phone: prescriberPhone.trim() || null,
         issue_date: issueDate,
         expiry_date: expiryDate,
@@ -715,7 +719,7 @@ export default function PrescriptionsPage() {
                 <td className="px-6 py-4 text-slate-600">{rx.customer_name ?? "Customer"}</td>
                 <td className="px-6 py-4">
                   <p className="font-semibold text-slate-700">{rx.prescriber_name}</p>
-                  <p className="text-xs text-slate-400">{rx.prescriber_license}</p>
+                  <p className="text-xs text-slate-400">{rx.prescriber_license || "—"}</p>
                 </td>
                 <td className="px-6 py-4 text-slate-500">
                   <p>{formatDate(rx.issue_date)}</p>
@@ -857,7 +861,7 @@ export default function PrescriptionsPage() {
               <div className="grid grid-cols-2 gap-3">
                 <input value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="Prescription number *" />
                 <input value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="Prescriber name *" />
-                <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License number *" />
+                <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License number (optional)" />
                 <input value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="Prescriber phone" />
                 <input type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
                 <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />

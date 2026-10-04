@@ -1069,7 +1069,7 @@ export interface Prescription extends TimestampFields, SyncFields {
     prescription_number: string;
     customer_id: string;
     prescriber_name: string;
-    prescriber_license: string;
+    prescriber_license: string | null;
     prescriber_phone: string | null;
     prescriber_address: string | null;
     issue_date: string;

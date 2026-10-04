@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 35;
+const MAX_KNOWN_SCHEMA_VERSION = 36;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -304,6 +304,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 33) await migrate_v33(db);
         if (user_version < 34) await migrate_v34(db);
         if (user_version < 35) await migrate_v35(db);
+        if (user_version < 36) await migrate_v36(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2739,6 +2740,91 @@ export async function markEventApplied(
       new Date().toISOString(),
     ]
   );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v36 — make prescriptions.prescriber_license nullable (P2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * SQLite cannot `DROP NOT NULL`, so the column has to be rebuilt by copying the
+ * table. That is why this is a rebuild and not an ALTER — every NOT NULL change
+ * in this file already uses this shape (v15's `copyKeepingBoth`, v22's CRR
+ * rebuild).
+ *
+ * The rebuild is hand-written rather than reusing v22's generic helper because
+ * that helper assumes every NOT NULL column keeps a DEFAULT, which is exactly the
+ * constraint being removed here. Reusing it would either re-add NOT NULL or give
+ * every row a DEFAULT '' and quietly defeat the purpose.
+ *
+ * Rows are preserved verbatim: an existing NULL or '' stays as it is. See the
+ * server migration e7a8b9c0d1e4 for why there is no data normalisation — '' and
+ * NULL are treated as equivalent on read instead.
+ *
+ * The column list is read from PRAGMA rather than hardcoded, so a column added by
+ * any other migration is carried across instead of silently dropped — which
+ * happened to is_deleted before this was written.
+ */
+export async function migrate_v36(db: Database): Promise<void> {
+  const info = await db.select<{ name: string; notnull: number }[]>(
+    "PRAGMA table_info(prescriptions)"
+  );
+  const licence = info.find((c) => c.name === "prescriber_license");
+  // Already nullable, or the table is not the shape we expect. Either way there is
+  // nothing to do, and rebuilding would be pure risk.
+  if (!licence || licence.notnull === 0) {
+    await db.execute("PRAGMA user_version = 36");
+    return;
+  }
+
+  const collist = info.map((c) => c.name).join(", ");
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    await db.execute("ALTER TABLE prescriptions RENAME TO prescriptions_v35");
+    // Same DDL as the v22 table (localDb.ts:1583-1611) with one difference:
+    // prescriber_license has no NOT NULL.
+    await db.execute(`
+      CREATE TABLE prescriptions (
+        id                    TEXT NOT NULL PRIMARY KEY,
+        organization_id       TEXT NOT NULL DEFAULT '',
+        branch_id             TEXT NOT NULL DEFAULT '',
+        prescription_number   TEXT NOT NULL DEFAULT '',
+        customer_id           TEXT NOT NULL DEFAULT '',
+        prescriber_name       TEXT NOT NULL DEFAULT '',
+        prescriber_license    TEXT,
+        prescriber_phone      TEXT,
+        prescriber_address    TEXT,
+        issue_date            TEXT NOT NULL DEFAULT '',
+        expiry_date           TEXT,
+        diagnosis             TEXT,
+        notes                 TEXT,
+        special_instructions  TEXT,
+        medications           TEXT NOT NULL DEFAULT '[]',
+        refills_allowed       INTEGER NOT NULL DEFAULT 0,
+        refills_remaining     INTEGER NOT NULL DEFAULT 0,
+        last_refill_date      TEXT,
+        status                TEXT NOT NULL DEFAULT 'active',
+        verified_by           TEXT,
+        verified_at           TEXT,
+        created_offline_at    TEXT,
+        is_deleted            INTEGER NOT NULL DEFAULT 0,
+        sync_status           TEXT NOT NULL DEFAULT 'synced',
+        sync_version          INTEGER NOT NULL DEFAULT 1,
+        synced_at             TEXT,
+        updated_at            TEXT NOT NULL DEFAULT '',
+        created_at            TEXT NOT NULL DEFAULT ''
+      )
+    `);
+    await db.execute(
+      `INSERT INTO prescriptions (${collist}) SELECT ${collist} FROM prescriptions_v35`
+    );
+    await db.execute("DROP TABLE prescriptions_v35");
+    await db.execute("PRAGMA user_version = 36");
+    await db.execute("COMMIT");
+  } catch (e) {
+    await db.execute("ROLLBACK");
+    throw e;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

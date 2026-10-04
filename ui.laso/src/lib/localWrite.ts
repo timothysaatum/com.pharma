@@ -308,7 +308,9 @@ async function buildPrescriptionEnvelope(
         prescription_number: prescription.prescription_number,
         customer_id: prescription.customer_id,
         prescriber_name: prescription.prescriber_name,
-        prescriber_license: prescription.prescriber_license,
+        // Canonical absent form is null, never "" (P2). Three distinct
+        // states for "no licence" is how a `IS NOT NULL` filter misses rows.
+        prescriber_license: prescription.prescriber_license || null,
         prescriber_phone: prescription.prescriber_phone ?? null,
         prescriber_address: prescription.prescriber_address ?? null,
         issue_date: prescription.issue_date,

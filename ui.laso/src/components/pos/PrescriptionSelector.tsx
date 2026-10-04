@@ -177,8 +177,10 @@ export function PrescriptionSelector({
     const createPrescription = async () => {
         if (!customerId) return;
         setFormError(null);
-        if (!prescriberName.trim() || !prescriberLicense.trim()) {
-            setFormError("Prescriber name and license are required.");
+        // prescriber_license is NOT required (P2). This form had its own copy of
+        // the check, so it needed the same change as PrescriptionsPage.
+        if (!prescriberName.trim()) {
+            setFormError("Prescriber name is required.");
             return;
         }
         if (medications.some((med) => !med.dosage.trim() || !med.frequency.trim() || !med.duration.trim() || med.quantity <= 0)) {
@@ -193,7 +195,7 @@ export function PrescriptionSelector({
                 customer_id: customerId,
                 branch_id: activeBranchId ?? undefined,
                 prescriber_name: prescriberName.trim(),
-                prescriber_license: prescriberLicense.trim(),
+                prescriber_license: prescriberLicense.trim() || null,
                 prescriber_phone: prescriberPhone.trim() || null,
                 issue_date: issueDate,
                 expiry_date: expiryDate,
@@ -343,7 +345,7 @@ export function PrescriptionSelector({
                     <div className="grid grid-cols-2 gap-2">
                         <input value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="Prescription #" />
                         <input value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="Prescriber name *" />
-                        <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License # *" />
+                        <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License # (optional)" />
                         <input value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="Phone" />
                         <input type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
                         <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />

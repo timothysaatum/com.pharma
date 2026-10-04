@@ -452,7 +452,12 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
       p.customer_id != null ? String(p.customer_id) : "",
       p.prescription_number != null ? String(p.prescription_number) : `RX-${String(e.aggregate_id).slice(0, 8)}`,
       p.prescriber_name != null ? String(p.prescriber_name) : "Unknown Prescriber",
-      p.prescriber_license != null ? String(p.prescriber_license) : "",
+      // null, not "": the canonical absent form (P2). An old event carrying
+      // "" arrives here as "" and is preserved, which is fine — reads treat both
+      // as absent.
+      p.prescriber_license != null && p.prescriber_license !== ""
+        ? String(p.prescriber_license)
+        : null,
       p.prescriber_phone != null ? String(p.prescriber_phone) : null,
       p.prescriber_address != null ? String(p.prescriber_address) : null,
       p.issue_date != null ? String(p.issue_date) : now.slice(0, 10),

@@ -72,7 +72,9 @@ class PrescriptionCreate(BaseModel):
     
     # Prescriber information
     prescriber_name: str = Field(..., description="Doctor/healthcare provider name")
-    prescriber_license: str = Field(..., description="Medical license number")
+    prescriber_license: Optional[str] = Field(
+        None, description="Medical license number. Optional."
+    )
     prescriber_phone: Optional[str] = Field(None, description="Contact phone")
     prescriber_address: Optional[str] = Field(None, description="Practice address")
     
@@ -148,7 +150,7 @@ class PrescriptionResponse(TimestampSchema, SyncSchema):
     customer_name: Optional[str] = None
     
     prescriber_name: str
-    prescriber_license: str
+    prescriber_license: Optional[str] = None
     prescriber_phone: Optional[str] = None
     prescriber_address: Optional[str] = None
     
@@ -334,7 +336,9 @@ async def create_prescription(
         prescription_number=prescription_data.prescription_number,
         customer_id=prescription_data.customer_id,
         prescriber_name=prescription_data.prescriber_name,
-        prescriber_license=prescription_data.prescriber_license,
+        # Canonical form is SQL NULL. `or None` means an empty string from
+        # any client becomes NULL rather than a third distinct state.
+        prescriber_license=prescription_data.prescriber_license or None,
         prescriber_phone=prescription_data.prescriber_phone,
         prescriber_address=prescription_data.prescriber_address,
         issue_date=prescription_data.issue_date,
