@@ -22,6 +22,7 @@ schema on every PostgreSQL target.
 """
 from __future__ import annotations
 
+import logging
 import os
 import uuid
 from datetime import date, datetime, timedelta, timezone
@@ -353,7 +354,43 @@ async def test_sb_emits_the_refill_event_with_absolute_state(db, world):
 # ── S-C: two stale devices, same prescription ─────────────────────────────────
 
 
-async def test_sc_over_dispense_is_recorded_and_clamps(db, world, caplog):
+class _CollectingHandler(logging.Handler):
+    """Captures records from ONE logger, independent of propagation."""
+
+    def __init__(self):
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+def capture_emitting_logger(name: str):
+    """Attach a handler to `name` itself and yield the records it collects.
+
+    Not `caplog`. `caplog` installs its handler on the ROOT logger, but
+    `app.core.logging_config.get_logging_config` configures the `app` logger with
+    `propagate: False` (logging_config.py:63-75). Any test that imports `main` —
+    test_cors_preflight.py does — therefore makes every `app.*` record invisible
+    to `caplog`, so the assertion passes in isolation and fails in a full-suite
+    run. Same defect, same fix as 27ff5c5.
+    """
+    import contextlib
+
+    @contextlib.contextmanager
+    def _ctx():
+        log = logging.getLogger(name)
+        handler = _CollectingHandler()
+        log.addHandler(handler)
+        try:
+            yield handler.records
+        finally:
+            log.removeHandler(handler)
+
+    return _ctx()
+
+
+async def test_sc_over_dispense_is_recorded_and_clamps(db, world):
     """REGRESSION. Was: both dispenses accepted silently, counter still 2.
 
     Now the second dispense clamps at 0 and the over-dispense is recorded three
@@ -365,16 +402,20 @@ async def test_sc_over_dispense_is_recorded_and_clamps(db, world, caplog):
     await db.commit()
     sp = SaleProjector()
 
-    for n, sale_id in enumerate((SALE_A, SALE_B), start=1):
-        await sp.apply(
-            envelope("sale_created", AggregateType.SALE, sale_id,
-                     offline_sale_payload(world["org_id"], world["branch_id"],
-                                          world["customer_id"], RX, f"STALE-{n}",
-                                          cashier=world["user_id"]),
-                     world["org_id"], world["branch_id"], world["user_id"], seq_hint=n),
-            db,
-        )
-        await db.commit()
+    # sale.py:440 logs the over-dispense on this exact logger name.
+    sale_logger = "app.services.sync.eventlog.projectors.sale"
+
+    with capture_emitting_logger(sale_logger) as captured:
+        for n, sale_id in enumerate((SALE_A, SALE_B), start=1):
+            await sp.apply(
+                envelope("sale_created", AggregateType.SALE, sale_id,
+                         offline_sale_payload(world["org_id"], world["branch_id"],
+                                              world["customer_id"], RX, f"STALE-{n}",
+                                              cashier=world["user_id"]),
+                         world["org_id"], world["branch_id"], world["user_id"], seq_hint=n),
+                db,
+            )
+            await db.commit()
 
     row = await rx_row(db, RX)
     # Both sales exist: the medicine left the shelf twice.
@@ -391,7 +432,10 @@ async def test_sc_over_dispense_is_recorded_and_clamps(db, world, caplog):
     assert evs[1]["refills_remaining"] == 0
     assert evs[1]["status_before"] == "filled"
 
-    assert "OVER-DISPENSE" in caplog.text
+    assert any("OVER-DISPENSE" in r.getMessage() for r in captured), (
+        "the over-dispense must reach the log stream. The projector logs it at "
+        f"ERROR on {sale_logger}"
+    )
 
 
 async def test_sale_referencing_an_unknown_prescription_is_blocked_by_the_fk(db, world):

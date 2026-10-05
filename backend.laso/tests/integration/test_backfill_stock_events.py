@@ -198,8 +198,10 @@ async def backfill_scope(db, event_log_table, setup_test_data, monkeypatch):
 
     await db.commit()
 
-    # A price contract exists but has NO event: the script must report it and
-    # refuse to backfill it.
+    # A price contract exists but has NO event. It IS backfilled: an org whose
+    # only contract has no price_contract_created event leaves every device with
+    # an empty POS contract picker, so the sale button never enables.
+    # (Reversed from "report and refuse" in 538ebe0.)
     from app.models.pricing.pricing_model import PriceContract
 
     contract = PriceContract(
@@ -282,9 +284,17 @@ async def test_dry_run_reports_the_gap_and_the_contract(db, backfill_scope):
     assert "DRY RUN" in out
     for name in EXPECTED_QTY:
         assert name in out, f"{name} missing from the report"
-    # The contract is reported and explicitly not backfilled.
+    # The contract is planned, named so the owner can see which one, and counted
+    # ONCE. It used to be repeated under every drug, which inflated both the
+    # per-drug counts and the seq numbering.
     assert "STANDARD-PRICE" in out
-    assert "NOT BACKFILLED" in out
+    assert "price_contract_created" in out
+    assert "NOT BACKFILLED" not in out
+    assert "organization-wide events (listed once, not per drug)" in out
+    assert out.count("price_contract_created") == 1, (
+        "the org-wide contract must be listed once, not once per drug"
+    )
+    assert "resulting seq range" in out
     assert "seq range that would be used" in out
 
 
@@ -312,8 +322,14 @@ async def test_apply_creates_exactly_the_expected_events(db, backfill_scope):
     assert by_type["branch_inventory_created"] == len(backfill_scope["drugs"])
     assert by_type["drug_batch_created"] == len(backfill_scope["lots"])
     assert by_type["drug_created"] == len(backfill_scope["drugs"])
-    # The price contract must NOT be backfilled.
-    assert "price_contract_created" not in by_type
+    # The price contract IS backfilled, exactly once. It must come FIRST in the
+    # log: a POS with no contract cannot complete a sale, so it outranks the
+    # drugs.
+    assert by_type["price_contract_created"] == 1
+    rows_by_type = [r["event_type"] for r in rows]
+    assert rows_by_type[0] == "price_contract_created", (
+        "the contract event must be seq 1, ahead of every drug event"
+    )
 
     # Every batch event carries the server's CURRENT remaining_quantity.
     for r in rows:

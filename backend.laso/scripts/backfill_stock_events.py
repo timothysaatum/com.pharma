@@ -32,9 +32,13 @@ SAFETY
 * event_ids are DETERMINISTIC, derived from (event_type, aggregate_id, version
   tag), so a re-run appends nothing — the append path returns ALREADY_APPENDED
   for a repeated id. Real row ids are reused as aggregate_ids.
-* Price contracts are REPORTED as a gap and deliberately NOT backfilled: a
-  contract event would change how every device prices sales, which is a pricing
-  decision, not a stock repair.
+* Price contracts ARE backfilled. An earlier version of this script reported the
+  contract gap and deliberately left it alone, on the reasoning that a contract
+  event changes how every device prices sales. That was reversed: the real org's
+  STANDARD-PRICE contract had no price_contract_created event, so no device could
+  offer it, the POS contract picker stayed empty and the sale button never
+  enabled. A till that cannot complete a sale outranks a pricing concern.
+  The contract event is emitted FIRST, ahead of the drugs.
 
 Usage:
     python backfill_stock_events.py                      # dry-run (default)
@@ -165,7 +169,6 @@ class Plan:
     inventories: list[PlannedEvent] = field(default_factory=list)
     batches: list[PlannedEvent] = field(default_factory=list)
     already_present: list[str] = field(default_factory=list)
-    contract_gap: list[str] = field(default_factory=list)
     totals: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -631,10 +634,10 @@ def print_gap_table(conn, plan: Plan) -> None:
             f"{'PRESENT' if not plan._is_batch_gap(str(l['drug_id'])) else 'MISSING'}"
         )
 
-    if plan.contract_gap:
+    if plan.already_present:
         print()
-        print("price contracts (REPORTED, deliberately NOT backfilled):")
-        for c in plan.contract_gap:
+        print("already published (no event needed):")
+        for c in plan.already_present:
             print(f"  {c}")
     print("=" * 100)
 
@@ -692,7 +695,7 @@ def print_dry_run_table(conn, plan: Plan, current_seq: int) -> None:
         print(f"  branch: {BRANCH_ID}")
         print(f"  events that would be created: {len(plan.contracts)}")
         for e in plan.contracts:
-            print(f"    - {e.event_type:<28} aggregate_id={e.aggregate_id}")
+            print(f"    - {e.label} ({e.event_type}) aggregate_id={e.aggregate_id}")
         first, last = seq + 1, seq + len(plan.contracts)
         print(f"  resulting seq range: {first}..{last}")
         seq = last
