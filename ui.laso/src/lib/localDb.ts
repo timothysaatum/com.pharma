@@ -2317,6 +2317,101 @@ export async function markOutboxResult(
       WHERE event_id = $4`,
     [status, error?.code ?? null, error?.message ?? null, eventId]
   );
+
+  // The outbox status and the read model's sync_status are two different flags
+  // and nothing reconciled them: a locally-created prescription stayed
+  // sync_status='pending' for the rest of its life even after the server
+  // accepted its event, because the projector that would have written 'synced'
+  // never runs for the device's own event (syncEngine skips locally-authored
+  // envelopes), and `cachePrescriptions` then refused to overwrite a 'pending'
+  // row. Observed on a real device: local `active 1/1` against a server
+  // `filled 0/1`, with the outbox row 'accepted'.
+  if (status === "accepted") {
+    await reconcileAcceptedAggregate(db, eventId);
+  }
+}
+
+/**
+ * An event is UNSENT while it can still go out.
+ *
+ * `accepted_deferred` is included deliberately: the server has parked it and it
+ * has not been applied anywhere, so the aggregate is still not reconciled. It is
+ * NOT a synonym for accepted.
+ */
+const UNSENT_EVENT_STATUSES = "('pending', 'failed', 'accepted_deferred')";
+
+/**
+ * Does this aggregate still have an event that has not reached the server?
+ *
+ * This is the guard the two callers below are built on. Both of them change or
+ * discard local state, and neither may do so while an event for the same
+ * aggregate is still in flight — that is how a locally-made edit gets silently
+ * overwritten by server truth.
+ */
+export async function hasUnsentEventForAggregate(
+  aggregateType: string,
+  aggregateId: string,
+): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ one: number }[]>(
+    `SELECT 1 AS one FROM event_outbox
+      WHERE aggregate_type = $1 AND aggregate_id = $2
+        AND status IN ${UNSENT_EVENT_STATUSES}
+      LIMIT 1`,
+    [aggregateType, aggregateId]
+  );
+  return rows.length > 0;
+}
+
+/** Aggregate type -> local read-model table, for the reconciled aggregates. */
+const AGGREGATE_TABLES: Record<string, string> = {
+  prescription: "prescriptions",
+};
+
+/**
+ * After an event is accepted, mark its row 'synced' — but ONLY once the
+ * aggregate has nothing left in flight.
+ *
+ * Ordering matters: `markOutboxResult` has already set this event to 'accepted',
+ * so the remaining-unsent check sees the true remaining set. A prescription with
+ * an accepted create and a still-pending edit stays 'pending', correctly, because
+ * the edit is not on the server yet.
+ *
+ * Only 'accepted' reaches here. `rejected_permanent` deliberately does NOT mark
+ * anything synced — the server never received it, so 'synced' would be a lie.
+ * That leaves a permanently-rejected row stuck 'pending', which is a separate
+ * pre-existing gap and is reported rather than silently papered over here.
+ */
+async function reconcileAcceptedAggregate(
+  db: Database,
+  eventId: string,
+): Promise<void> {
+  const rows = await db.select<{ aggregate_type: string; aggregate_id: string }[]>(
+    "SELECT aggregate_type, aggregate_id FROM event_outbox WHERE event_id = $1 LIMIT 1",
+    [eventId]
+  );
+  const row = rows[0];
+  if (!row) return;
+
+  const table = AGGREGATE_TABLES[row.aggregate_type];
+  if (!table) return;
+
+  // The safety interlock. Without this the "fix" would mark a row synced while
+  // an edit for it is still queued, and the next server fetch would then
+  // overwrite that edit.
+  const stillUnsent = await db.select<{ one: number }[]>(
+    `SELECT 1 AS one FROM event_outbox
+      WHERE aggregate_type = $1 AND aggregate_id = $2
+        AND status IN ${UNSENT_EVENT_STATUSES}
+      LIMIT 1`,
+    [row.aggregate_type, row.aggregate_id]
+  );
+  if (stillUnsent.length > 0) return;
+
+  await db.execute(
+    `UPDATE ${table} SET sync_status = 'synced', updated_at = $1 WHERE id = $2`,
+    [new Date().toISOString(), row.aggregate_id]
+  );
 }
 
 /** Return the number of outbox events pending push. */
