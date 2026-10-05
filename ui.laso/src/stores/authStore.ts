@@ -200,6 +200,28 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         const data = await authApi.login({ username, password, totp_code });
         await authStorage.setUser(data.user);
 
+        // One-time local repair (migration v35): drop any price contract left on
+        // this device by another organization. Without the signed-in org we
+        // cannot tell which are foreign, and a foreign contract is invisible to
+        // the POS picker while still making the sale button look broken.
+        // Failures are non-fatal — worst case the POS shows the same "Select a
+        // price contract" it did before, and the repair retries next login.
+        if (data.user.organization_id) {
+            try {
+                const { repairCrossOrgPriceContracts } = await import("@/lib/localDb");
+                const removed = await repairCrossOrgPriceContracts(
+                    String(data.user.organization_id)
+                );
+                if (removed > 0) {
+                    console.warn(
+                        `[auth] removed ${removed} price contract(s) belonging to another organization`
+                    );
+                }
+            } catch (err) {
+                console.warn("[auth] cross-org price contract cleanup failed:", err);
+            }
+        }
+
         const setupState = deriveSetupState(data.user);
 
         let branchId: string | null = null;

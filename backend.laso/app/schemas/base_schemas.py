@@ -14,6 +14,19 @@ Money: TypeAlias = Annotated[
     PlainSerializer(lambda v: float(v), return_type=float, when_used="json"),
 ]
 
+MoneyOut: TypeAlias = Annotated[
+    Decimal,
+    condecimal(max_digits=12, decimal_places=2),
+    PlainSerializer(lambda v: float(v), return_type=float, when_used="json"),
+]
+"""Money WITHOUT the ``ge=0`` bound, for response models.
+
+``Money`` is an input bound: it exists to stop a caller submitting a negative
+price. Reusing it on a response means a row the database already accepts can
+fail to serialise, which surfaces to the caller as a 422 blaming their request.
+Response models use this so reads can never fail on stored data.
+"""
+
 class BaseSchema(BaseModel):
     """Base schema with common configuration"""
     model_config = ConfigDict(
@@ -37,6 +50,22 @@ class SyncSchema(BaseSchema):
     """Mixin for sync tracking"""
     sync_status: str = Field(default="synced")
     sync_version: int = Field(default=1, ge=1)
+    synced_at: Optional[datetime] = Field(
+        None,
+        validation_alias=AliasChoices("synced_at", "last_synced_at"),
+    )
+
+
+class SyncSchemaOut(BaseSchema):
+    """Sync tracking for RESPONSE models: types only, no bounds.
+
+    Same rationale as ``MoneyOut``. ``sync_version >= 1`` is an invariant the
+    writers maintain (``mark_as_pending_sync`` increments before writing), but
+    it is not a DB CHECK constraint, so a row that predates it or arrived via a
+    direct insert could hold 0. That must not turn a list endpoint into a 422.
+    """
+    sync_status: str = "synced"
+    sync_version: int = 1
     synced_at: Optional[datetime] = Field(
         None,
         validation_alias=AliasChoices("synced_at", "last_synced_at"),

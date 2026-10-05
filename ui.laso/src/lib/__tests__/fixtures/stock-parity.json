@@ -1,0 +1,1432 @@
+{
+  "consume_from_batch": {
+    "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+    "drug_id": "fa8c581c-fcc9-4b89-ac5f-502a00f6483a",
+    "events": [
+      {
+        "aggregate_id": "00113519-0bf5-43a2-912a-494ea9578151",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:18.270944+00:00",
+        "authored_by": "3790cda8-01d8-4886-8fa6-a3b33f41397c",
+        "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+        "dependencies": [],
+        "event_id": "EE2BF0DBBF27485D89950B7B34",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ae6747f5-55d8-4051-b5fc-366b1deb78e5",
+        "payload": {
+          "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+          "branch_inventory_id": "00113519-0bf5-43a2-912a-494ea9578151",
+          "drug_id": "fa8c581c-fcc9-4b89-ac5f-502a00f6483a",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "2661538f-6079-486c-a6bf-01015a311ae7",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:39:18.622918+00:00",
+        "authored_by": "00000000-0000-0000-0000-000000000000",
+        "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+        "dependencies": [],
+        "event_id": "417443D70953497AB2E4D160B5",
+        "event_type": "drug_batch_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ae6747f5-55d8-4051-b5fc-366b1deb78e5",
+        "payload": {
+          "batch_id": "2661538f-6079-486c-a6bf-01015a311ae7",
+          "batch_number": "CONS-1",
+          "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+          "cost_price": 8.0,
+          "drug_id": "fa8c581c-fcc9-4b89-ac5f-502a00f6483a",
+          "expiry_date": "2027-10-03",
+          "id": "2661538f-6079-486c-a6bf-01015a311ae7",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 90,
+          "remaining_quantity": 60,
+          "selling_price": null,
+          "supplier": "Test Supplier"
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "00113519-0bf5-43a2-912a-494ea9578151",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:18.636563+00:00",
+        "authored_by": "00000000-0000-0000-0000-000000000000",
+        "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+        "dependencies": [],
+        "event_id": "00294B6BA12D4EFDA80EC967DA",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ae6747f5-55d8-4051-b5fc-366b1deb78e5",
+        "payload": {
+          "branch_id": "a78120ae-1f36-4f1d-9353-ced4ffe2b431",
+          "branch_inventory_id": "00113519-0bf5-43a2-912a-494ea9578151",
+          "drug_id": "fa8c581c-fcc9-4b89-ac5f-502a00f6483a",
+          "location": null,
+          "quantity": 60,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      }
+    ],
+    "note": "direct lot consumption",
+    "server": {
+      "branch_inventory": {
+        "quantity": 60,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "CONS-1",
+          "expiry_date": "2027-10-03",
+          "id": "2661538f-6079-486c-a6bf-01015a311ae7",
+          "quantity": 90,
+          "remaining_quantity": 60
+        }
+      ]
+    }
+  },
+  "correction on a drug with no lots": {
+    "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+    "drug_id": "4ab272ef-3692-4c01-b4ce-195ed75474bb",
+    "events": [
+      {
+        "aggregate_id": "e1ca5e67-4cdc-4a1a-b999-50dc0fe1608e",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:38:46.224952+00:00",
+        "authored_by": "e2000b96-d2c2-4427-99df-6119f1ff4c60",
+        "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+        "dependencies": [],
+        "event_id": "F03CAE5140E9441C82DBE9B4CD",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8b5c27a6-dc5b-47b2-88b9-fd01d2a717fc",
+        "payload": {
+          "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+          "branch_inventory_id": "e1ca5e67-4cdc-4a1a-b999-50dc0fe1608e",
+          "drug_id": "4ab272ef-3692-4c01-b4ce-195ed75474bb",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "228c08c3-9184-460c-952d-6ec39fbf6868",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:38:46.608837+00:00",
+        "authored_by": "e2000b96-d2c2-4427-99df-6119f1ff4c60",
+        "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+        "dependencies": [],
+        "event_id": "806594167610422B99906CFFEF",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8b5c27a6-dc5b-47b2-88b9-fd01d2a717fc",
+        "payload": {
+          "batch_id": "228c08c3-9184-460c-952d-6ec39fbf6868",
+          "batch_number": "ADJ-20261003",
+          "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+          "cost_price": null,
+          "drug_id": "4ab272ef-3692-4c01-b4ce-195ed75474bb",
+          "expiry_date": "2036-09-30",
+          "id": "228c08c3-9184-460c-952d-6ec39fbf6868",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 25,
+          "remaining_quantity": 25,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "e1ca5e67-4cdc-4a1a-b999-50dc0fe1608e",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:38:46.633233+00:00",
+        "authored_by": "e2000b96-d2c2-4427-99df-6119f1ff4c60",
+        "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+        "dependencies": [],
+        "event_id": "FFDB4CF653324F148A552ED1CB",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8b5c27a6-dc5b-47b2-88b9-fd01d2a717fc",
+        "payload": {
+          "branch_id": "fe34a499-f386-483e-a5ac-0127ab3b8dc6",
+          "branch_inventory_id": "e1ca5e67-4cdc-4a1a-b999-50dc0fe1608e",
+          "drug_id": "4ab272ef-3692-4c01-b4ce-195ed75474bb",
+          "location": null,
+          "quantity": 25,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      }
+    ],
+    "note": "server fabricates the ADJ- lot; the event mirrors it exactly",
+    "server": {
+      "branch_inventory": {
+        "quantity": 25,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "ADJ-20261003",
+          "expiry_date": "2036-09-30",
+          "id": "228c08c3-9184-460c-952d-6ec39fbf6868",
+          "quantity": 25,
+          "remaining_quantity": 25
+        }
+      ]
+    }
+  },
+  "create_batch manual add stock": {
+    "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+    "drug_id": "deca5a1d-7160-4cb8-a131-d1d16e79ff82",
+    "events": [
+      {
+        "aggregate_id": "938aafb9-d3c5-445e-b908-d2f57d53e2d0",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:32.849406+00:00",
+        "authored_by": "5b5977e4-50ed-4eed-a876-48758273e573",
+        "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+        "dependencies": [],
+        "event_id": "2D64F98D0E5A43F5A9D10528EF",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "98022524-77ac-47d8-82dc-7bb94bf433c4",
+        "payload": {
+          "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+          "branch_inventory_id": "938aafb9-d3c5-445e-b908-d2f57d53e2d0",
+          "drug_id": "deca5a1d-7160-4cb8-a131-d1d16e79ff82",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "67a8c516-d8af-40c4-9feb-5ac35d83642c",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:36:32.984327+00:00",
+        "authored_by": "5b5977e4-50ed-4eed-a876-48758273e573",
+        "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+        "dependencies": [],
+        "event_id": "0489C8D7B78C4770804578FAFA",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "98022524-77ac-47d8-82dc-7bb94bf433c4",
+        "payload": {
+          "batch_id": "67a8c516-d8af-40c4-9feb-5ac35d83642c",
+          "batch_number": "MANUAL-1",
+          "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+          "cost_price": null,
+          "drug_id": "deca5a1d-7160-4cb8-a131-d1d16e79ff82",
+          "expiry_date": "2027-11-07",
+          "id": "67a8c516-d8af-40c4-9feb-5ac35d83642c",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 80,
+          "remaining_quantity": 80,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "938aafb9-d3c5-445e-b908-d2f57d53e2d0",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:32.993800+00:00",
+        "authored_by": "5b5977e4-50ed-4eed-a876-48758273e573",
+        "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+        "dependencies": [],
+        "event_id": "4392E0C965E94B7CBCC45041F4",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "98022524-77ac-47d8-82dc-7bb94bf433c4",
+        "payload": {
+          "branch_id": "ca73d6a7-8a5b-4a25-a805-43e0794ead9e",
+          "branch_inventory_id": "938aafb9-d3c5-445e-b908-d2f57d53e2d0",
+          "drug_id": "deca5a1d-7160-4cb8-a131-d1d16e79ff82",
+          "location": null,
+          "quantity": 80,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      }
+    ],
+    "note": "add_drug_to_branch at 0, then a manual lot",
+    "server": {
+      "branch_inventory": {
+        "quantity": 80,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "MANUAL-1",
+          "expiry_date": "2027-11-07",
+          "id": "67a8c516-d8af-40c4-9feb-5ac35d83642c",
+          "quantity": 80,
+          "remaining_quantity": 80
+        }
+      ]
+    }
+  },
+  "damage adjustment drains a lot to zero": {
+    "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+    "drug_id": "a6dd3101-62da-497f-8af6-9312229ca002",
+    "events": [
+      {
+        "aggregate_id": "41a6e83f-c0b7-4398-97a7-35546622efa1",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:37:20.275081+00:00",
+        "authored_by": "373df066-ceec-4ddf-99a8-66630923faa4",
+        "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+        "dependencies": [],
+        "event_id": "963083FA82CE421B946947DD45",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "d01ac434-0409-492f-b520-efa3ebc2678f",
+        "payload": {
+          "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+          "branch_inventory_id": "41a6e83f-c0b7-4398-97a7-35546622efa1",
+          "drug_id": "a6dd3101-62da-497f-8af6-9312229ca002",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "7d8d4292-10d3-473d-9059-466fe0082bf7",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:37:20.547050+00:00",
+        "authored_by": "373df066-ceec-4ddf-99a8-66630923faa4",
+        "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+        "dependencies": [],
+        "event_id": "CB884A30572840F59A4EA82354",
+        "event_type": "drug_batch_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "d01ac434-0409-492f-b520-efa3ebc2678f",
+        "payload": {
+          "batch_id": "7d8d4292-10d3-473d-9059-466fe0082bf7",
+          "batch_number": "ADJ-A",
+          "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+          "cost_price": 8.0,
+          "drug_id": "a6dd3101-62da-497f-8af6-9312229ca002",
+          "expiry_date": "2027-10-03",
+          "id": "7d8d4292-10d3-473d-9059-466fe0082bf7",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 60,
+          "remaining_quantity": 0,
+          "selling_price": null,
+          "supplier": "Test Supplier"
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "b9d7dda5-7cad-448b-abdd-ba3d42baa4ed",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:37:20.554208+00:00",
+        "authored_by": "373df066-ceec-4ddf-99a8-66630923faa4",
+        "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+        "dependencies": [],
+        "event_id": "7A85EDEF6E204854AD25DC19A5",
+        "event_type": "drug_batch_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "d01ac434-0409-492f-b520-efa3ebc2678f",
+        "payload": {
+          "batch_id": "b9d7dda5-7cad-448b-abdd-ba3d42baa4ed",
+          "batch_number": "ADJ-B",
+          "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+          "cost_price": 8.0,
+          "drug_id": "a6dd3101-62da-497f-8af6-9312229ca002",
+          "expiry_date": "2027-10-03",
+          "id": "b9d7dda5-7cad-448b-abdd-ba3d42baa4ed",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 40,
+          "remaining_quantity": 30,
+          "selling_price": null,
+          "supplier": "Test Supplier"
+        },
+        "schema_version": 1,
+        "seq": 3
+      },
+      {
+        "aggregate_id": "41a6e83f-c0b7-4398-97a7-35546622efa1",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:37:20.558570+00:00",
+        "authored_by": "373df066-ceec-4ddf-99a8-66630923faa4",
+        "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+        "dependencies": [],
+        "event_id": "4C6F1BAFA5E64C7187EDBBE046",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "d01ac434-0409-492f-b520-efa3ebc2678f",
+        "payload": {
+          "branch_id": "047416f3-f6d3-4a4c-b4cd-730a9710e05e",
+          "branch_inventory_id": "41a6e83f-c0b7-4398-97a7-35546622efa1",
+          "drug_id": "a6dd3101-62da-497f-8af6-9312229ca002",
+          "location": null,
+          "quantity": 30,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 4
+      }
+    ],
+    "note": "FEFO draw-down across two lots; ADJ-A reaches 0",
+    "server": {
+      "branch_inventory": {
+        "quantity": 30,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "ADJ-A",
+          "expiry_date": "2027-10-03",
+          "id": "7d8d4292-10d3-473d-9059-466fe0082bf7",
+          "quantity": 60,
+          "remaining_quantity": 0
+        },
+        {
+          "batch_number": "ADJ-B",
+          "expiry_date": "2027-10-03",
+          "id": "b9d7dda5-7cad-448b-abdd-ba3d42baa4ed",
+          "quantity": 40,
+          "remaining_quantity": 30
+        }
+      ]
+    }
+  },
+  "process_sale atomic emit": {
+    "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+    "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+    "events": [
+      {
+        "aggregate_id": "488e7552-88a3-4929-9d36-87428a58cc87",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:42:50.156232+00:00",
+        "authored_by": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+        "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+        "dependencies": [],
+        "event_id": "E011443857C641EB94B50EDFDF",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+        "payload": {
+          "batch_id": "488e7552-88a3-4929-9d36-87428a58cc87",
+          "batch_number": "SALE-OK-NEAR",
+          "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+          "cost_price": null,
+          "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+          "expiry_date": "2027-11-07",
+          "id": "488e7552-88a3-4929-9d36-87428a58cc87",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 30,
+          "remaining_quantity": 30,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "1ca13a94-63ad-4547-aa1b-7b3e2851c740",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:42:50.167604+00:00",
+        "authored_by": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+        "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+        "dependencies": [],
+        "event_id": "E07A6323A4F149E482EB283E6A",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+        "payload": {
+          "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+          "branch_inventory_id": "1ca13a94-63ad-4547-aa1b-7b3e2851c740",
+          "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+          "location": null,
+          "quantity": 30,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "fedb3b6c-9904-4066-951e-094682f3b068",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:42:50.256658+00:00",
+        "authored_by": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+        "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+        "dependencies": [],
+        "event_id": "4E6D93A1DA9245DA9D9EFD22D4",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+        "payload": {
+          "batch_id": "fedb3b6c-9904-4066-951e-094682f3b068",
+          "batch_number": "SALE-OK-FAR",
+          "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+          "cost_price": null,
+          "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+          "expiry_date": "2027-11-07",
+          "id": "fedb3b6c-9904-4066-951e-094682f3b068",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 70,
+          "remaining_quantity": 70,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      },
+      {
+        "aggregate_id": "1ca13a94-63ad-4547-aa1b-7b3e2851c740",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:42:50.265272+00:00",
+        "authored_by": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+        "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+        "dependencies": [],
+        "event_id": "B2323738B0F0444F99B128CD1E",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+        "payload": {
+          "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+          "branch_inventory_id": "1ca13a94-63ad-4547-aa1b-7b3e2851c740",
+          "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+          "location": null,
+          "quantity": 100,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 4
+      },
+      {
+        "aggregate_id": "6d28d97f-60ea-4140-b677-38096f05d204",
+        "aggregate_type": "sale",
+        "authored_at": "2026-10-03T13:42:50.488330+00:00",
+        "authored_by": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+        "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+        "dependencies": [],
+        "event_id": "A7EAFC8AC72E4FB3AA8FE22667",
+        "event_type": "sale_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+        "payload": {
+          "amount_paid": 100000.0,
+          "batch_changes": [
+            {
+              "batch_id": "488e7552-88a3-4929-9d36-87428a58cc87",
+              "quantity_used": 30
+            },
+            {
+              "batch_id": "fedb3b6c-9904-4066-951e-094682f3b068",
+              "quantity_used": 20
+            }
+          ],
+          "branch_id": "75ad840b-142d-459e-a55d-e34517fda7a0",
+          "cashier_id": "d3e76bb5-0094-4d63-b5de-cf853263d4b1",
+          "change_amount": 97500.0,
+          "customer_id": null,
+          "customer_name": null,
+          "discount_amount": 0.0,
+          "items": [
+            {
+              "batch_id": "488e7552-88a3-4929-9d36-87428a58cc87",
+              "discount_amount": 0.0,
+              "drug_id": "82db6195-1c24-444e-a850-2d244dfae78f",
+              "drug_name": "Drug 1",
+              "quantity": 50,
+              "subtotal": 2500.0,
+              "unit_price": 50.0
+            }
+          ],
+          "organization_id": "7e6c0104-970a-4a8a-b3b2-6de3cdc860b2",
+          "payment_method": "cash",
+          "payment_status": "completed",
+          "pharmacist_id": null,
+          "prescription_id": null,
+          "sale_number": "TB001-20261003-0001",
+          "subtotal": 2500.0,
+          "tax_amount": 0.0,
+          "total_amount": 2500.0
+        },
+        "schema_version": 1,
+        "seq": 5
+      }
+    ],
+    "note": "sale_created published inside the sale's transaction",
+    "server": {
+      "branch_inventory": {
+        "quantity": 50,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "SALE-OK-FAR",
+          "expiry_date": "2027-11-07",
+          "id": "fedb3b6c-9904-4066-951e-094682f3b068",
+          "quantity": 70,
+          "remaining_quantity": 50
+        },
+        {
+          "batch_number": "SALE-OK-NEAR",
+          "expiry_date": "2027-11-07",
+          "id": "488e7552-88a3-4929-9d36-87428a58cc87",
+          "quantity": 30,
+          "remaining_quantity": 0
+        }
+      ]
+    }
+  },
+  "receive_goods adds a second lot": {
+    "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+    "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+    "events": [
+      {
+        "aggregate_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:06.481337+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "7802A20FFF2C4108861527EAEB",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "branch_inventory_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "3b815a8a-28da-4646-99b4-41f8964151c5",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:36:06.694920+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "6A969AA44156491CABF1149F6A",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "batch_id": "3b815a8a-28da-4646-99b4-41f8964151c5",
+          "batch_number": "LOT-1",
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "cost_price": null,
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "expiry_date": "2027-11-07",
+          "id": "3b815a8a-28da-4646-99b4-41f8964151c5",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 147,
+          "remaining_quantity": 147,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:06.710357+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "035B7614DBE34B0EBD00E7B262",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "branch_inventory_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "location": null,
+          "quantity": 147,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      },
+      {
+        "aggregate_id": "910d5e5e-8dc1-40ad-b753-4dcc1ec025d7",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:36:06.892367+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "316133B9C9184170A58C3FC6CC",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "batch_id": "910d5e5e-8dc1-40ad-b753-4dcc1ec025d7",
+          "batch_number": "LOT-2",
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "cost_price": null,
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "expiry_date": "2027-11-07",
+          "id": "910d5e5e-8dc1-40ad-b753-4dcc1ec025d7",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 100,
+          "remaining_quantity": 100,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 4
+      },
+      {
+        "aggregate_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:06.909880+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "C2E26EFB739A4F99ADC39D780B",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "branch_inventory_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "location": null,
+          "quantity": 247,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 5
+      },
+      {
+        "aggregate_id": "a9f92c27-0843-4374-92c9-d6d029bc2e81",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:36:07.553608+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "7C39467C0828463AA9E10C02C7",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "batch_id": "a9f92c27-0843-4374-92c9-d6d029bc2e81",
+          "batch_number": "LOT-3",
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "cost_price": 8.0,
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "expiry_date": "2028-10-02",
+          "id": "a9f92c27-0843-4374-92c9-d6d029bc2e81",
+          "location": null,
+          "purchase_order_id": "2253e9e7-c414-4ed3-8b97-df69c21d6aad",
+          "quantity": 50,
+          "remaining_quantity": 50,
+          "selling_price": null,
+          "supplier": "Test Supplier Co"
+        },
+        "schema_version": 1,
+        "seq": 6
+      },
+      {
+        "aggregate_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:07.566061+00:00",
+        "authored_by": "5876d3e7-2280-422d-b9d5-554f8aa64a5d",
+        "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+        "dependencies": [],
+        "event_id": "CACAA3D7A1F742CEBC6CEE1B69",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "8731901d-156d-42ce-a551-3bfdb8f8f661",
+        "payload": {
+          "branch_id": "42102617-a1ba-4a37-8502-fad01e177f39",
+          "branch_inventory_id": "a6258381-19f4-41e8-b674-00a5eaabad9a",
+          "drug_id": "c620307b-eabf-4c44-ad36-c6b7823d1d6c",
+          "location": null,
+          "quantity": 297,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 7
+      }
+    ],
+    "note": "PO receipt appending a new lot to an existing one",
+    "server": {
+      "branch_inventory": {
+        "quantity": 297,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "LOT-1",
+          "expiry_date": "2027-11-07",
+          "id": "3b815a8a-28da-4646-99b4-41f8964151c5",
+          "quantity": 147,
+          "remaining_quantity": 147
+        },
+        {
+          "batch_number": "LOT-2",
+          "expiry_date": "2027-11-07",
+          "id": "910d5e5e-8dc1-40ad-b753-4dcc1ec025d7",
+          "quantity": 100,
+          "remaining_quantity": 100
+        },
+        {
+          "batch_number": "LOT-3",
+          "expiry_date": "2028-10-02",
+          "id": "a9f92c27-0843-4374-92c9-d6d029bc2e81",
+          "quantity": 50,
+          "remaining_quantity": 50
+        }
+      ]
+    }
+  },
+  "refund restocks the original lot": {
+    "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+    "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+    "events": [
+      {
+        "aggregate_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:41.900437+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "481BC6B8F5104ADD9653733E8D",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "branch_inventory_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:39:42.049296+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "AA79D3DA89DE4125B7DEB88DAF",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "batch_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+          "batch_number": "LOT-NEAR",
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "cost_price": null,
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "expiry_date": "2027-11-07",
+          "id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 50,
+          "remaining_quantity": 50,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:42.059770+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "C944E869B21E44259C901EC466",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "branch_inventory_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "location": null,
+          "quantity": 50,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      },
+      {
+        "aggregate_id": "896ab8a4-3cc2-4f8f-90a3-ac5c6f976448",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:39:42.161430+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "E118365A578E47379480995A57",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "batch_id": "896ab8a4-3cc2-4f8f-90a3-ac5c6f976448",
+          "batch_number": "LOT-FAR",
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "cost_price": null,
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "expiry_date": "2027-11-07",
+          "id": "896ab8a4-3cc2-4f8f-90a3-ac5c6f976448",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 70,
+          "remaining_quantity": 70,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 4
+      },
+      {
+        "aggregate_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:42.169281+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "CC05FB178CB34AFFA20E39E2E6",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "branch_inventory_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "location": null,
+          "quantity": 120,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 5
+      },
+      {
+        "aggregate_id": "4dddb54b-d5f3-4534-b5a5-00a3ef421048",
+        "aggregate_type": "sale",
+        "authored_at": "2026-10-03T13:39:42.423141+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "A24C9B6D19FB4953A9D4731BB1",
+        "event_type": "sale_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "amount_paid": 100000.0,
+          "batch_changes": [
+            {
+              "batch_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+              "quantity_used": 20
+            }
+          ],
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "cashier_id": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+          "change_amount": 99000.0,
+          "customer_id": null,
+          "customer_name": null,
+          "discount_amount": 0.0,
+          "items": [
+            {
+              "batch_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+              "discount_amount": 0.0,
+              "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+              "drug_name": "Drug 0",
+              "quantity": 20,
+              "subtotal": 1000.0,
+              "unit_price": 50.0
+            }
+          ],
+          "organization_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+          "payment_method": "cash",
+          "payment_status": "completed",
+          "pharmacist_id": null,
+          "prescription_id": null,
+          "sale_number": "TB001-20261003-0001",
+          "subtotal": 1000.0,
+          "tax_amount": 0.0,
+          "total_amount": 1000.0
+        },
+        "schema_version": 1,
+        "seq": 6
+      },
+      {
+        "aggregate_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:39:42.852395+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "BDDDC64388ED4CEBA6AEAE6B86",
+        "event_type": "drug_batch_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "batch_id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+          "batch_number": "LOT-NEAR",
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "cost_price": null,
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "expiry_date": "2027-11-07",
+          "id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 50,
+          "remaining_quantity": 50,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 7
+      },
+      {
+        "aggregate_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:39:42.864413+00:00",
+        "authored_by": "484d00fa-1852-4ed5-9c0b-5336c131ebb0",
+        "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+        "dependencies": [],
+        "event_id": "78745BDE5FD246D3B389703146",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "ec0857da-75c1-4fc2-a815-bb5c15a626fc",
+        "payload": {
+          "branch_id": "6be4edf4-caf7-48e7-ae4e-0beddabea1a5",
+          "branch_inventory_id": "7a85438c-6eb5-422f-9f8e-c3b0828e7dfc",
+          "drug_id": "c2b21f0a-ca96-4fe5-adeb-9d08b5bef85e",
+          "location": null,
+          "quantity": 120,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 8
+      }
+    ],
+    "note": "FEFO sale across two lots, then a refund into the exact original lot",
+    "server": {
+      "branch_inventory": {
+        "quantity": 120,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "LOT-FAR",
+          "expiry_date": "2027-11-07",
+          "id": "896ab8a4-3cc2-4f8f-90a3-ac5c6f976448",
+          "quantity": 70,
+          "remaining_quantity": 70
+        },
+        {
+          "batch_number": "LOT-NEAR",
+          "expiry_date": "2027-11-07",
+          "id": "864bbb6d-b837-4513-9bf7-9f3fbb583046",
+          "quantity": 50,
+          "remaining_quantity": 50
+        }
+      ]
+    }
+  },
+  "sale_created multi-lot spill": {
+    "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+    "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+    "events": [
+      {
+        "aggregate_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:40:06.188546+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "BC55F514241744719F6F934D0B",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "branch_inventory_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+          "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:40:06.372823+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "C5DEB3AF2B4E4F3FB7951F15F4",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "batch_id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+          "batch_number": "SPILL-NEAR",
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "cost_price": null,
+          "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+          "expiry_date": "2027-11-07",
+          "id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 30,
+          "remaining_quantity": 30,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:40:06.384353+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "E8569141A86447AB974047B298",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "branch_inventory_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+          "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+          "location": null,
+          "quantity": 30,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      },
+      {
+        "aggregate_id": "9ee50b7b-946e-4007-a683-f96e07ec7dd6",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:40:06.539069+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "22C269D0D49447D29BCBA67E13",
+        "event_type": "drug_batch_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "batch_id": "9ee50b7b-946e-4007-a683-f96e07ec7dd6",
+          "batch_number": "SPILL-FAR",
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "cost_price": null,
+          "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+          "expiry_date": "2027-11-07",
+          "id": "9ee50b7b-946e-4007-a683-f96e07ec7dd6",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 70,
+          "remaining_quantity": 70,
+          "selling_price": null,
+          "supplier": null
+        },
+        "schema_version": 1,
+        "seq": 4
+      },
+      {
+        "aggregate_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:40:06.551369+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "8C8EEC8097FD4643A543607315",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "branch_inventory_id": "15acfde4-a101-41e4-9448-ebdebd456134",
+          "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+          "location": null,
+          "quantity": 100,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 5
+      },
+      {
+        "aggregate_id": "422d176a-baec-46ea-8deb-0f359af01e0b",
+        "aggregate_type": "sale",
+        "authored_at": "2026-10-03T13:40:06.864836+00:00",
+        "authored_by": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+        "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+        "dependencies": [],
+        "event_id": "346FD74381704F1782C4271BCD",
+        "event_type": "sale_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+        "payload": {
+          "amount_paid": 100000.0,
+          "batch_changes": [
+            {
+              "batch_id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+              "quantity_used": 30
+            },
+            {
+              "batch_id": "9ee50b7b-946e-4007-a683-f96e07ec7dd6",
+              "quantity_used": 20
+            }
+          ],
+          "branch_id": "f48ed3a6-474e-4c17-bcba-3095f86ad71c",
+          "cashier_id": "d1c31c4d-88db-4e04-93b3-58f196096aca",
+          "change_amount": 97500.0,
+          "customer_id": null,
+          "customer_name": null,
+          "discount_amount": 0.0,
+          "items": [
+            {
+              "batch_id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+              "discount_amount": 0.0,
+              "drug_id": "903cebc6-6392-4a92-8b03-9933666e13f7",
+              "drug_name": "Drug 1",
+              "quantity": 50,
+              "subtotal": 2500.0,
+              "unit_price": 50.0
+            }
+          ],
+          "organization_id": "730edbbb-7dec-4afb-b793-8bf8e5850c92",
+          "payment_method": "cash",
+          "payment_status": "completed",
+          "pharmacist_id": null,
+          "prescription_id": null,
+          "sale_number": "TB001-20261003-0001",
+          "subtotal": 2500.0,
+          "tax_amount": 0.0,
+          "total_amount": 2500.0
+        },
+        "schema_version": 1,
+        "seq": 6
+      }
+    ],
+    "note": "50 units across a 30 and a 70 lot; FEFO spill in batch_changes",
+    "server": {
+      "branch_inventory": {
+        "quantity": 50,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "SPILL-FAR",
+          "expiry_date": "2027-11-07",
+          "id": "9ee50b7b-946e-4007-a683-f96e07ec7dd6",
+          "quantity": 70,
+          "remaining_quantity": 50
+        },
+        {
+          "batch_number": "SPILL-NEAR",
+          "expiry_date": "2027-11-07",
+          "id": "9225a521-25de-47bb-9894-5b0fa96fe193",
+          "quantity": 30,
+          "remaining_quantity": 0
+        }
+      ]
+    }
+  },
+  "update_batch corrects a lot": {
+    "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+    "drug_id": "2f70e45d-d908-4eb7-8a25-70dbbb4e3dfd",
+    "events": [
+      {
+        "aggregate_id": "5462b357-c150-41c0-880f-e2b723899f95",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:57.131893+00:00",
+        "authored_by": "381064d7-6bb4-41b1-9f6c-7a4afaafef95",
+        "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+        "dependencies": [],
+        "event_id": "BA02C74813C6417E905036AC71",
+        "event_type": "branch_inventory_created",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "2403f740-d018-4fcd-84e7-bc196ce22849",
+        "payload": {
+          "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+          "branch_inventory_id": "5462b357-c150-41c0-880f-e2b723899f95",
+          "drug_id": "2f70e45d-d908-4eb7-8a25-70dbbb4e3dfd",
+          "location": null,
+          "quantity": 0,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 1
+      },
+      {
+        "aggregate_id": "cc443b34-ce31-40d0-b6c2-265c6af5a5ff",
+        "aggregate_type": "drug_batch",
+        "authored_at": "2026-10-03T13:36:57.443075+00:00",
+        "authored_by": "00000000-0000-0000-0000-000000000000",
+        "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+        "dependencies": [],
+        "event_id": "A1864A407EBB48349D61E859B7",
+        "event_type": "drug_batch_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "2403f740-d018-4fcd-84e7-bc196ce22849",
+        "payload": {
+          "batch_id": "cc443b34-ce31-40d0-b6c2-265c6af5a5ff",
+          "batch_number": "FIX-1",
+          "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+          "cost_price": 8.0,
+          "drug_id": "2f70e45d-d908-4eb7-8a25-70dbbb4e3dfd",
+          "expiry_date": "2027-10-03",
+          "id": "cc443b34-ce31-40d0-b6c2-265c6af5a5ff",
+          "location": null,
+          "purchase_order_id": null,
+          "quantity": 100,
+          "remaining_quantity": 35,
+          "selling_price": null,
+          "supplier": "Test Supplier"
+        },
+        "schema_version": 1,
+        "seq": 2
+      },
+      {
+        "aggregate_id": "5462b357-c150-41c0-880f-e2b723899f95",
+        "aggregate_type": "branch_inventory",
+        "authored_at": "2026-10-03T13:36:57.453261+00:00",
+        "authored_by": "00000000-0000-0000-0000-000000000000",
+        "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+        "dependencies": [],
+        "event_id": "AAAE3AAEE65342B98A4256044D",
+        "event_type": "branch_inventory_updated",
+        "hash_prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "hash_self": "0000000000000000000000000000000000000000000000000000000000000000",
+        "org_id": "2403f740-d018-4fcd-84e7-bc196ce22849",
+        "payload": {
+          "branch_id": "32631617-cdfa-45d8-9bae-cb8330c157df",
+          "branch_inventory_id": "5462b357-c150-41c0-880f-e2b723899f95",
+          "drug_id": "2f70e45d-d908-4eb7-8a25-70dbbb4e3dfd",
+          "location": null,
+          "quantity": 35,
+          "reserved_quantity": 0,
+          "selling_price": null
+        },
+        "schema_version": 1,
+        "seq": 3
+      }
+    ],
+    "note": "absolute corrected remaining_quantity, not a delta",
+    "server": {
+      "branch_inventory": {
+        "quantity": 35,
+        "reserved_quantity": 0
+      },
+      "drug_batches": [
+        {
+          "batch_number": "FIX-1",
+          "expiry_date": "2027-10-03",
+          "id": "cc443b34-ce31-40d0-b6c2-265c6af5a5ff",
+          "quantity": 100,
+          "remaining_quantity": 35
+        }
+      ]
+    }
+  }
+}

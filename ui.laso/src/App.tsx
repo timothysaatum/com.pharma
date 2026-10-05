@@ -367,7 +367,6 @@ function AppRoutes() {
           <Route path="/inventory" element={<Navigate to="/admin/inventory" replace />} />
           <Route path="/purchases" element={<Navigate to="/admin/purchases" replace />} />
           <Route path="/contracts" element={<Navigate to="/admin/contracts" replace />} />
-          <Route path="/admin/prescriptions" element={<Navigate to="/prescriptions" replace />} />
           <Route path="/organization-stats" element={<Navigate to="/settings/organization" replace />} />
           <Route path="/branches" element={<Navigate to="/settings/branches" replace />} />
           <Route path="/drug-management" element={<Navigate to="/admin/drugs" replace />} />

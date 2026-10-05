@@ -308,7 +308,9 @@ async function buildPrescriptionEnvelope(
         prescription_number: prescription.prescription_number,
         customer_id: prescription.customer_id,
         prescriber_name: prescription.prescriber_name,
-        prescriber_license: prescription.prescriber_license,
+        // Canonical absent form is null, never "" (P2). Three distinct
+        // states for "no licence" is how a `IS NOT NULL` filter misses rows.
+        prescriber_license: prescription.prescriber_license || null,
         prescriber_phone: prescription.prescriber_phone ?? null,
         prescriber_address: prescription.prescriber_address ?? null,
         issue_date: prescription.issue_date,
@@ -941,15 +943,46 @@ export const writeLocal = {
         const tableInfo = await db.select<{ name: string }[]>("PRAGMA table_info(prescriptions)").catch(() => []);
         const validCols = tableInfo.length > 0 ? new Set(tableInfo.map((c) => c.name)) : null;
 
+        // Which of THESE prescriptions still have an event the server has not
+        // accepted. One query for the whole page — this used to be a per-row
+        // lookup, which is why it was written as a blanket status check instead.
+        //
+        // This replaces `sync_status === 'pending' → skip`, which was wrong in
+        // both directions:
+        //   - it PROTECTED too much: a row whose only event was accepted stayed
+        //     'pending' forever (nothing reconciled the flag), so the server's
+        //     authoritative row could never land. Observed: local `active 1/1`
+        //     against server `filled 0/1`.
+        //   - and it protected the wrong thing: 'pending' was a proxy for "has
+        //     unsent local edits", which is what the outbox actually knows.
+        //
+        // The invariant this preserves: never overwrite a row that still has an
+        // unsent event for it, because that would discard the local edit. A row
+        // with nothing in flight is the server's to correct.
+        const unsentIds = new Set(
+            (
+                await db
+                    .select<{ aggregate_id: string }[]>(
+                        `SELECT DISTINCT aggregate_id FROM event_outbox
+                          WHERE aggregate_type = 'prescription'
+                            AND status IN ('pending', 'failed', 'accepted_deferred')`
+                    )
+                    .catch(() => [])
+            ).map((r) => r.aggregate_id)
+        );
+
         for (const prescription of prescriptions) {
             const existing = await db.select<{ sync_status: string }[]>(
                 "SELECT sync_status FROM prescriptions WHERE id = $1 LIMIT 1",
                 [prescription.id]
             );
             const localStatus = existing[0]?.sync_status;
-            if (localStatus === "pending" || localStatus === "conflict") {
-                continue;
-            }
+            // 'conflict' still blocks: that is a real unresolved conflict a human
+            // has to settle, not a staleness artefact.
+            if (localStatus === "conflict") continue;
+            // The interlock. An unsent event for this prescription means the
+            // server has not seen the local edit, so its copy must not win.
+            if (unsentIds.has(prescription.id)) continue;
 
             const payload = pickColumns(
                 {

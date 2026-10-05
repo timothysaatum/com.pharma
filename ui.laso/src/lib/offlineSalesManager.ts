@@ -22,6 +22,10 @@ import {
   buildSaleCreatedEnvelope,
 } from "@/lib/localWrite";
 import { refreshSellableQuantity } from "@/lib/sellableQty";
+import {
+    prescriptionRefillUsedEventId,
+    RX_REFILL_EVENT_TYPE,
+} from "@/lib/refillEventId";
 import type { Sale, SaleItem } from "@/types";
 
 export interface OfflineSaleRecord {
@@ -102,6 +106,20 @@ export class OfflineSalesManager {
       }
     }
 
+    // The server will emit `prescription_refill_used` for this sale with an id
+    // derived from the sale id. Computing it here lets this device record it in
+    // applied_events INSIDE the sale transaction, so when the server's echo
+    // arrives over the next sync pull, `_prescriptionRefillUsed` skips it and the
+    // device does not decrement a second time.
+    //
+    // Computed before the (synchronous) statement builder because the digest is
+    // async, and the marker has to be one of the statements to share the
+    // transaction — a separate write after commit could be lost to a crash and
+    // would then suppress nothing.
+    const refillEventId = sale.prescription_id
+        ? await prescriptionRefillUsedEventId(sale.prescription_id, sale.id)
+        : null;
+
     const statements = this.buildTransactionStatements(
         sale,
         items,
@@ -109,6 +127,7 @@ export class OfflineSalesManager {
         batchAllocs,
         idempotencyKey,
         now,
+        refillEventId,
     );
     await db.executeTransaction(statements);
 
@@ -157,6 +176,7 @@ export class OfflineSalesManager {
     batchAllocs: Map<string, Array<{ batchId: string; allocatedQty: number }>>,
     idempotencyKey: string,
     now: string,
+    refillEventId: string | null,
   ): DbTransactionStatement[] {
     const { items: _saleItems, ...saleData } = sale as Record<string, unknown>;
     const salePayload = buildLocalSalePayload(
@@ -230,7 +250,6 @@ export class OfflineSalesManager {
               SET refills_remaining = refills_remaining - 1,
                   status = CASE WHEN refills_remaining - 1 = 0 THEN 'filled' ELSE 'active' END,
                   last_refill_date = $1,
-                  sync_status = 'synced',
                   updated_at = $2
               WHERE id = $3 AND branch_id = $4
                 AND status = 'active' AND refills_remaining > 0`,
@@ -239,6 +258,24 @@ export class OfflineSalesManager {
         errorMessage:
           "Prescription is missing, inactive, out of refills, or belongs to another branch; no part of the sale was recorded.",
       });
+
+      // Marker for the server's echo of this very dispense, in the SAME
+      // transaction as the decrement above. See the call site for why.
+      if (refillEventId) {
+        statements.push({
+          sql: `INSERT INTO applied_events
+                  (event_id, org_id, seq, event_type, aggregate_id, applied_at)
+                VALUES ($1,$2,0,$3,$4,$5)
+                ON CONFLICT(event_id) DO NOTHING`,
+          values: [
+            refillEventId,
+            sale.organization_id ?? "",
+            RX_REFILL_EVENT_TYPE,
+            sale.prescription_id,
+            now,
+          ],
+        });
+      }
     }
 
     return statements;

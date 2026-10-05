@@ -147,9 +147,15 @@ class Paginator:
         result = await self.db.execute(paginated_query)
         items = result.all()
 
-        # Convert to schema if provided
+# Convert to schema if provided. Routed through the instrumented
+        # builder so a row that cannot be serialised is reported as a 500
+        # naming the row, never as a 422 blaming the caller.
         if schema:
-            items = [schema.model_validate(item) for item in items]
+            from app.utils.response_building import build_response_model
+
+            items = build_response_model(
+                schema, items, context="Paginator.paginate"
+            )
 
         return PaginatedResponse(
             items=items,
@@ -237,9 +243,15 @@ class Paginator:
         end = start + params.page_size
         page_items = items[start:end]
         
-        # Convert to schema if provided
+        # Convert to schema if provided. Routed through the instrumented
+        # builder so a row that cannot be serialised is reported as a 500
+        # naming the row, never as a 422 blaming the caller.
         if schema:
-            page_items = [schema.model_validate(item) for item in page_items]
+            from app.utils.response_building import build_response_model
+
+            page_items = build_response_model(
+                schema, page_items, context="Paginator.paginate_list"
+            )
         
         return PaginatedResponse(
             items=page_items,

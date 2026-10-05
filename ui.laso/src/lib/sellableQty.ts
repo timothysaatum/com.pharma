@@ -171,6 +171,117 @@ export async function refreshSellableQuantity(
 }
 
 /**
+ * Recompute branch_inventory.quantity from the local batch rows (C-hybrid).
+ *
+ * WHY
+ * ---
+ * `quantity` used to be written by TWO projectors with different semantics:
+ * `_branchInventoryUpserted` assigned it absolutely from the payload, and
+ * `_drugBatchUpserted` changed it relatively (`quantity = quantity + n`). They
+ * can only both be right if the receiving side knows which is authoritative, and
+ * it does not. Measured on the live org (see
+ * `phase3DoubleCount.spec.ts`), replaying a drug's branch_inventory event with
+ * its batch events landed on 234 instead of 117 and 494 instead of 247, and a
+ * device that already held the inventory row inflated a newly arrived batch on
+ * top of it (247 + 100 = 347).
+ *
+ * So for any (branch, drug) where this device holds AT LEAST ONE batch row,
+ * `quantity` is DERIVED, never accumulated:
+ *
+ *     quantity = SUM(drug_batches.remaining_quantity)
+ *                  WHERE branch_id, drug_id AND remaining_quantity > 0
+ *
+ * No expiry filter, mirroring the server's `_recalculate_inventory_quantity`
+ * (inventory_service.py:2027). Verified against atlasdb on
+ * 2026-10-02: all 6 branch_inventory rows in org 2d060ef8 already satisfy
+ * quantity == that sum, so deriving reproduces the server value exactly.
+ *
+ * The expiry filter that `sellable_quantity` uses is deliberately absent here:
+ * `quantity` is total stock on hand, not stock available to sell.
+ *
+ * WHEN THERE ARE NO BATCH ROWS
+ * ---------------------------
+ * The derivation is skipped and `quantity` is left to the branch_inventory
+ * event's absolute value (or an explicit relative delta from stock_adjusted).
+ * A device legitimately holds an inventory row before its first drug_batches
+ * event arrives, and a drug can be stocked by adjustment without ever having a
+ * batch. Same predicate as the sellable fallback, for the same reason.
+ */
+export async function recomputeQuantityFromBatches(
+  db: Database,
+  branchId: string,
+  drugId: string
+): Promise<void> {
+  if (!branchId || !drugId) return;
+
+  // Any batch row at all licenses the derivation. Unfiltered by expiry and by
+  // remaining_quantity, because this only answers "has this device received the
+  // batches yet".
+  const anyRows = await db.select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM drug_batches WHERE branch_id = $1 AND drug_id = $2",
+    [branchId, drugId]
+  );
+  if (Number(anyRows?.[0]?.n ?? 0) === 0) return;
+
+  const totals = await db.select<{ total: number | null }[]>(
+    `SELECT SUM(remaining_quantity) AS total
+       FROM drug_batches
+      WHERE branch_id = $1 AND drug_id = $2 AND remaining_quantity > 0`,
+    [branchId, drugId]
+  );
+  const derived = Number(totals?.[0]?.total ?? 0);
+
+  // No-op when the row is absent: quantity is a property of an inventory row.
+  const exists = await db.select<{ id: string }[]>(
+    "SELECT id FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1",
+    [branchId, drugId]
+  );
+  if (!exists || exists.length === 0) return;
+
+  await db.execute(
+    `UPDATE branch_inventory
+        SET quantity = $1, updated_at = $2
+      WHERE branch_id = $3 AND drug_id = $4`,
+    [derived, new Date().toISOString(), branchId, drugId]
+  );
+}
+
+/**
+ * {@link recomputeQuantityFromBatches} + {@link refreshSellableQuantity} for one
+ * pair. Call this wherever a projector changes a batch remaining_quantity or an
+ * inventory quantity, so `quantity` is derived and `sellable_quantity` is
+ * recomputed in the same step.
+ */
+export async function refreshQuantities(
+  db: Database,
+  branchId: string,
+  drugId: string,
+  options: SellableOptions = {}
+): Promise<void> {
+  await recomputeQuantityFromBatches(db, branchId, drugId);
+  await refreshSellableQuantity(db, branchId, drugId, options);
+}
+
+/**
+ * {@link refreshQuantities} for several pairs, de-duplicated.
+ */
+export async function refreshQuantitiesForPairs(
+  db: Database,
+  pairs: Array<{ branchId: string; drugId: string }>,
+  options: SellableOptions = {}
+): Promise<void> {
+  const seen = new Set<string>();
+  const terminalId = options.excludeTerminalId ?? currentTerminalId();
+  for (const { branchId, drugId } of pairs) {
+    if (!branchId || !drugId) continue;
+    const key = `${branchId}::${drugId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    await refreshQuantities(db, branchId, drugId, { excludeTerminalId: terminalId });
+  }
+}
+
+/**
  * Refresh several (branch_id, drug_id) pairs, de-duplicated. Used by the
  * batch-applying projectors, which touch many drugs in one event.
  */

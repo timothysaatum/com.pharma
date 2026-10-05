@@ -42,6 +42,13 @@ from app.services.sync.eventlog.projector import (
     ProjectorStatus,
 )
 from app.services.sync.eventlog.projectors._fefo import fefo_allocate
+from app.services.sync.eventlog.refill_event_id import (
+    prescription_refill_used_event_id,
+)
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    _coerce_uuid,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -314,6 +321,167 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             use_server_fefo=use_server_fefo,
             terminal_id=terminal_id,
         )
+
+    # ── 3. Consume a prescription refill ─────────────────────────────────────
+    # Placed after the `RETURNING id` gate above, so it runs exactly once per
+    # sale id: a replayed sale_created finds the existing sale row, returns None,
+    # and leaves before reaching this. That is the idempotency this step needs —
+    # the event id alone would not be enough, because the emit and the decrement
+    # have to happen together or not at all.
+    await _apply_prescription_refill(
+        db=db,
+        event=event,
+        sale_id=sale_id,
+        org_id=org_id,
+        branch_id=branch_id,
+        payload=payload,
+    )
+
+
+async def _apply_prescription_refill(
+    *,
+    db: AsyncSession,
+    event: EventEnvelope,
+    sale_id: str,
+    org_id: str,
+    branch_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Consume one refill for an offline-synced sale, then announce it.
+
+    Before this, an offline dispense decremented the DEVICE's counter only. The
+    server's counter never moved, so (a) the Prescriptions page read the server
+    and showed the prescription untouched, and (b) with two devices the server's
+    guard could not stop a second dispense of the same prescription, because the
+    server had never counted the first one.
+
+    NEVER REJECTS. The medicine has already left the shelf; the physical sale is
+    not reversible by refusing an event. So the counter clamps at 0 (respecting
+    `check_refills_remaining`) and the over-dispense is recorded loudly instead
+    of silently accepted. A non-active status is likewise not a reason to drop
+    the event — a prescription cancelled on another device while this one was
+    offline still got dispensed, and that is worth seeing.
+    """
+    rx_id = _uuid_str_or_none(payload.get("prescription_id"))
+    if not rx_id:
+        return
+
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT id, status, refills_allowed, refills_remaining,
+                       customer_id
+                  FROM prescriptions
+                 WHERE id = :rx_id AND organization_id = :org_id
+                 FOR UPDATE
+                """
+            ),
+            {"rx_id": rx_id, "org_id": org_id},
+        )
+    ).mappings().first()
+
+    if row is None:
+        # The prescription was never pushed to the server, or belongs to another
+        # org. Nothing to decrement. Logged rather than raised: see the docstring.
+        logger.warning(
+            "sale_created references a prescription the server does not have: "
+            "sale_id=%s prescription_id=%s org_id=%s",
+            sale_id, rx_id, org_id,
+        )
+        return
+
+    # `pharmacist_id` is the person who verified the prescription. An offline sale
+    # may not have one (the device's pre-flight does not require a pharmacist),
+    # and the cashier is NOT a substitute — `verified_by` means "pharmacist who
+    # verified", so writing a cashier id there would assert something untrue about
+    # a controlled-drug record. So: use the pharmacist when the device captured
+    # one, otherwise leave it NULL and let `verified_at` carry the timestamp.
+    pharmacist_id = _uuid_str_or_none(payload.get("pharmacist_id"))
+    refill_date = event.authored_at.date()
+    verified_at = event.authored_at
+
+    before_status = row["status"]
+    before_remaining = int(row["refills_remaining"])
+    after_remaining = max(0, before_remaining - 1)
+    over_dispensed = before_remaining <= 0 or before_status != "active"
+    after_status = "filled" if after_remaining == 0 else "active"
+
+    await db.execute(
+        text(
+            """
+            UPDATE prescriptions
+               SET refills_remaining = :after_remaining,
+                   last_refill_date  = :refill_date,
+                   status            = :after_status,
+                   verified_by       = :verified_by,
+                   verified_at       = :verified_at,
+                   updated_at        = :updated_at
+             WHERE id = :rx_id AND organization_id = :org_id
+            """
+        ),
+        {
+            "after_remaining": after_remaining,
+            "refill_date": refill_date,
+            "after_status": after_status,
+            "verified_by": pharmacist_id,
+            "verified_at": verified_at,
+            "updated_at": verified_at,
+            "rx_id": rx_id,
+            "org_id": org_id,
+        },
+    )
+
+    if over_dispensed:
+        # Recorded in three places on purpose: the structured log for alerting,
+        # the event payload so devices and the audit trail can see it, and
+        # system_alerts is deliberately NOT written here — this runs inside the
+        # ingest transaction and a monitor has never been asked to own it.
+        logger.error(
+            "OVER-DISPENSE: prescription refilled while not fillable. "
+            "sale_id=%s prescription_id=%s org_id=%s branch_id=%s "
+            "status_before=%s refills_before=%d refills_after=%d "
+            "pharmacist_id=%s",
+            sale_id, rx_id, org_id, branch_id,
+            before_status, before_remaining, after_remaining, pharmacist_id,
+        )
+
+    await StockEventEmitter.emit_in_transaction(
+        db,
+        org_id=_coerce_uuid(org_id),
+        event_type="prescription_refill_used",
+        aggregate_type=AggregateType.PRESCRIPTION,
+        aggregate_id=_coerce_uuid(rx_id),
+        # Derived from the sale id: a replayed sale_created never reaches here
+        # (the RETURNING gate returns first), and if it somehow did, the same id
+        # makes the append a no-op.
+        event_id=prescription_refill_used_event_id(rx_id, sale_id),
+        payload={
+            "prescription_id": rx_id,
+            "sale_id": sale_id,
+            "sale_number": payload.get("sale_number"),
+            "organization_id": org_id,
+            "branch_id": branch_id,
+            # Absolute post-state, so a device converges on the server's number
+            # rather than applying its own delta on top.
+            "refills_remaining": after_remaining,
+            "refills_allowed": int(row["refills_allowed"]),
+            "status": after_status,
+            "last_refill_date": refill_date.isoformat(),
+            "verified_by": pharmacist_id,
+            "verified_at": verified_at.isoformat(),
+            "source": "offline_sale_sync",
+            "over_dispensed": over_dispensed,
+            "status_before": before_status,
+            "refills_before": before_remaining,
+        },
+        authored_by=(
+            _coerce_uuid(pharmacist_id)
+            if pharmacist_id
+            else _coerce_uuid(payload.get("cashier_id"))
+        ),
+        branch_id=_coerce_uuid(branch_id) if branch_id else None,
+    )
 
 
 async def _apply_item(

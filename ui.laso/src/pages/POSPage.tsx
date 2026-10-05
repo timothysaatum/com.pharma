@@ -162,6 +162,21 @@ export default function POSPage() {
     // ── Contracts ──────────────────────────────────────────────────────────────
     const [contracts, setContracts] = useState<AvailableContract[]>([]);
     const [contractsLoading, setContractsLoading] = useState(true);
+    /**
+     * Why the contract list is what it is, for display.
+     *
+     * 'offline'      — deliberately served from the local cache; not an error.
+     * 'error'        — the online load FAILED for a reason that is not being
+     *                  offline (401/403/404/5xx/timeout). Previously this was
+     *                  swallowed into a silent empty list, so the cashier saw
+     *                  "Select a price contract" and a disabled sale button with
+     *                  no idea the server was unreachable or rejecting them.
+     * 'empty'        — the server answered with no contracts for this branch.
+     */
+    const [contractsIssue, setContractsIssue] = useState<{
+        kind: 'offline' | 'error' | 'empty' | null;
+        message: string | null;
+    }>({ kind: null, message: null });
 
     const loadContracts = useCallback(async () => {
         if (!activeBranchId) return;
@@ -173,21 +188,55 @@ export default function POSPage() {
             );
         try {
             if (isOffline || !navigator.onLine || isBackendKnownUnreachable()) {
-                setContracts(await loadLocalContracts());
+                const local = await loadLocalContracts();
+                setContracts(local);
+                setContractsIssue(
+                    local.length > 0
+                        ? { kind: null, message: null }
+                        : {
+                              kind: 'offline',
+                              message:
+                                  'Offline, and no price contract is stored on this device for this branch.',
+                          }
+                );
                 return;
             }
 
             const data = await contractsApi.getAvailableForPos(activeBranchId);
             if (data.length > 0) {
                 setContracts(data);
+                setContractsIssue({ kind: null, message: null });
                 return;
             }
 
+            // The server answered, but with nothing for this branch. Fall back
+            // to the cache so a stocked-but-unsynced contract is still usable.
             const fallback = await loadLocalContracts();
-            setContracts(fallback.length > 0 ? fallback : data);
-        } catch {
-            // Non-blocking — cashier can still proceed with empty list
-            setContracts(await loadLocalContracts());
+            setContracts(fallback);
+            setContractsIssue(
+                fallback.length > 0
+                    ? { kind: null, message: null }
+                    : {
+                          kind: 'empty',
+                          message:
+                              'The server has no active price contract for this branch. Check Settings → Price Contracts.',
+                      }
+            );
+        } catch (err) {
+            // A real failure, not an offline state. Say so instead of handing
+            // back a silent empty list that reads as "pick a contract".
+            const local = await loadLocalContracts().catch(() => [] as AvailableContract[]);
+            setContracts(local);
+            setContractsIssue({
+                kind: local.length > 0 ? null : 'error',
+                message:
+                    local.length > 0
+                        ? null
+                        : `Could not load price contracts from the server (${
+                              (err as { response?: { status?: number } })?.response?.status ??
+                              'network error'
+                          }). The sale button stays disabled until a contract is available.`,
+            });
         } finally {
             setContractsLoading(false);
         }
@@ -539,6 +588,13 @@ export default function POSPage() {
             // Notify inventory page to refresh its counts
             appEvents.emit("inventory:changed");
             appEvents.emit("sales:changed");
+            // A sale that consumed a refill changed the local prescriptions row
+            // (offline: inside the transaction; online: it has not yet, which is
+            // what the refill event arriving over sync will do). Emitting
+            // unconditionally would refetch the whole list on every cash sale.
+            if (payload.prescription_id) {
+                appEvents.emit("prescriptions:changed");
+            }
             } catch (err) {
             const shouldRecordOffline = shouldFallbackToOfflineSaleAfterError({
                 offlineError: isOfflineError(err),
@@ -558,6 +614,13 @@ export default function POSPage() {
                     setSuccessResult(result);
                     appEvents.emit("inventory:changed");
                     appEvents.emit("sales:changed");
+            // A sale that consumed a refill changed the local prescriptions row
+            // (offline: inside the transaction; online: it has not yet, which is
+            // what the refill event arriving over sync will do). Emitting
+            // unconditionally would refetch the whole list on every cash sale.
+            if (payload.prescription_id) {
+                appEvents.emit("prescriptions:changed");
+            }
                 } catch (offlineError) {
                     setCheckoutError(parseApiError(offlineError));
                 }
@@ -654,6 +717,8 @@ export default function POSPage() {
                         contract={cart.state.contract}
                         contracts={contracts}
                         contractsLoading={contractsLoading}
+                        contractsIssue={contractsIssue}
+                        onRetryContracts={loadContracts}
                         customerName={cart.state.customerName}
                         customerId={cart.state.customerId}
                         paymentMethod={cart.state.paymentMethod}

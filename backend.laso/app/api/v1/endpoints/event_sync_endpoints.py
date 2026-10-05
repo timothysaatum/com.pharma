@@ -256,11 +256,22 @@ async def pull_events(
 
     next_after_seq = page_rows[-1][2] if page_rows else after_seq
 
+    # The TRUE head for this org, on every response including an empty page.
+    #
+    # `next_after_seq` above is a paging cursor: on an empty page it echoes the
+    # caller's own `after_seq`. A device whose cursor had been stranded above
+    # the head therefore learned nothing about the mismatch. This field is the
+    # actual MAX(seq), so the client can tell "you are current" from "you are
+    # past my log" and recover. Computed from the index-backed query in
+    # _current_tail_seq.
+    server_head_seq = await _current_tail_seq(db, org_id)
+
     return EventPullResponse(
         server_clock=datetime.now(timezone.utc),
         events=envelopes,
         has_more=has_more,
         next_after_seq=next_after_seq,
+        server_head_seq=server_head_seq,
     )
 
 

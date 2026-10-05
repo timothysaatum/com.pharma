@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { FieldLabel } from "@/components/ui";
 import { AlertCircle, CheckCircle2, FilePlus2, FileText, Loader2, Plus, RefreshCw, X } from "lucide-react";
 import { isOfflineError, parseApiError } from "@/api/client";
 import { prescriptionsApi, type PrescriptionSearchItem } from "@/api/prescriptions";
@@ -87,6 +88,9 @@ export function PrescriptionSelector({
     const [prescriberName, setPrescriberName] = useState("");
     const [prescriberLicense, setPrescriberLicense] = useState("");
     const [prescriberPhone, setPrescriberPhone] = useState("");
+  // The prescriber's own place of work (P2). Reuses the existing
+  // `prescriber_address` column, which both forms previously hardcoded to null.
+  const [prescriberFacility, setPrescriberFacility] = useState("");
     const [issueDate, setIssueDate] = useState(today);
     const [expiryDate, setExpiryDate] = useState(() => addDays(30));
     const [refillsAllowed, setRefillsAllowed] = useState(0);
@@ -177,8 +181,10 @@ export function PrescriptionSelector({
     const createPrescription = async () => {
         if (!customerId) return;
         setFormError(null);
-        if (!prescriberName.trim() || !prescriberLicense.trim()) {
-            setFormError("Prescriber name and license are required.");
+        // prescriber_license is NOT required (P2). This form had its own copy of
+        // the check, so it needed the same change as PrescriptionsPage.
+        if (!prescriberName.trim()) {
+            setFormError("Prescriber name is required.");
             return;
         }
         if (medications.some((med) => !med.dosage.trim() || !med.frequency.trim() || !med.duration.trim() || med.quantity <= 0)) {
@@ -193,8 +199,9 @@ export function PrescriptionSelector({
                 customer_id: customerId,
                 branch_id: activeBranchId ?? undefined,
                 prescriber_name: prescriberName.trim(),
-                prescriber_license: prescriberLicense.trim(),
+                prescriber_license: prescriberLicense.trim() || null,
                 prescriber_phone: prescriberPhone.trim() || null,
+                prescriber_address: prescriberFacility.trim() || null,
                 issue_date: issueDate,
                 expiry_date: expiryDate,
                 medications,
@@ -214,8 +221,7 @@ export function PrescriptionSelector({
                     organization_id: user?.organization_id ?? "",
                     ...payload,
                     branch_id: activeBranchId ?? "",
-                    prescriber_address: null,
-                    diagnosis: null,
+                        diagnosis: null,
                     special_instructions: null,
                     refills_remaining: payload.refills_allowed,
                     last_refill_date: null,
@@ -341,12 +347,43 @@ export function PrescriptionSelector({
             {showCreate && (
                 <div className="space-y-3 p-3 rounded-xl border border-brand-100 bg-brand-50/40">
                     <div className="grid grid-cols-2 gap-2">
-                        <input value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="Prescription #" />
-                        <input value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="Prescriber name *" />
-                        <input value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="License # *" />
-                        <input value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="Phone" />
-                        <input type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
-                        <input type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-number">Prescription #</FieldLabel>
+                            <input id="pos-rx-number" value={prescriptionNumber} onChange={(e) => setPrescriptionNumber(e.target.value)} className={inputCls} placeholder="e.g. RX-2026-0042" />
+                        </div>
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-prescriber">Prescriber name *</FieldLabel>
+                            <input id="pos-rx-prescriber" value={prescriberName} onChange={(e) => setPrescriberName(e.target.value)} className={inputCls} placeholder="e.g. Dr. Ama Boateng" />
+                        </div>
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-license">License # (optional)</FieldLabel>
+                            <input id="pos-rx-license" value={prescriberLicense} onChange={(e) => setPrescriberLicense(e.target.value)} className={inputCls} placeholder="e.g. MED-12345" />
+                        </div>
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-phone">Phone (optional)</FieldLabel>
+                            <input id="pos-rx-phone" value={prescriberPhone} onChange={(e) => setPrescriberPhone(e.target.value)} className={inputCls} placeholder="e.g. 024 555 1234" />
+                        </div>
+                        {/* The prescriber's place of work, NOT our dispensing
+                            branch. "Facility" already means the latter in this
+                            codebase, so the label says whose it is. */}
+                        <div className="col-span-2">
+                            <FieldLabel htmlFor="pos-rx-facility">Prescriber&apos;s facility (optional)</FieldLabel>
+                            <input
+                                id="pos-rx-facility"
+                                value={prescriberFacility}
+                                onChange={(e) => setPrescriberFacility(e.target.value)}
+                                className={inputCls}
+                                placeholder="Hospital or clinic, e.g. Korle Bu Teaching Hospital"
+                            />
+                        </div>
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-issue">Issue date *</FieldLabel>
+                            <input id="pos-rx-issue" type="date" value={issueDate} onChange={(e) => setIssueDate(e.target.value)} className={inputCls} />
+                        </div>
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-expiry">Expiry date *</FieldLabel>
+                            <input id="pos-rx-expiry" type="date" value={expiryDate} onChange={(e) => setExpiryDate(e.target.value)} className={inputCls} />
+                        </div>
                     </div>
 
                     <div className="space-y-2">
@@ -360,7 +397,7 @@ export function PrescriptionSelector({
                                         value={med.quantity}
                                         onChange={(e) => updateMedication(med.drug_id, { quantity: Math.max(1, Number(e.target.value) || 1) })}
                                         className="w-16 h-8 px-2 rounded border border-slate-200 text-xs"
-                                        title="Quantity prescribed"
+                                        aria-label={`Quantity prescribed for ${med.drug_name}`}
                                     />
                                 </div>
                                 <div className="grid grid-cols-3 gap-1.5">
@@ -372,9 +409,24 @@ export function PrescriptionSelector({
                         ))}
                     </div>
 
-                    <div className="grid grid-cols-[1fr_96px] gap-2">
-                        <input value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Notes" />
-                        <input type="number" min={0} max={10} value={refillsAllowed} onChange={(e) => setRefillsAllowed(Math.max(0, Math.min(10, Number(e.target.value) || 0)))} className={inputCls} title="Refills allowed" />
+                    <div className="grid grid-cols-[1fr_130px] gap-2">
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-notes">Notes (optional)</FieldLabel>
+                            <input id="pos-rx-notes" value={notes} onChange={(e) => setNotes(e.target.value)} className={inputCls} placeholder="Anything the pharmacist should know" />
+                        </div>
+                        {/* Was a bare "0" labelled only by a hover title. */}
+                        <div>
+                            <FieldLabel htmlFor="pos-rx-refills">Refills (0–10)</FieldLabel>
+                            <input
+                                id="pos-rx-refills"
+                                type="number"
+                                min={0}
+                                max={10}
+                                value={refillsAllowed}
+                                onChange={(e) => setRefillsAllowed(Math.max(0, Math.min(10, Number(e.target.value) || 0)))}
+                                className={inputCls}
+                            />
+                        </div>
                     </div>
 
                     {formError && (

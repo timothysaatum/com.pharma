@@ -20,6 +20,12 @@ import {
     Receipt, Banknote, Tag, Search, UserCheck, X, Loader2,
 } from "lucide-react";
 import type { AvailableContract } from "@/api/contracts";
+import { pickDefaultContract } from "@/lib/pickDefaultContract";
+import {
+    getLineStockState,
+    stockLabelClass,
+    stockLabelText,
+} from "@/lib/cartStockState";
 import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient, isBackendKnownUnreachable } from "@/api/client";
@@ -314,6 +320,13 @@ interface CartPanelProps {
     contract: AvailableContract | null;
     contracts: AvailableContract[];
     contractsLoading: boolean;
+    /**
+     * Why the contract list is empty when it is. Drives an explicit message
+     * plus a Retry button, so a failed load is never mistaken for "pick a
+     * contract". `kind: null` means there is nothing to report.
+     */
+    contractsIssue?: { kind: 'offline' | 'error' | 'empty' | null; message: string | null } | null;
+    onRetryContracts?: () => void;
     customerName: string;
     customerId: string | null;
     paymentMethod: PaymentMethod;
@@ -362,8 +375,46 @@ function SectionLabel({ icon: Icon, children }: { icon: React.ElementType; child
     );
 }
 
+/** Ceiling for one cart line when stock is unknown. Matches useCart's cap. */
+export const LINE_QUANTITY_CAP = 1000;
+
+/**
+ * Sanitise a typed quantity draft: digits only, no leading zeros.
+ *
+ * Empty is allowed and returned as-is, because the field must be clearable.
+ * Anything else non-numeric collapses to "" so a stray letter can never become
+ * NaN and then silently commit as 1.
+ */
+export function sanitiseDraft(raw: string): string {
+    const digits = raw.replace(/[^0-9]/g, "");
+    if (digits === "") return "";
+    const stripped = digits.replace(/^0+/, "");
+    return stripped === "" ? "0" : stripped;
+}
+
+/**
+ * Turn a draft into the quantity to commit.
+ *
+ * empty / NaN / < 1  -> 1
+ * known available     -> clamped to available (the "max" state follows)
+ * available unknown   -> the value, up to the reducer's existing 1000 cap
+ */
+export function commitDraft(
+    draft: string,
+    available: number | undefined,
+    cap = LINE_QUANTITY_CAP
+): number {
+    const n = Number(draft);
+    if (draft === "" || Number.isNaN(n) || n < 1) return 1;
+    if (available !== undefined && !Number.isNaN(available)) {
+        return Math.min(n, available);
+    }
+    return Math.min(n, cap);
+}
+
 export function CartPanel({
     items, contract, contracts, contractsLoading,
+    contractsIssue, onRetryContracts,
     customerName, customerId, paymentMethod, amountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
     insuranceVerified, notes, totals, validationErrors, checkoutError,
@@ -373,7 +424,28 @@ export function CartPanel({
     onSetSplitPayment, onSetPrescriptionId, onSetInsuranceClaimNumber, onSetInsurancePreAuthNumber,
     onSetInsuranceVerified, onSetNotes, onCheckout, onClearCart,
 }: CartPanelProps) {
-    const autoSelectedRef = useRef(false);
+    // ── Quantity draft (per cart line) ──────────────────────────────────
+    //
+    // The committed quantity lives in the cart; while the field has focus it
+    // shows a local draft string instead. Without this the input cannot be
+    // cleared (parseInt("") || 1 snapped it straight back to 1), and typing
+    // "133" into "1" without a select-on-focus produced 1133.
+    const [qtyDraft, setQtyDraft] = useState<Record<string, string>>({});
+    const qtyFocused = useRef<string | null>(null);
+    // Set when a key handler has already settled the line (Enter) or abandoned
+    // it (Escape), so the blur that follows does not commit the draft again.
+    // Escape used to blur and then let onBlur commit the very draft it had just
+    // discarded, because setQtyDraft has not applied yet inside that closure.
+    const skipNextCommitRef = useRef<string | null>(null);
+
+    /**
+     * Lines whose typed quantity hit the 1000 ceiling, so the cashier is told
+     * rather than left wondering why 5000 became 1000.
+     *
+     * Only the ceiling earns a note: a clamp to available stock is already
+     * explained by the "Max reached (N)" label beside the stepper.
+     */
+    const [cappedLines, setCappedLines] = useState<Record<string, boolean>>({});
 
     // FIX: Track whether the user has manually edited the amount tendered.
     // When true, we stop auto-syncing so their typed value is preserved.
@@ -381,12 +453,62 @@ export function CartPanel({
     // so the field tracks the total again on the next fresh session.
     const amountManuallyEdited = useRef(false);
 
+    /**
+     * Always keep a contract selected.
+     *
+     * THE BUG THIS REPLACES
+     * --------------------
+     * The previous version latched with `autoSelectedRef`, set to true on the
+     * first successful selection and never reset anywhere. `contract` was in the
+     * deps, so the effect DID re-run after a cart reset — but the latch
+     * short-circuited it, so nothing was re-selected. Observed 2026-10-04: the
+     * list loaded and held "STANDARD PRICE (Standard)", the cashier completed
+     * sales, `clearCart()` nulled `contract`, and the picker sat on
+     * "— Select contract —" with "Select a price contract" and a disabled sale
+     * button for the rest of the session. Earlier in the same session it had
+     * auto-selected, which is what made it look intermittent.
+     *
+     * THE RULE, IN ONE PLACE
+     * ----------------------
+     * Select the default when there is nothing valid selected. "Valid" means the
+     * selected id is still in the current list, which covers every trigger with
+     * one condition instead of one condition per trigger:
+     *
+     *   - initial load          contracts go [] -> [x], nothing selected
+     *   - contract list change  a new list arrives
+     *   - cart reset            CLEAR_CART -> INITIAL_STATE -> contract null.
+     *                           Covers "New Sale", the success modal's close,
+     *                           Clear, and the branch-change clear, because they
+     *                           all dispatch the same action.
+     *   - branch change         both of the above
+     *   - selection no longer offered  selected id is absent from the list
+     *
+     * It goes through `onSetContract`, the same dispatch the picker's onChange
+     * uses, so the payment-method and amountPaid side effects in
+     * `SET_CONTRACT` (useCart.ts:189-215) still happen. Firing a bespoke
+     * "just set the id" action here would silently skip the insurance ->
+     * cash reset and leave the cashier on a payment method the new contract
+     * does not accept.
+     *
+     * A valid selection is never overridden, so a contract the cashier chose for
+     * this cart survives re-renders and list refreshes; it only gives way when
+     * the cart resets or the contract stops being offered.
+     *
+     * An empty list selects nothing. That is also what keeps a FAILED load
+     * (POSPage sets kind:'error'/'offline'/'empty' only when the list came back
+     * empty) from quietly auto-picking something: no contracts, no selection,
+     * error band stays, and Retry re-runs this once the list arrives.
+     */
     useEffect(() => {
-        if (!autoSelectedRef.current && contracts.length > 0 && !contract) {
-            const def = contracts.find((c) => c.is_default) ?? contracts[0];
-            onSetContract(def);
-            autoSelectedRef.current = true;
-        }
+        if (contracts.length === 0) return;
+        // Compare by id, not by object identity: a reload hands back new objects
+        // for the same contracts, and that must not read as "selection changed".
+        const stillOffered =
+            contract !== null &&
+            contract !== undefined &&
+            contracts.some((c) => c.id === contract.id);
+        if (stillOffered) return;
+        onSetContract(pickDefaultContract(contracts));
     }, [contracts, contract, onSetContract]);
 
     // FIX: Reset the manual-edit flag when the payment method changes or the
@@ -507,37 +629,189 @@ export function CartPanel({
                                             ?? (typeof drugAny.valid_batch_quantity === "number" ? drugAny.valid_batch_quantity : undefined)
                                             ?? (typeof drugAny.quantity === "number" ? drugAny.quantity : undefined);
                                         const maxQty = resolvedStock ?? 1000;
+                                        // One source of truth for "how does this
+                                        // line read", shared with the input's clamp.
+                                        const stockState = getLineStockState(
+                                            item.quantity,
+                                            resolvedStock
+                                        );
+                                        const atStockLimit =
+                                            resolvedStock !== undefined &&
+                                            item.quantity >= resolvedStock;
                                         return (
                                             <>
                                                 <div className="flex items-center justify-between">
                                                     <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
                                                         <button
-                                                            onClick={() => onSetQuantity(item.drug.id, item.quantity - 1)}
+                                                            onClick={() => {
+                                                                const next = Math.max(1, item.quantity - 1);
+                                                                onSetQuantity(item.drug.id, next);
+                                                                // Keep any open draft in step with the cart, so a
+                                                                // subsequent blur cannot resurrect a stale number.
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(next),
+                                                                }));
+                                                            }}
                                                             type="button"
+                                                            aria-label={`Decrease quantity for ${item.drug.name}`}
                                                             className="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-ink hover:bg-slate-100 transition-colors"
                                                         >
                                                             <Minus className="w-3 h-3" />
                                                         </button>
                                                         <input
-                                                            type="number"
+                                                            type="text"
+                                                            inputMode="numeric"
+                                                            data-testid={`qty-input-${item.drug.id}`}
+                                                            aria-label={`Quantity for ${item.drug.name}`}
                                                             min={1}
                                                             max={maxQty}
-                                                            value={item.quantity}
-                                                            onChange={(e) =>
-                                                                onSetQuantity(item.drug.id, parseInt(e.target.value) || 1)
+                                                            value={
+                                                                qtyFocused.current === item.drug.id
+                                                                    ? (qtyDraft[item.drug.id] ?? String(item.quantity))
+                                                                    : String(item.quantity)
                                                             }
+                                                            onFocus={(e) => {
+                                                                // (a) Select the whole number so typing replaces it
+                                                                // instead of appending (133 into 1 -> 1133).
+                                                                qtyFocused.current = item.drug.id;
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(item.quantity),
+                                                                }));
+                                                                // Synchronous: select() during focus is what
+                                                                // makes typing replace rather than append.
+                                                                e.target.select();
+                                                                requestAnimationFrame(() => e.target.select());
+                                                            }}
+                                                            onChange={(e) => {
+                                                                // (d) digits only, no leading zeros.
+                                                                const clean = sanitiseDraft(e.target.value);
+                                                                setQtyDraft((d) => ({ ...d, [item.drug.id]: clean }));
+                                                                // (d) A valid value within available stock may commit as
+                                                                // you type; empty/0/over-limit wait for blur or Enter.
+                                                                const n = Number(clean);
+                                                                const withinLimit =
+                                                                    resolvedStock === undefined
+                                                                        ? n >= 1 && n <= 1000
+                                                                        : n >= 1 && n <= resolvedStock;
+                                                                if (withinLimit && Number.isFinite(n)) {
+                                                                    onSetQuantity(item.drug.id, n);
+                                                                }
+                                                            }}
+                                                            onKeyDown={(e) => {
+                                                                if (e.key === "Enter") {
+                                                                    e.preventDefault();
+                                                                    onSetQuantity(
+                                                                        item.drug.id,
+                                                                        commitDraft(
+                                                                            sanitiseDraft(
+                                                                                qtyDraft[item.drug.id] ??
+                                                                                    String(item.quantity)
+                                                                            ),
+                                                                            resolvedStock
+                                                                        )
+                                                                    );
+                                                                    qtyFocused.current = null;
+                                                                    skipNextCommitRef.current = item.drug.id;
+                                                                    setQtyDraft((d) => {
+                                                                        const { [item.drug.id]: _drop, ...rest } = d;
+                                                                        return rest;
+                                                                    });
+                                                                    (e.target as HTMLInputElement).blur();
+                                                                } else if (e.key === "Escape") {
+                                                                    // (e) Revert to the committed value. The blur that
+                                                                    // follows must NOT commit the abandoned draft.
+                                                                    e.preventDefault();
+                                                                    qtyFocused.current = null;
+                                                                    skipNextCommitRef.current = item.drug.id;
+                                                                    setQtyDraft((d) => {
+                                                                        const { [item.drug.id]: _drop, ...rest } = d;
+                                                                        return rest;
+                                                                    });
+                                                                    (e.target as HTMLInputElement).blur();
+                                                                }
+                                                            }}
+                                                            onBlur={() => {
+                                                                if (skipNextCommitRef.current === item.drug.id) {
+                                                                    skipNextCommitRef.current = null;
+                                                                    return;
+                                                                }
+                                                                // (c) Commit on blur, including tab/click-away.
+                                                                (() => {
+                                                                    const raw = sanitiseDraft(
+                                                                        qtyDraft[item.drug.id] ??
+                                                                            String(item.quantity)
+                                                                    );
+                                                                    const committed = commitDraft(
+                                                                        raw,
+                                                                        resolvedStock
+                                                                    );
+                                                                    onSetQuantity(item.drug.id, committed);
+                                                                    // Only the 1000 ceiling is silent-unexpected: a
+                                                                    // clamp to available is already explained by the
+                                                                    // "Max reached (N)" label right beside it.
+                                                                    setCappedLines((prev) => {
+                                                                        const next = { ...prev };
+                                                                        if (
+                                                                            resolvedStock === undefined &&
+                                                                            Number(raw) > LINE_QUANTITY_CAP
+                                                                        ) {
+                                                                            next[item.drug.id] = true;
+                                                                        } else {
+                                                                            delete next[item.drug.id];
+                                                                        }
+                                                                        return next;
+                                                                    });
+                                                                })();
+                                                                qtyFocused.current = null;
+                                                                setQtyDraft((d) => {
+                                                                    const { [item.drug.id]: _drop, ...rest } = d;
+                                                                    return rest;
+                                                                });
+                                                            }}
                                                             className="w-12 h-8 text-center text-sm font-bold bg-white border-x border-slate-200 focus:outline-none focus:bg-white"
                                                         />
                                                         <button
-                                                            onClick={() => onSetQuantity(item.drug.id, Math.min(item.quantity + 1, maxQty))}
+                                                            onClick={() => {
+                                                                const next = Math.min(item.quantity + 1, maxQty);
+                                                                onSetQuantity(item.drug.id, next);
+                                                                setQtyDraft((d) => ({
+                                                                    ...d,
+                                                                    [item.drug.id]: String(next),
+                                                                }));
+                                                            }}
                                                             type="button"
-                                                            className="w-8 h-8 flex items-center justify-center text-slate-500 hover:text-ink hover:bg-slate-100 transition-colors"
+                                                            disabled={atStockLimit}
+                                                            title={
+                                                                atStockLimit
+                                                                    ? `Only ${resolvedStock} available`
+                                                                    : undefined
+                                                            }
+                                                            aria-label={
+                                                                atStockLimit
+                                                                    ? `Increase quantity for ${item.drug.name}, limit reached: only ${resolvedStock} available`
+                                                                    : `Increase quantity for ${item.drug.name}`
+                                                            }
+                                                            className={`w-8 h-8 flex items-center justify-center hover:text-ink hover:bg-slate-100 transition-colors ${
+                                                                atStockLimit
+                                                                    ? "text-slate-300 cursor-not-allowed"
+                                                                    : "text-slate-500"
+                                                            }`}
                                                         >
                                                             <Plus className="w-3 h-3" />
                                                         </button>
                                                     </div>
-                                                    <span className="text-xs text-ink-muted ml-1">
-                                                        /{resolvedStock ?? "?"}
+                                                    {/* Stock state. aria-live so a
+                                                        screen reader announces the
+                                                        change when stock refreshes. */}
+                                                    <span
+                                                        aria-live="polite"
+                                                        data-testid={`stock-label-${item.drug.id}`}
+                                                        data-state={stockState}
+                                                        className={`text-xs ml-1 whitespace-nowrap truncate tabular-nums ${stockLabelClass(stockState)}`}
+                                                    >
+                                                        {stockLabelText(stockState, resolvedStock)}
                                                     </span>
 
                                                     <button
@@ -550,6 +824,15 @@ export function CartPanel({
                                                     </button>
                                                 </div>
 
+                                                {cappedLines[item.drug.id] && (
+                                                    <p
+                                                        role="status"
+                                                        data-testid={`qty-cap-note-${item.drug.id}`}
+                                                        className="text-[11px] text-amber-600 mt-1"
+                                                    >
+                                                        Maximum {LINE_QUANTITY_CAP} per line
+                                                    </p>
+                                                )}
                                                 {/* Stock warning */}
                                                 {resolvedStock !== undefined && item.quantity > resolvedStock && (
                                                     <div className="flex items-center gap-2 mt-2.5 px-3 py-2 rounded-lg text-xs border bg-red-50 border-red-100 text-red-700">
@@ -601,6 +884,11 @@ export function CartPanel({
                                 <SectionLabel icon={Tag}>Price Contract</SectionLabel>
                                 <div className="relative">
                                     <select
+                                        // The visible SectionLabel is a sibling, not an
+                                        // associated <label>, so this combobox had NO
+                                        // accessible name — a screen reader announced
+                                        // two anonymous dropdowns in the checkout form.
+                                        aria-label="Price contract"
                                         value={contract?.id ?? ""}
                                         onChange={(e) => {
                                             const c = contracts.find((x) => x.id === e.target.value) ?? null;
@@ -613,7 +901,16 @@ export function CartPanel({
                                             <option>Loading…</option>
                                         ) : (
                                             <>
-                                                <option value="">— Select contract —</option>
+                                                {/*
+                                                  (e) The placeholder is a dead end: picking it clears
+                                                  the selection, which puts the cart back into
+                                                  "Select a price contract". So it exists only when
+                                                  there is nothing to select, and the rule above
+                                                  guarantees a value otherwise.
+                                                */}
+                                                {contracts.length === 0 && (
+                                                    <option value="">— Select contract —</option>
+                                                )}
                                                 {contracts.map((c) => (
                                                     <option key={c.id} value={c.id}>{c.display}</option>
                                                 ))}
@@ -622,6 +919,29 @@ export function CartPanel({
                                     </select>
                                     <ChevronDown className="absolute right-3 top-3 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
                                 </div>
+                                {contractsIssue?.message && (
+                                    <div
+                                        role="alert"
+                                        data-testid="contract-load-issue"
+                                        className={`mt-1.5 flex items-start gap-2 rounded-md border px-2 py-1.5 text-[11px] leading-snug ${
+                                            contractsIssue.kind === "error"
+                                                ? "border-red-300 bg-red-50 text-red-800"
+                                                : "border-amber-300 bg-amber-50 text-amber-900"
+                                        }`}
+                                    >
+                                        <span className="flex-1">{contractsIssue.message}</span>
+                                        {onRetryContracts && (
+                                            <button
+                                                type="button"
+                                                onClick={onRetryContracts}
+                                                data-testid="contract-retry"
+                                                className="shrink-0 rounded border border-current px-1.5 py-0.5 font-semibold uppercase tracking-wide"
+                                            >
+                                                Retry
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
                                 {contract && (
                                     <div className="flex items-center gap-2 mt-2 flex-wrap">
                                         <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${CONTRACT_TYPE_COLORS[contract.type] ?? "bg-slate-100 text-slate-600"}`}>

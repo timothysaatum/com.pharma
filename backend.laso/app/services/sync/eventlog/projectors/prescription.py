@@ -115,8 +115,10 @@ def _validate_created(event: EventEnvelope) -> ProjectorResult:
             f"payload.organization_id ({org_id}) != envelope.org_id ({event.org_id})",
         )
 
-    for field in ("prescription_number", "customer_id", "prescriber_name",
-                  "prescriber_license"):
+    # prescriber_license is deliberately NOT required. It was, and
+    # `if not p.get(field)` also rejected "", so every offline-created
+    # prescription without one was REJECTED_PERMANENT and dead-lettered.
+    for field in ("prescription_number", "customer_id", "prescriber_name"):
         if not p.get(field):
             return _reject(f"missing_{field}", f"prescription_created must include {field}")
 
@@ -226,7 +228,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             "prescription_number": p["prescription_number"],
             "customer_id": str(p["customer_id"]),
             "prescriber_name": p["prescriber_name"],
-            "prescriber_license": p["prescriber_license"],
+            "prescriber_license": p.get("prescriber_license") or None,
             "prescriber_phone": p.get("prescriber_phone"),
             "prescriber_address": p.get("prescriber_address"),
             "issue_date": _parse_date(p["issue_date"]),

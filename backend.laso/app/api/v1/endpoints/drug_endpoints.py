@@ -22,6 +22,7 @@ from app.schemas.drugs_schemas import (
     BulkDrugImport
 )
 from app.utils.pagination import Paginator, PaginationParams, PaginatedResponse
+from app.utils.response_building import build_response_model
 from app.services.sync.eventlog.server_emitter import ServerEventEmitter
 from app.schemas.event_envelope import AggregateType
 
@@ -100,15 +101,20 @@ async def _serialize_drugs_with_branch_prices(
         branch_id=branch_id,
         drugs=drugs,
     )
-    responses: List[DrugResponse] = []
-    for drug in drugs:
-        response = DrugResponse.model_validate(drug)
-        responses.append(
-            response.model_copy(
-                update={"unit_price": effective_prices.get(drug.id, response.unit_price)}
-            )
+    # Routed through the instrumented builder: a stored row that cannot be
+    # serialised raises ResponseBuildError, which the exception handler turns
+    # into a 500 naming the row — not a 422 blaming the caller's request.
+    validated = build_response_model(
+        DrugResponse,
+        drugs,
+        context=f"GET /drugs branch_id={branch_id}",
+    )
+    return [
+        response.model_copy(
+            update={"unit_price": effective_prices.get(drug.id, response.unit_price)}
         )
-    return responses
+        for drug, response in zip(drugs, validated)
+    ]
 
 
 @router.post("", response_model=DrugResponse, status_code=status.HTTP_201_CREATED)
@@ -531,7 +537,11 @@ async def get_drug_with_inventory(
         branch_id=branch_id
     )
     
-    drug_response = DrugResponse.model_validate(result["drug"])
+    drug_response = build_response_model(
+        DrugResponse,
+        [result["drug"]],
+        context=f"GET /drugs/{{drug_id}} id={drug_id}",
+    )[0]
     if branch_id:
         drug_response = (
             await _serialize_drugs_with_branch_prices(

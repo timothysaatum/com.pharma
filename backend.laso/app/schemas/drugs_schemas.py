@@ -9,7 +9,7 @@ import uuid
 import re
 
 from app.schemas.base_schemas import (
-    BaseSchema, TimestampSchema, SyncSchema, Money
+    BaseSchema, TimestampSchema, SyncSchema, SyncSchemaOut, Money, MoneyOut
 )
 
 
@@ -42,7 +42,12 @@ class DrugBase(BaseSchema):
     markup_percentage: Optional[Money] = Field(None,description="Markup percentage over cost price")
     tax_rate: Money = Field(default=0, description="Tax rate as percentage")
     reorder_level: int = Field(default=10, ge=0, description="Trigger reorder when stock falls below")
-    reorder_quantity: int = Field(default=50, ge=1, description="Suggested reorder quantity")
+    # ge=0, not ge=1: reorder_quantity is a purchase suggestion, not an
+    # invariant. A drug that is stocked enough never needs reordering, so 0
+    # ("do not reorder") is a meaningful value and must be storable. It was
+    # ge=1 until this change, which also made DrugResponse reject any row
+    # holding 0 — see DrugResponseFields for the response-side split.
+    reorder_quantity: int = Field(default=50, ge=0, description="Suggested reorder quantity")
     max_stock_level: Optional[int] = Field(None, ge=0, description="Maximum stock to maintain")
     unit_of_measure: str = Field(
         default="unit",
@@ -100,7 +105,8 @@ class DrugUpdate(BaseSchema):
     markup_percentage: Optional[Money] = Field(None, ge=0)
     tax_rate: Optional[Money] = Field(None, ge=0, le=100)
     reorder_level: Optional[int] = Field(None, ge=0)
-    reorder_quantity: Optional[int] = Field(None, ge=1)
+    # ge=0 — see the note on DrugBase.reorder_quantity.
+    reorder_quantity: Optional[int] = Field(None, ge=0)
     max_stock_level: Optional[int] = None
     unit_of_measure: Optional[str] = None
     description: Optional[str] = None
@@ -112,11 +118,67 @@ class DrugUpdate(BaseSchema):
     is_active: Optional[bool] = None
 
 
-class DrugResponse(DrugBase, TimestampSchema, SyncSchema):
-    """Schema for drug API responses"""
+class DrugResponseFields(BaseSchema):
+    """Drug fields as READ BACK from storage: types and defaults, no bounds.
+
+    This deliberately does NOT inherit ``DrugBase``. ``DrugBase`` is the input
+    contract, and its bounds (``reorder_quantity ge=1``, ``drug_type`` pattern,
+    ``max_length``, ``Money ge=0``) are rules about what a *caller may submit*.
+    When ``DrugResponse`` inherited them, a row that the database happily stored
+    could fail to serialise, and the resulting ``ValidationError`` was caught by
+    the generic pydantic handler and returned to the caller as **422
+    Validation error** — a client-error status blaming a request that was
+    perfectly valid.
+
+    Keeping the two contracts separate means:
+      * ``DrugCreate`` / ``DrugUpdate`` still reject bad input, with 422.
+      * ``GET /drugs`` and friends can never 422 on stored data. If a row is
+        genuinely unreadable that is a server fault (500), and the handler at
+        ``app/core/exception_handlers.py`` logs the offending row id.
+
+    Field types are unchanged, so the serialised payload is identical.
+    """
+    name: str = Field(..., description="Brand or trade name")
+    generic_name: Optional[str] = Field(None, description="Generic/scientific name")
+    brand_name: Optional[str] = None
+    sku: Optional[str] = Field(None, description="Stock Keeping Unit")
+    barcode: Optional[str] = Field(None, description="EAN, UPC, or other barcode")
+    category_id: Optional[uuid.UUID] = None
+    drug_type: str = Field(default="otc", description="Type of drug")
+    dosage_form: Optional[str] = Field(None, description="tablet, capsule, syrup, etc.")
+    strength: Optional[str] = Field(None, description="e.g., 500mg, 10mg/ml")
+    manufacturer: Optional[str] = None
+    supplier: Optional[str] = None
+    ndc_code: Optional[str] = None
+    requires_prescription: bool = Field(default=False)
+    controlled_substance_schedule: Optional[str] = Field(
+        None, description="DEA Schedule I-V for controlled substances"
+    )
+    unit_price: MoneyOut = Field(..., description="Selling price per unit")
+    cost_price: Optional[MoneyOut] = Field(None, description="Cost/acquisition price")
+    markup_percentage: Optional[MoneyOut] = Field(None, description="Markup percentage over cost price")
+    tax_rate: MoneyOut = Field(default=0, description="Tax rate as percentage")
+    reorder_level: int = Field(default=10, description="Trigger reorder when stock falls below")
+    reorder_quantity: int = Field(default=50, description="Suggested reorder quantity")
+    max_stock_level: Optional[int] = Field(None, description="Maximum stock to maintain")
+    unit_of_measure: str = Field(
+        default="unit", description="unit, box, bottle, strip, etc."
+    )
+    description: Optional[str] = None
+    usage_instructions: Optional[str] = None
+    side_effects: Optional[str] = None
+    contraindications: Optional[str] = None
+    storage_conditions: Optional[str] = None
+    image_url: Optional[str] = None
+    is_active: bool = Field(default=True)
+
+
+class DrugResponse(DrugResponseFields, TimestampSchema, SyncSchemaOut):
+    """Schema for drug API responses. Carries no input validation bounds —
+    see DrugResponseFields for why."""
     id: uuid.UUID
     organization_id: uuid.UUID
-    
+
     @computed_field
     @property
     def profit_margin(self) -> Optional[float]:

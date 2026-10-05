@@ -131,7 +131,11 @@ export default function DrugListPage() {
                         drug_type: filterType || undefined,
                         category_id: filterCategory || undefined,
                         is_active: filterActive === "" ? undefined : filterActive === "true",
-                        branch_id: activeBranchId || undefined,
+                        // The catalogue is organization-wide. branch_id is
+                        // deliberately NOT passed: it used to filter the local
+                        // list down to drugs stocked at the branch, so an
+                        // unsynced device showed an empty catalogue.
+                        organization_id: user?.organization_id,
                     },
                     page,
                     PAGE_SIZE
@@ -164,7 +168,7 @@ export default function DrugListPage() {
                         drug_type: filterType || undefined,
                         category_id: filterCategory || undefined,
                         is_active: filterActive === "" ? undefined : filterActive === "true",
-                        branch_id: activeBranchId || undefined,
+                        organization_id: user?.organization_id,
                     },
                     page,
                     PAGE_SIZE
@@ -177,12 +181,26 @@ export default function DrugListPage() {
                 setTotalPages(timeoutResult.data.total_pages);
                 setTotal(timeoutResult.data.total);
                 setDrugsFromCache(timeoutResult.isFromCache);
+                // withTimeout falls back to local data on ANY server error,
+                // which is right for a slow backend but meant a 422 from a
+                // server-side fault rendered as "No drugs found" with no
+                // indication the request had failed. Surface it, with Retry.
+                if (timeoutResult.fallbackError) {
+                    setError(parseApiError(timeoutResult.fallbackError));
+                }
             }
         } catch (err: unknown) {
             if (err instanceof Error && err.name === "AbortError") return;
             if (!controller.signal.aborted) {
                 setError(parseApiError(err));
                 setDrugsFromCache(false);
+                // Clear the rows so a failed fetch cannot leave a stale table
+                // on screen next to the error banner. The error state below is
+                // rendered instead of the empty state, so a failure is never
+                // mistaken for "this org has no drugs".
+                setDrugs([]);
+                setTotal(0);
+                setTotalPages(1);
             }
         } finally {
             // Clear the loader unless a NEWER fetch has already taken over
@@ -191,7 +209,7 @@ export default function DrugListPage() {
             // cancelled, which is exactly how this page hung.
             if (abortRef.current === controller) setIsLoading(false);
         }
-    }, [page, debouncedSearch, filterType, filterCategory, filterActive, activeBranchId]);
+    }, [page, debouncedSearch, filterType, filterCategory, filterActive, user?.organization_id]);
 
     useEffect(() => {
         fetchDrugs();
@@ -389,7 +407,13 @@ export default function DrugListPage() {
                 <div className="mx-6 mt-4 rounded-xl bg-red-50 border border-red-100 p-3 flex gap-2 items-center">
                     <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
                     <p className="text-sm text-red-600">{error}</p>
-                    <button onClick={() => setError(null)} className="ml-auto text-ink-muted hover:text-ink">
+                    <button
+                        onClick={() => { setError(null); fetchDrugs(); }}
+                        className="ml-auto flex items-center gap-1.5 text-sm font-semibold text-red-700 hover:text-red-900"
+                    >
+                        <RefreshCw className="w-3.5 h-3.5" /> Retry
+                    </button>
+                    <button onClick={() => setError(null)} className="text-ink-muted hover:text-ink">
                         <X className="w-4 h-4" />
                     </button>
                 </div>
@@ -408,6 +432,19 @@ export default function DrugListPage() {
                 {isLoading ? (
                     <div className="flex items-center justify-center h-64">
                         <RefreshCw className="w-6 h-6 text-brand-500 animate-spin" />
+                    </div>
+                ) : error && drugs.length === 0 ? (
+                    // A failed fetch with nothing to fall back on must not read
+                    // as an empty formulary. The banner above carries the
+                    // message and the Retry action; this body exists so the
+                    // empty state (and its "Add your first drug" CTA) never
+                    // appears on top of a request that never succeeded.
+                    // When the fallback DID return rows, the table renders
+                    // instead and the banner alone conveys the failure.
+                    <div className="flex flex-col items-center justify-center h-64 gap-2 text-ink-muted">
+                        <AlertTriangle className="w-10 h-10 opacity-30 text-red-400" />
+                        <p className="text-sm">Could not load the drug catalogue.</p>
+                        <p className="text-xs">This is a request failure, not an empty formulary.</p>
                     </div>
                 ) : drugs.length === 0 ? (
                     <div className="flex flex-col items-center justify-center h-64 gap-3 text-ink-muted">

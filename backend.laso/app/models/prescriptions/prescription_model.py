@@ -56,7 +56,10 @@ class Prescription(Base, TimestampMixin, SyncTrackingMixin):
     
     # Prescriber information
     prescriber_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    prescriber_license: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Optional since the licence is not always known at the point of
+    # prescribing. NULL is the canonical absent form; treat '' as equivalent on
+    # read rather than normalising historical rows (see the migration).
+    prescriber_license: Mapped[Optional[str]] = mapped_column(String(100))
     prescriber_phone: Mapped[Optional[str]] = mapped_column(String(20))
     prescriber_address: Mapped[Optional[str]] = mapped_column(Text)
     

@@ -17,7 +17,13 @@ type AppEventType =
     | "inventory:changed"   // batch added, stock adjusted, transfer done
     | "sales:changed"       // sale completed / voided
     | "purchases:changed"   // PO created / received / updated
-    | "customers:changed";  // customer created / updated
+    | "customers:changed"   // customer created / updated
+    // Prescription created / edited / cancelled, or a refill consumed. This type
+    // did not exist until P1: the Prescriptions page had no subscription and
+    // nothing to subscribe TO, so after any sale it kept showing the
+    // pre-sale refill count. Emitted from the prescription projectors, from the
+    // offline sale transaction, and after a checkout.
+    | "prescriptions:changed";
 
 type Listener = () => void;
 

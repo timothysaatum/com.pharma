@@ -18,12 +18,25 @@
  *   - Deletes:  UPDATE SET is_deleted=1 (idempotent)
  */
 
-import { getDb, setVersionVector } from "@/lib/localDb";
+import { getDb, setVersionVector, markEventApplied } from "@/lib/localDb";
 import type { VectorClock } from "@/lib/localDb";
 import type { EventEnvelope } from "@/lib/eventEnvelope";
-import { refreshSellableQuantity, refreshSellableForPairs } from "@/lib/sellableQty";
+import { refreshQuantities, refreshQuantitiesForPairs } from "@/lib/sellableQty";
+import { appEvents } from "@/lib/events";
 
 type Db = Awaited<ReturnType<typeof getDb>>;
+
+/**
+ * Tell the UI the local prescriptions read model moved.
+ *
+ * Without this the Prescriptions page had no way to learn that a refill had been
+ * consumed: it subscribes to nothing, and the event type did not even exist. The
+ * `reason` is accepted and currently ignored by the bus (it carries no payload);
+ * it is here so the call site documents itself at the point of the write.
+ */
+function emitPrescriptionsChanged(): void {
+  appEvents.emit("prescriptions:changed");
+}
 
 // ── Dispatch ──────────────────────────────────────────────────────────────
 
@@ -125,6 +138,64 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
   }
 
   void p; // suppress unused var warning — p may not be used in dispatch
+}
+
+// ── Replay guard (non-idempotent projectors only) ───────────────────────────
+
+/**
+ * Event types whose local projectors apply raw increments and therefore
+ * double-apply if the same event is delivered twice.
+ *
+ * A cursor reset replays the log, and the server may re-deliver events the
+ * device already processed. Every other projector is an upsert, or guarded by
+ * an existence check (`_saleCreated` checks `sales`), so replaying is harmless.
+ * These four are not, so they consult `applied_events` first.
+ *
+ * Trade-off: the guard table only receives rows for these four types, so it
+ * stays small. The residual gap is documented — a device that applied one of
+ * these events BEFORE this table existed has no marker, so replaying that
+ * event still double-applies it once. The organisation's current 69-event log
+ * contains none of these types, so nothing is currently exposed; the exposure
+ * is for future logs that do.
+ */
+const REPLAY_GUARDED_TYPES = new Set([
+  "sale_voided",
+  "prescription_refill_used",
+  "stock_adjusted",
+  "stock_transfer",
+]);
+
+/**
+ * Returns true when this event must be SKIPPED because it was already applied.
+ *
+ * When it returns false the caller must call {@link recordGuardedApply} in the
+ * same transaction as its mutations, so the marker and the mutation commit or
+ * roll back together. Writing the marker without the mutation would suppress
+ * the mutation on the next replay.
+ */
+async function shouldSkipReplay(e: EventEnvelope): Promise<boolean> {
+  if (!REPLAY_GUARDED_TYPES.has(e.event_type)) return false;
+  if (!e.event_id) return false;
+  const db = await getDb();
+  const rows = await db.select<{ event_id: string }[]>(
+    "SELECT event_id FROM applied_events WHERE event_id = $1 LIMIT 1",
+    [String(e.event_id)]
+  );
+  return rows.length > 0;
+}
+
+/** Mark a guarded event applied. Call inside the same transaction as the mutation. */
+async function recordGuardedApply(e: EventEnvelope): Promise<void> {
+  if (!REPLAY_GUARDED_TYPES.has(e.event_type)) return;
+  if (!e.event_id) return;
+  const db = await getDb();
+  await markEventApplied(db, {
+    event_id: String(e.event_id),
+    org_id: e.org_id ?? "",
+    seq: e.seq ?? 0,
+    event_type: e.event_type,
+    aggregate_id: e.aggregate_id ?? "",
+  });
 }
 
 // ── Customer projectors ────────────────────────────────────────────────────
@@ -302,26 +373,25 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
     );
   }
 
-  // Deduct branch_inventory for every sale item.
+  // branch_inventory.quantity is NOT decremented here. The batch rows above
+  // already had their remaining_quantity reduced, and for any (branch, drug)
+  // this device holds batches for, quantity is DERIVED from them. Deducting
+  // here as well is what made a replayed sale double-charge stock.
   const branchId = String(p.branch_id ?? e.branch_id);
   const touched: Array<{ branchId: string; drugId: string }> = [];
   for (const item of items) {
     if (item.drug_id != null && item.quantity != null) {
-      await db.execute(
-        `UPDATE branch_inventory
-            SET quantity = MAX(0, quantity - $1)
-          WHERE branch_id = $2 AND drug_id = $3`,
-        [Number(item.quantity), branchId, String(item.drug_id)]
-      );
       touched.push({ branchId, drugId: String(item.drug_id) });
     }
   }
-  // The sale moved both branch_inventory.quantity and drug_batches
-  // .remaining_quantity, so sellable_quantity is stale until recomputed.
-  await refreshSellableForPairs(db, touched);
+  // Derives quantity and recomputes sellable_quantity in one step.
+  await refreshQuantitiesForPairs(db, touched);
 }
 
 async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: this projector restores stock with a raw `quantity = quantity + n`,
+  // so a replay would restore the same units twice.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const now = e.authored_at ?? new Date().toISOString();
   await db.execute(
@@ -352,15 +422,12 @@ async function _saleVoided(db: Db, e: EventEnvelope): Promise<void> {
     );
   }
   if (p.drug_id != null && p.quantity != null) {
-    await db.execute(
-      `UPDATE branch_inventory
-          SET quantity = quantity + $1
-        WHERE branch_id = $2 AND drug_id = $3`,
-      [Number(p.quantity), branchId, String(p.drug_id)]
-    );
+    // No relative bump on quantity here either: the restored batches above are
+    // the fact, and quantity is derived from them. See refreshQuantitiesForPairs.
     touched.push({ branchId, drugId: String(p.drug_id) });
   }
-  await refreshSellableForPairs(db, touched);
+  await recordGuardedApply(e);
+  await refreshQuantitiesForPairs(db, touched);
 }
 
 // ── Prescription projectors ────────────────────────────────────────────────
@@ -385,7 +452,12 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
       p.customer_id != null ? String(p.customer_id) : "",
       p.prescription_number != null ? String(p.prescription_number) : `RX-${String(e.aggregate_id).slice(0, 8)}`,
       p.prescriber_name != null ? String(p.prescriber_name) : "Unknown Prescriber",
-      p.prescriber_license != null ? String(p.prescriber_license) : "",
+      // null, not "": the canonical absent form (P2). An old event carrying
+      // "" arrives here as "" and is preserved, which is fine — reads treat both
+      // as absent.
+      p.prescriber_license != null && p.prescriber_license !== ""
+        ? String(p.prescriber_license)
+        : null,
       p.prescriber_phone != null ? String(p.prescriber_phone) : null,
       p.prescriber_address != null ? String(p.prescriber_address) : null,
       p.issue_date != null ? String(p.issue_date) : now.slice(0, 10),
@@ -403,6 +475,7 @@ async function _prescriptionCreated(db: Db, e: EventEnvelope): Promise<void> {
       now,
     ]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
@@ -428,6 +501,7 @@ async function _prescriptionUpdated(db: Db, e: EventEnvelope): Promise<void> {
     `UPDATE prescriptions SET ${setClauses}, updated_at = $${fields.length + 1} WHERE id = $${fields.length + 2}`,
     [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
@@ -436,17 +510,99 @@ async function _prescriptionCancelled(db: Db, e: EventEnvelope): Promise<void> {
     "UPDATE prescriptions SET status = 'cancelled', updated_at = $1 WHERE id = $2",
     [now, String(e.aggregate_id)]
   );
+  emitPrescriptionsChanged();
 }
 
 async function _prescriptionRefillUsed(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: `refills_remaining - 1` is a raw decrement, so a replay would
+  // consume a second refill.
+  //
+  // A device that made the sale offline has ALREADY applied this decrement
+  // locally, in the same transaction that recorded the marker in
+  // `applied_events` (offlineSalesManager.ts). So the skip below is what stops
+  // the originating device from decrementing twice when the server's echo of its
+  // own dispense comes back over the next sync pull. That is the whole reason the
+  // marker is written there rather than after the commit.
+  if (await shouldSkipReplay(e)) return;
+
   const now = e.authored_at ?? new Date().toISOString();
-  await db.execute(
-    `UPDATE prescriptions
-        SET refills_remaining = MAX(0, refills_remaining - 1),
-            updated_at = $1
-      WHERE id = $2`,
-    [now, String(e.aggregate_id)]
-  );
+  const p = e.payload ?? {};
+
+  // The server sends ABSOLUTE post-state, so a device converges on the server's
+  // number instead of re-deriving it. Every key is read defensively: this event
+  // type has existed in the projectors for a long time without a single emitter,
+  // so events already sitting in a device outbox carry none of these keys, and a
+  // hard subscript would throw and abort the projection.
+  const absoluteRemaining = toOptionalNumber(p.refills_remaining);
+  const absoluteStatus = typeof p.status === "string" ? p.status : null;
+  const lastRefillDate =
+    typeof p.last_refill_date === "string" && p.last_refill_date.length > 0
+      ? p.last_refill_date
+      : now.slice(0, 10);
+  const verifiedBy =
+    typeof p.verified_by === "string" && p.verified_by.length > 0 ? p.verified_by : null;
+  const verifiedAt =
+    typeof p.verified_at === "string" && p.verified_at.length > 0 ? p.verified_at : now;
+
+  if (absoluteRemaining !== null) {
+    // Absolute path. `status` comes from the server when it sent one; when it did
+    // not, COALESCE falls back to setting 'filled' at zero and otherwise LEAVES
+    // the local status alone. The server's own relative path uses
+    // `CASE WHEN refills_remaining <= 1 THEN 'filled' ELSE status END`
+    // (projectors/prescription.py:320-347), which preserves a non-active status;
+    // the older device SQL set 'active' unconditionally and would resurrect a
+    // prescription this device had cancelled while the server still had it
+    // active.
+    const clamped = Math.max(0, absoluteRemaining);
+    await db.execute(
+      `UPDATE prescriptions
+          SET refills_remaining = $1,
+              status = COALESCE($2, CASE WHEN $1 <= 0 THEN 'filled' ELSE status END),
+              last_refill_date = $3,
+              verified_by = $4,
+              verified_at = $5,
+              updated_at = $6
+        WHERE id = $7`,
+      [
+        clamped,
+        absoluteStatus,
+        lastRefillDate,
+        verifiedBy,
+        verifiedAt,
+        now,
+        String(e.aggregate_id),
+      ]
+    );
+  } else {
+    // Relative path, for an event with no post-state. Mirrors the server's
+    // `_apply_refill_used`, including its `IN ('active','filled')` guard.
+    await db.execute(
+      `UPDATE prescriptions
+          SET refills_remaining = MAX(0, refills_remaining - 1),
+              status = CASE WHEN refills_remaining <= 1 THEN 'filled' ELSE status END,
+              last_refill_date = $1,
+              verified_by = COALESCE($2, verified_by),
+              verified_at = COALESCE($3, verified_at),
+              updated_at = $4
+        WHERE id = $5
+          AND status IN ('active', 'filled')
+          AND refills_remaining > 0`,
+      [lastRefillDate, verifiedBy, verifiedAt, now, String(e.aggregate_id)]
+    );
+  }
+
+  await recordGuardedApply(e);
+  emitPrescriptionsChanged();
+}
+
+/** Parse a number that may arrive as a number or a numeric string. */
+function toOptionalNumber(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 // ── Price Contract projectors ──────────────────────────────────────────────
@@ -551,19 +707,15 @@ async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
 // ── Stock projectors ───────────────────────────────────────────────────────
 
 async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: `quantity = MAX(0, quantity + delta)` is relative, so a replay
+  // would double-count the adjustment.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const qtyChange = Number(p.quantity_change ?? 0);
   const drugId = p.drug_id != null ? String(p.drug_id) : null;
   const branchId = String(p.branch_id ?? e.branch_id);
 
   if (!drugId) return;
-
-  await db.execute(
-    `UPDATE branch_inventory
-        SET quantity = MAX(0, quantity + $1)
-      WHERE branch_id = $2 AND drug_id = $3`,
-    [qtyChange, branchId, drugId]
-  );
 
   // Apply batch-level changes if provided.
   const batchChanges = (p.batch_changes ?? []) as Array<Record<string, unknown>>;
@@ -575,12 +727,30 @@ async function _stockAdjusted(db: Db, e: EventEnvelope): Promise<void> {
       [Number(bc.quantity_change ?? 0), String(bc.batch_id)]
     );
   }
-  await refreshSellableQuantity(db, branchId, drugId);
+
+  if (batchChanges.length === 0) {
+    // No batch-level detail: this is an explicit relative adjustment, which is
+    // the ONLY case that may move quantity directly. Once the device holds any
+    // batch row for the pair, recomputeQuantityFromBatches below overwrites it
+    // from the batch sum, so the two can never disagree.
+    await db.execute(
+      `UPDATE branch_inventory
+          SET quantity = MAX(0, quantity + $1)
+        WHERE branch_id = $2 AND drug_id = $3`,
+      [qtyChange, branchId, drugId]
+    );
+  }
+
+  await recordGuardedApply(e);
+  await refreshQuantities(db, branchId, drugId);
 }
 
 // ── Stock transfer projector ───────────────────────────────────────────────
 
 async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
+  // Guarded: this projector moves stock with relative +/- updates on both
+  // branches, so a replay would move it twice.
+  if (await shouldSkipReplay(e)) return;
   const p = e.payload as Record<string, unknown>;
   const qty = Number(p.quantity ?? 0);
   const drugId = p.drug_id != null ? String(p.drug_id) : null;
@@ -589,15 +759,15 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
 
   if (!drugId || !srcBranch || !dstBranch) return;
 
-  // Deduct source branch inventory.
+  // The movement itself is a relative +/- on quantity. A transfer is the one
+  // case where that is unavoidable: the payload names only the SOURCE batches,
+  // so there is nothing on the destination side to derive from yet.
   await db.execute(
     `UPDATE branch_inventory
         SET quantity = MAX(0, quantity - $1)
       WHERE branch_id = $2 AND drug_id = $3`,
     [qty, srcBranch, drugId]
   );
-
-  // Credit destination branch inventory.
   await db.execute(
     `UPDATE branch_inventory
         SET quantity = quantity + $1
@@ -605,7 +775,7 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
     [qty, dstBranch, drugId]
   );
 
-  // Apply per-batch movements.
+  // Apply per-batch movements (source side only — see the note below).
   const batchChanges = (p.batch_changes ?? []) as Array<Record<string, unknown>>;
   for (const bc of batchChanges) {
     const batchQty = Number(bc.quantity ?? 0);
@@ -616,11 +786,23 @@ async function _stockTransfer(db: Db, e: EventEnvelope): Promise<void> {
       [batchQty, String(bc.batch_id)]
     );
   }
+  await recordGuardedApply(e);
 
-  // Stock left the source branch, so both its inventory row and the affected
-  // batch rows moved.
-  await refreshSellableQuantity(db, srcBranch, drugId);
-  await refreshSellableQuantity(db, dstBranch, drugId);
+  // Derive both branches. The source is exact (its batches were debited). The
+  // destination is exact only while it holds NO batch rows for this drug.
+  //
+  // KNOWN GAP, tracked deliberately: `batch_changes` entries carry a `batch_id`
+  // and a quantity but no destination batch id, so a transfer cannot credit a
+  // destination batch. If the destination branch already has its own batch rows
+  // for this drug, the derivation overwrites the credit just applied above and
+  // the destination quantity will not reflect the transfer until the event
+  // carries destination batch ids. No live emitter publishes stock_transfer
+  // yet (the stock emitter covers branch_inventory_* and drug_batch_* only), so
+  // nothing is currently exposed; the payload must gain destination batch ids
+  // before transfers are emitted. `localProjectors.replayGuard.spec.ts` pins the
+  // current behaviour so the gap cannot regress unnoticed.
+  await refreshQuantities(db, srcBranch, drugId);
+  await refreshQuantities(db, dstBranch, drugId);
 }
 
 // ── Drug projectors ────────────────────────────────────────────────────────
@@ -793,43 +975,35 @@ async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
   const branchId = String(p.branch_id ?? e.branch_id);
   const drugId = String(p.drug_id ?? "");
 
-  if (e.event_type === "drug_batch_updated") {
-    const existing = await db.select<{ remaining_quantity: number }[]>(
-      "SELECT remaining_quantity FROM drug_batches WHERE id = $1",
-      [String(e.aggregate_id)]
+  // NOTE: this projector deliberately does NOT touch branch_inventory.quantity.
+  //
+  // It used to add `remaining_quantity` on create and `new - known_old` on
+  // update. That relative bump is what made replay order matter: an arriving
+  // batch was added on top of an inventory row that already accounted for it
+  // (measured at 247 + 100 = 347), and a fresh device that received the
+  // branch_inventory event first then doubled it (117 -> 234, 247 -> 494).
+  //
+  // branch_inventory.quantity is now DERIVED from the batch rows by
+  // recomputeQuantityFromBatches once this row is written below. One writer, so
+  // delivery order stops mattering.
+  //
+  // The only thing still created here is a missing branch_inventory ROW, so a
+  // batch that arrives before any inventory event still has somewhere to live.
+  // Its quantity is provisional and is replaced by the derivation immediately
+  // after, which is why the inserted value is this batch's own quantity.
+  {
+    const invRows = await db.select<{ id: string }[]>(
+      "SELECT id FROM branch_inventory WHERE branch_id = $1 AND drug_id = $2 LIMIT 1",
+      [branchId, drugId]
     );
-    if (existing.length > 0) {
-      const delta = remainingQuantity - existing[0].remaining_quantity;
-      if (delta !== 0) {
-        await db.execute(
-          `UPDATE branch_inventory
-           SET quantity = quantity + $1, updated_at = $2
-           WHERE branch_id = $3 AND drug_id = $4`,
-          [delta, now, branchId, drugId]
-        );
-      }
-    }
-  } else if (e.event_type === "drug_batch_created") {
-    const existingBatch = await db.select<{ id: string }[]>(
-      "SELECT id FROM drug_batches WHERE id = $1",
-      [String(e.aggregate_id)]
-    );
-    if (existingBatch.length === 0) {
-      const res = await db.execute(
-        `UPDATE branch_inventory
-         SET quantity = quantity + $1, updated_at = $2
-         WHERE branch_id = $3 AND drug_id = $4`,
-        [remainingQuantity, now, branchId, drugId]
+    if (!invRows || invRows.length === 0) {
+      await db.execute(
+        `INSERT INTO branch_inventory
+           (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
+            sync_status, sync_version, synced_at, updated_at, created_at)
+         VALUES ($1,$2,$3,$4,0,NULL,NULL,'synced',1,NULL,$5,$5)`,
+        [crypto.randomUUID(), branchId, drugId, remainingQuantity, now]
       );
-      if (res.rowsAffected === 0) {
-        await db.execute(
-          `INSERT INTO branch_inventory
-             (id, branch_id, drug_id, quantity, reserved_quantity, location, selling_price,
-              sync_status, sync_version, synced_at, updated_at, created_at)
-           VALUES ($1,$2,$3,$4,0,NULL,NULL,'synced',1,NULL,$5,$5)`,
-          [crypto.randomUUID(), branchId, drugId, remainingQuantity, now]
-        );
-      }
     }
   }
 
@@ -871,11 +1045,11 @@ async function _drugBatchUpserted(db: Db, e: EventEnvelope): Promise<void> {
     ]
   );
 
-  // Run last: the batch row is now present, so the sellable recomputation sees
-  // the authoritative remaining_quantity rather than a pre-batch snapshot.
-  // This is what keeps the value correct whether the batch event or the
-  // inventory event arrives first.
-  await refreshSellableQuantity(db, branchId, drugId);
+  // Run last: the batch row is now present, so quantity is derived from the real
+  // batch set and sellable_quantity sees the authoritative remaining_quantity
+  // rather than a pre-batch snapshot. This is what makes the result independent
+  // of whether the batch event or the inventory event arrived first.
+  await refreshQuantities(db, branchId, drugId);
 }
 
 // ── Branch Inventory projectors ─────────────────────────────────────────────
@@ -885,7 +1059,17 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   const now = e.authored_at ?? new Date().toISOString();
   const branchId = String(p.branch_id ?? e.branch_id);
   const drugId = String(p.drug_id ?? e.aggregate_id);
-  const qty = p.quantity != null ? Number(p.quantity) : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
+  // Does the payload actually state an absolute quantity?
+  //
+  // The device's own buildBranchInventoryEnvelope (localWrite.ts) deliberately
+  // omits `quantity` — it carries only branch-owned metadata. Reading a missing
+  // quantity as 0 meant that any such event, wherever it was projected, ZEROED
+  // existing stock. A branch_inventory event without a quantity must leave the
+  // stored quantity untouched; only an INSERT needs the 0 default.
+  const hasQty = p.quantity != null || p.sellable_quantity != null;
+  const qty = p.quantity != null
+    ? Number(p.quantity)
+    : (p.sellable_quantity != null ? Number(p.sellable_quantity) : 0);
   const sellingPrice = p.selling_price != null ? Number(p.selling_price) : (p.branch_selling_price != null ? Number(p.branch_selling_price) : null);
   const location = p.location != null ? String(p.location) : (p.shelf_location != null ? String(p.shelf_location) : null);
 
@@ -895,15 +1079,25 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   );
 
   if (existing.length > 0) {
+    // On UPDATE, only write quantity when the event actually states one.
     await db.execute(
-      `UPDATE branch_inventory SET
-         quantity = $1,
-         location = COALESCE($2, location),
-         selling_price = COALESCE($3, selling_price),
-         updated_at = $4,
-         sync_status = 'synced'
-       WHERE id = $5`,
-      [qty, location, sellingPrice, now, existing[0].id]
+      hasQty
+        ? `UPDATE branch_inventory SET
+             quantity = $1,
+             location = COALESCE($2, location),
+             selling_price = COALESCE($3, selling_price),
+             updated_at = $4,
+             sync_status = 'synced'
+           WHERE id = $5`
+        : `UPDATE branch_inventory SET
+             location = COALESCE($1, location),
+             selling_price = COALESCE($2, selling_price),
+             updated_at = $3,
+             sync_status = 'synced'
+           WHERE id = $4`,
+      hasQty
+        ? [qty, location, sellingPrice, now, existing[0].id]
+        : [location, sellingPrice, now, existing[0].id]
     );
   } else {
     await db.execute(
@@ -918,7 +1112,12 @@ async function _branchInventoryUpserted(db: Db, e: EventEnvelope): Promise<void>
   // sellable_quantity is a derived column: nothing in the event payload can be
   // trusted to populate it (PostgreSQL branch_inventory has no such column, so
   // the server never emits one). Recompute it from local batches and leases.
-  await refreshSellableQuantity(db, branchId, drugId);
+  // If this device already holds batches for the pair, the payload's quantity is
+  // NOT authoritative: it is a snapshot taken when the event was written, and
+  // recomputeQuantityFromBatches replaces it with the live batch sum. That is
+  // what makes the event harmless in any delivery order. With no batch rows, the
+  // payload's value stands — the documented fallback.
+  await refreshQuantities(db, branchId, drugId);
 }
 
 // ── Purchase Order projectors ───────────────────────────────────────────────

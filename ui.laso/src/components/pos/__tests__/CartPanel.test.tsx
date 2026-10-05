@@ -270,7 +270,12 @@ describe("CartPanel stock quantity resolution", () => {
     renderCartPanel({
       stockQuantities: { [item.drug.id]: 220 },
     });
-    expect(screen.getByText("/220")).toBeTruthy();
+    // The bare "/220" this used to assert was replaced by a plain-language
+    // label ("220 available"); see cartStockState.ts. The resolution order
+    // itself is unchanged and is covered in CartPanel.stockLabel.test.tsx.
+    expect(screen.getByTestId(`stock-label-${item.drug.id}`).textContent).toContain(
+      "220 available"
+    );
   });
 
   it("falls back to drug valid_batch_quantity / available_quantity if not in stockQuantities", () => {
@@ -282,6 +287,8 @@ describe("CartPanel stock quantity resolution", () => {
       items: [{ ...item, drug: drugWithStock as any }],
       stockQuantities: {},
     });
-    expect(screen.getByText("/220")).toBeTruthy();
+    expect(screen.getByTestId(`stock-label-${item.drug.id}`).textContent).toContain(
+      "220 available"
+    );
   });
 });

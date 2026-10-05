@@ -20,7 +20,7 @@ export interface PrescriptionCreate {
     customer_id: string;
     branch_id?: string;
     prescriber_name: string;
-    prescriber_license: string;
+    prescriber_license?: string | null;
     prescriber_phone?: string | null;
     prescriber_address?: string | null;
     issue_date: string;
@@ -34,7 +34,7 @@ export interface PrescriptionCreate {
 
 export interface PrescriptionUpdate {
     prescriber_name?: string;
-    prescriber_license?: string;
+    prescriber_license?: string | null;
     prescriber_phone?: string | null;
     prescriber_address?: string | null;
     issue_date?: string;

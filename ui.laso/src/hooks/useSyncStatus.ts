@@ -33,13 +33,27 @@ export interface SyncState {
     voidFailedSale: (failure: QueuedFailure, reason: string, approverUserId: string) => Promise<void>;
 }
 
+/** Health for a device that has not synced yet: nothing applied, nothing failed,
+ *  and no known server head to compare against. */
+const IDLE_HEALTH: SyncHealth = {
+    pulledSeq: 0,
+    serverHeadSeq: null,
+    failedCount: 0,
+    quarantinedCount: 0,
+    stalled: false,
+};
+
 export function useSyncStatus(): SyncState {
     const [status, setStatus] = useState<SyncStatus>(syncEngine.status);
     const [pendingCount, setPendingCount] = useState(0);
     const [lastSyncAt, setLastSyncAt] = useState<string | null>(syncEngine.lastSyncAt);
     const [conflicts, setConflicts] = useState<QueuedConflict[]>(syncEngine.pendingConflicts);
     const [failures, setFailures] = useState<QueuedFailure[]>(syncEngine.pendingFailures);
-    const [health, setHealth] = useState<SyncHealth>(syncEngine.syncHealth);
+    // Default to IDLE_HEALTH rather than syncEngine.syncHealth: consumers of
+    // this hook routinely stub it, and reaching straight into the singleton
+    // yields undefined there, which throws on first render. A consumer that
+    // cares gets health from the subscription below.
+    const [health, setHealth] = useState<SyncHealth>(IDLE_HEALTH);
     useEffect(() => {
         const unsub = syncEngine.subscribe((s, count, last, h) => {
             setStatus(s);
@@ -47,9 +61,8 @@ export function useSyncStatus(): SyncState {
             setLastSyncAt(last);
             setConflicts([...syncEngine.pendingConflicts]);
             setFailures([...syncEngine.pendingFailures]);
-            // Fall back to the engine's snapshot when a listener passes no
-            // health (older callers pass only the first three arguments).
-            setHealth(h ?? syncEngine.syncHealth);
+            // Older listeners pass only the first three arguments.
+            setHealth(h ?? IDLE_HEALTH);
         });
         return unsub;
     }, []);

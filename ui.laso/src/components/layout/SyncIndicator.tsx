@@ -27,9 +27,21 @@ interface SyncIndicatorProps {
 }
 
 export function SyncIndicator({ collapsed = false }: SyncIndicatorProps) {
-    const { status, pendingCount, lastSyncAt, conflicts, failures, health, syncNow, discardFailure } = useSyncStatus();
+    const hook = useSyncStatus();
+    const { status, pendingCount, lastSyncAt, conflicts, failures, syncNow, discardFailure } = hook;
     const [showConflictModal, setShowConflictModal] = useState(false);
     const [voidingFailure, setVoidingFailure] = useState<QueuedFailure | null>(null);
+
+    // Tolerate a missing health field. Tests stub this hook, and treating an
+    // absent value as a crash would make the projection-failure panel
+    // impossible to test in isolation.
+    const health = hook.health ?? {
+        pulledSeq: 0,
+        serverHeadSeq: null,
+        failedCount: 0,
+        quarantinedCount: 0,
+        stalled: false,
+    };
 
     const hasConflicts = conflicts.length > 0;
     const hasFailures = failures.length > 0;

@@ -305,10 +305,27 @@ function toPrescription(row: Record<string, unknown>): any {
     medications: parseJsonArray(row.medications),
     refills_allowed: toNumber(row.refills_allowed),
     refills_remaining: toNumber(row.refills_remaining),
+    dispensed_count: toNumber(row.dispensed_count),
+    is_expired: row.is_expired === true || row.is_expired === 1,
   };
 }
 
 export const localRead = {
+  /**
+   * Org-scoped drug catalogue, mirroring the server's `GET /drugs`.
+   *
+   * The catalogue is ORGANIZATION-WIDE. It deliberately does not join
+   * `branch_inventory` and accepts no branch filter: a branch carries only the
+   * drugs an admin explicitly added to it, so joining here made the offline
+   * catalogue show just those drugs while the online catalogue showed the whole
+   * org. A device that had never received a stock event therefore rendered the
+   * catalogue as empty (or as the handful of sentinel drugs a test had left
+   * behind) even though the org had a full formulary.
+   *
+   * Pass `organization_id` to scope to one tenant; the local `drugs` table has
+   * an `organization_id` column, populated by `_drugCreated` from the event
+   * payload. `is_deleted = 0` is always applied.
+   */
   async searchDrugs(
     params: DrugSearchParams = {},
     page = 1,
@@ -318,16 +335,10 @@ export const localRead = {
     const db = await getDb();
     const qualifiers: string[] = ["d.is_deleted = 0"];
     const values: unknown[] = [];
-    let join = "";
 
-    if (params.branch_id) {
-      values.push(params.branch_id);
-      join = "LEFT JOIN branch_inventory bi ON bi.drug_id = d.id";
-      qualifiers.push(`bi.branch_id = $${values.length}`);
-    }
     if (params.is_active !== undefined) {
       values.push(boolToInt(params.is_active));
-      qualifiers.push(`is_active = $${values.length}`);
+      qualifiers.push(`d.is_active = $${values.length}`);
     }
     if (params.organization_id) {
       values.push(params.organization_id);
@@ -335,32 +346,32 @@ export const localRead = {
     }
     if (params.drug_type) {
       values.push(params.drug_type);
-      qualifiers.push(`drug_type = $${values.length}`);
+      qualifiers.push(`d.drug_type = $${values.length}`);
     }
     if (params.category_id) {
       values.push(params.category_id);
-      qualifiers.push(`category_id = $${values.length}`);
+      qualifiers.push(`d.category_id = $${values.length}`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));
       qualifiers.push(`(
-        LOWER(name) LIKE $${values.length} OR
-        LOWER(generic_name) LIKE $${values.length} OR
-        LOWER(brand_name) LIKE $${values.length} OR
-        LOWER(sku) LIKE $${values.length} OR
-        LOWER(barcode) LIKE $${values.length} OR
-        LOWER(manufacturer) LIKE $${values.length}
+        LOWER(d.name) LIKE $${values.length} OR
+        LOWER(d.generic_name) LIKE $${values.length} OR
+        LOWER(d.brand_name) LIKE $${values.length} OR
+        LOWER(d.sku) LIKE $${values.length} OR
+        LOWER(d.barcode) LIKE $${values.length} OR
+        LOWER(d.manufacturer) LIKE $${values.length}
       )`);
     }
 
     const where = qualifiers.length ? `WHERE ${qualifiers.join(" AND ")}` : "";
-    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${join} ${where}`, values);
+    const countRows = await db.select<{ total: number }[]>(`SELECT COUNT(*) AS total FROM drugs d ${where}`, values);
     const total = countRows[0]?.total ?? 0;
     console.log(`[LocalRead] searchDrugs: found ${total} total drugs`);
 
     const offset = (page - 1) * page_size;
     const rows = await db.select<Drug[]>(
-      `SELECT d.* FROM drugs d ${join} ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+      `SELECT d.* FROM drugs d ${where} ORDER BY d.updated_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
       [...values, page_size, offset]
     );
 
@@ -860,10 +871,18 @@ export const localRead = {
            OR applicable_branch_ids LIKE $2
          )`;
 
-    if (organizationId) {
-      values.push(organizationId);
-      query += ` AND organization_id = $${values.length}`;
+    // NEVER offer another organization's contract.
+    //
+    // This used to be conditional on `organizationId` being provided, so a
+    // caller without a loaded user got every contract on the device with no
+    // tenant filter at all. A POS must never be able to price a sale against
+    // another org's contract, so the filter is now mandatory: with no
+    // organizationId the query returns nothing rather than everything.
+    if (!organizationId) {
+      return [];
     }
+    values.push(organizationId);
+    query += ` AND organization_id = $${values.length}`;
 
     query += ` ORDER BY is_default_contract DESC, contract_name ASC`;
 
@@ -1352,6 +1371,7 @@ async searchPrescriptions(
       qualifiers.push(`(
         LOWER(p.prescription_number) LIKE $${likeIndex} OR
         LOWER(p.prescriber_name) LIKE $${likeIndex} OR
+        LOWER(p.prescriber_address) LIKE $${likeIndex} OR
         EXISTS (
           SELECT 1 FROM crr_renumber_audit history
           WHERE history.table_name = 'prescriptions'
@@ -1384,8 +1404,25 @@ async searchPrescriptions(
     const effectivePage = params.page ?? page;
     const effectivePageSize = params.page_size ?? page_size;
     const offset = (effectivePage - 1) * effectivePageSize;
+    // dispensed_count comes from a correlated subquery rather than a second
+    // round trip, so the list stays one query on this path.
+    //
+    // It MUST agree with the server's `_dispensed_counts`
+    // (prescription_endpoints.py): same source table, same
+    // `status = 'completed'` filter, same per-prescription grouping. If the two
+    // ever diverge, the same prescription shows a different dispense count
+    // depending on whether the device happens to be online, which is the whole
+    // failure mode the offline-first architecture is meant to avoid.
+    //
+    // No local index backs this. `localRead.searchPrescriptions` already
+    // full-scans `prescriptions` (the table has no indexes at all), and the
+    // correlated subquery is evaluated once per returned row rather than once per
+    // row in the table, so it is bounded by page_size.
     const rows = await db.select<Record<string, unknown>[]>(
-      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name${auditSelect}
+      `SELECT p.*, c.first_name || ' ' || c.last_name as customer_name,
+              (SELECT COUNT(*) FROM sales s
+                WHERE s.prescription_id = p.id AND s.status = 'completed') as dispensed_count
+       ${auditSelect}
        FROM prescriptions p
        LEFT JOIN customers c ON c.id = p.customer_id
        ${auditJoin}

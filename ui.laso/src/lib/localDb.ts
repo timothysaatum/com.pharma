@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 33;
+const MAX_KNOWN_SCHEMA_VERSION = 36;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -302,6 +302,9 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 31) await migrate_v31(db);
         if (user_version < 32) await migrate_v32(db);
         if (user_version < 33) await migrate_v33(db);
+        if (user_version < 34) await migrate_v34(db);
+        if (user_version < 35) await migrate_v35(db);
+        if (user_version < 36) await migrate_v36(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2314,6 +2317,101 @@ export async function markOutboxResult(
       WHERE event_id = $4`,
     [status, error?.code ?? null, error?.message ?? null, eventId]
   );
+
+  // The outbox status and the read model's sync_status are two different flags
+  // and nothing reconciled them: a locally-created prescription stayed
+  // sync_status='pending' for the rest of its life even after the server
+  // accepted its event, because the projector that would have written 'synced'
+  // never runs for the device's own event (syncEngine skips locally-authored
+  // envelopes), and `cachePrescriptions` then refused to overwrite a 'pending'
+  // row. Observed on a real device: local `active 1/1` against a server
+  // `filled 0/1`, with the outbox row 'accepted'.
+  if (status === "accepted") {
+    await reconcileAcceptedAggregate(db, eventId);
+  }
+}
+
+/**
+ * An event is UNSENT while it can still go out.
+ *
+ * `accepted_deferred` is included deliberately: the server has parked it and it
+ * has not been applied anywhere, so the aggregate is still not reconciled. It is
+ * NOT a synonym for accepted.
+ */
+const UNSENT_EVENT_STATUSES = "('pending', 'failed', 'accepted_deferred')";
+
+/**
+ * Does this aggregate still have an event that has not reached the server?
+ *
+ * This is the guard the two callers below are built on. Both of them change or
+ * discard local state, and neither may do so while an event for the same
+ * aggregate is still in flight — that is how a locally-made edit gets silently
+ * overwritten by server truth.
+ */
+export async function hasUnsentEventForAggregate(
+  aggregateType: string,
+  aggregateId: string,
+): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ one: number }[]>(
+    `SELECT 1 AS one FROM event_outbox
+      WHERE aggregate_type = $1 AND aggregate_id = $2
+        AND status IN ${UNSENT_EVENT_STATUSES}
+      LIMIT 1`,
+    [aggregateType, aggregateId]
+  );
+  return rows.length > 0;
+}
+
+/** Aggregate type -> local read-model table, for the reconciled aggregates. */
+const AGGREGATE_TABLES: Record<string, string> = {
+  prescription: "prescriptions",
+};
+
+/**
+ * After an event is accepted, mark its row 'synced' — but ONLY once the
+ * aggregate has nothing left in flight.
+ *
+ * Ordering matters: `markOutboxResult` has already set this event to 'accepted',
+ * so the remaining-unsent check sees the true remaining set. A prescription with
+ * an accepted create and a still-pending edit stays 'pending', correctly, because
+ * the edit is not on the server yet.
+ *
+ * Only 'accepted' reaches here. `rejected_permanent` deliberately does NOT mark
+ * anything synced — the server never received it, so 'synced' would be a lie.
+ * That leaves a permanently-rejected row stuck 'pending', which is a separate
+ * pre-existing gap and is reported rather than silently papered over here.
+ */
+async function reconcileAcceptedAggregate(
+  db: Database,
+  eventId: string,
+): Promise<void> {
+  const rows = await db.select<{ aggregate_type: string; aggregate_id: string }[]>(
+    "SELECT aggregate_type, aggregate_id FROM event_outbox WHERE event_id = $1 LIMIT 1",
+    [eventId]
+  );
+  const row = rows[0];
+  if (!row) return;
+
+  const table = AGGREGATE_TABLES[row.aggregate_type];
+  if (!table) return;
+
+  // The safety interlock. Without this the "fix" would mark a row synced while
+  // an edit for it is still queued, and the next server fetch would then
+  // overwrite that edit.
+  const stillUnsent = await db.select<{ one: number }[]>(
+    `SELECT 1 AS one FROM event_outbox
+      WHERE aggregate_type = $1 AND aggregate_id = $2
+        AND status IN ${UNSENT_EVENT_STATUSES}
+      LIMIT 1`,
+    [row.aggregate_type, row.aggregate_id]
+  );
+  if (stillUnsent.length > 0) return;
+
+  await db.execute(
+    `UPDATE ${table} SET sync_status = 'synced', updated_at = $1 WHERE id = $2`,
+    [new Date().toISOString(), row.aggregate_id]
+  );
 }
 
 /** Return the number of outbox events pending push. */
@@ -2325,27 +2423,47 @@ export async function getPendingOutboxCount(): Promise<number> {
   return rows?.[0]?.count ?? 0;
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// ────────────────────────────────────────────────��────────────────────────────
 // EVENT PULL CURSOR
 // ─────────────────────────────────────────────────────────────────────────────
 
-const EVENT_PULL_SEQ_KEY = "event_pull_seq";
+/**
+ * `event_log.seq` is PER-ORGANISATION (UNIQUE (org_id, seq)), and the pull
+ * endpoint filters on org_id from the JWT alone — it is not branch-scoped. The
+ * cursor must therefore be scoped per org too.
+ *
+ * It previously lived in a single unscoped `sync_meta` row, so one device used
+ * against two orgs (or against a test org whose log had grown large) carried a
+ * high-water mark from one into the other and sat permanently above the head
+ * of the second, receiving nothing while reporting itself healthy.
+ */
+function eventPullSeqKey(orgId?: string | null): string {
+  return orgId ? `event_pull_seq:${orgId}` : "event_pull_seq:unknown-org";
+}
 
-/** Last event_log.seq successfully pulled and applied from the server. */
-export async function getEventPullSeq(): Promise<number> {
+/**
+ * Last `event_log.seq` successfully pulled and applied for `orgId`.
+ *
+ * The legacy unscoped `event_pull_seq` row is deliberately NOT read: its value
+ * is untrustworthy (it may belong to a different org entirely). A device that
+ * has never synced under the new key therefore starts from 0 and replays the
+ * org's log from the start, which is the safe direction. The old row is left in
+ * place untouched.
+ */
+export async function getEventPullSeq(orgId?: string | null): Promise<number> {
   const db = await getDb();
   const rows = await db.select<{ value: string }[]>(
     "SELECT value FROM sync_meta WHERE key = $1",
-    [EVENT_PULL_SEQ_KEY]
+    [eventPullSeqKey(orgId)]
   );
   return rows?.[0]?.value ? Number(rows[0].value) : 0;
 }
 
-export async function setEventPullSeq(seq: number): Promise<void> {
+export async function setEventPullSeq(seq: number, orgId?: string | null): Promise<void> {
   const db = await getDb();
   await db.execute(
     "INSERT INTO sync_meta(key, value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=$2",
-    [EVENT_PULL_SEQ_KEY, String(seq)]
+    [eventPullSeqKey(orgId), String(seq)]
   );
 }
 
@@ -2629,6 +2747,237 @@ export async function migrate_v33(db: Database): Promise<void> {
     "CREATE INDEX IF NOT EXISTS idx_sync_event_failures_status ON sync_event_failures(status)"
   );
   await db.execute("PRAGMA user_version = 33");
+}
+
+// ──────────────────────────────────────────���──────────────────────────────────
+// MIGRATION v34 — per-org pull cursor key + applied_events replay guard
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Replay guard for the projectors that are NOT idempotent.
+ *
+ * `_saleVoided`, `_prescriptionRefillUsed`, `_stockAdjusted` and
+ * `_stockTransfer` apply pure increments/decrements with no existence check,
+ * so applying the same event twice double-applies it. Every other projector is
+ * an upsert or guarded by an existence check and is safe to replay.
+ *
+ * A cursor reset (or any re-pull after a stranded cursor) replays the log, so
+ * these four need to know whether they have already run for a given event_id.
+ * This table records that, written in the SAME local transaction as the
+ * projection.
+ *
+ * Deliberately scoped to those four event types only: one row per applied event
+ * for the whole log would grow without bound. `hasAppliedEvent` is consulted
+ * only by the four guarded projectors, so rows accumulate only for events of
+ * those types.
+ */
+export async function migrate_v34(db: Database): Promise<void> {
+  await db.execute(`
+    CREATE TABLE IF NOT EXISTS applied_events (
+      event_id     TEXT NOT NULL PRIMARY KEY,
+      org_id       TEXT NOT NULL DEFAULT '',
+      seq          INTEGER NOT NULL DEFAULT 0,
+      event_type   TEXT NOT NULL DEFAULT '',
+      aggregate_id TEXT NOT NULL DEFAULT '',
+      applied_at   TEXT NOT NULL DEFAULT ''
+    )
+  `);
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_applied_events_seq ON applied_events(seq)"
+  );
+  await db.execute(
+    "CREATE INDEX IF NOT EXISTS idx_applied_events_type ON applied_events(event_type)"
+  );
+
+  // The unscoped `event_pull_seq` row is intentionally NOT migrated: its value
+  // may belong to a different organisation entirely, so carrying it forward
+  // would reproduce exactly the bug v34 fixes. It is left in place, unread.
+  await db.execute("PRAGMA user_version = 34");
+}
+
+/** True when this device has already applied the given event. */
+export async function hasAppliedEvent(eventId: string): Promise<boolean> {
+  const db = await getDb();
+  const rows = await db.select<{ event_id: string }[]>(
+    "SELECT event_id FROM applied_events WHERE event_id = $1 LIMIT 1",
+    [eventId]
+  );
+  return rows.length > 0;
+}
+
+/**
+ * Record that an event has been applied.
+ *
+ * MUST be called in the same local transaction as the projection it guards, so
+ * the marker and the mutation commit or roll back together. A marker written
+ * without its mutation would suppress the mutation on the next replay.
+ */
+export async function markEventApplied(
+  db: Database,
+  identity: {
+    event_id: string;
+    org_id?: string | null;
+    seq?: number | null;
+    event_type?: string | null;
+    aggregate_id?: string | null;
+  }
+): Promise<void> {
+  await db.execute(
+    `INSERT INTO applied_events (event_id, org_id, seq, event_type, aggregate_id, applied_at)
+     VALUES ($1,$2,$3,$4,$5,$6)
+     ON CONFLICT(event_id) DO NOTHING`,
+    [
+      identity.event_id,
+      identity.org_id ?? "",
+      Number(identity.seq ?? 0),
+      identity.event_type ?? "",
+      identity.aggregate_id ?? "",
+      new Date().toISOString(),
+    ]
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v36 — make prescriptions.prescriber_license nullable (P2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * SQLite cannot `DROP NOT NULL`, so the column has to be rebuilt by copying the
+ * table. That is why this is a rebuild and not an ALTER — every NOT NULL change
+ * in this file already uses this shape (v15's `copyKeepingBoth`, v22's CRR
+ * rebuild).
+ *
+ * The rebuild is hand-written rather than reusing v22's generic helper because
+ * that helper assumes every NOT NULL column keeps a DEFAULT, which is exactly the
+ * constraint being removed here. Reusing it would either re-add NOT NULL or give
+ * every row a DEFAULT '' and quietly defeat the purpose.
+ *
+ * Rows are preserved verbatim: an existing NULL or '' stays as it is. See the
+ * server migration e7a8b9c0d1e4 for why there is no data normalisation — '' and
+ * NULL are treated as equivalent on read instead.
+ *
+ * The column list is read from PRAGMA rather than hardcoded, so a column added by
+ * any other migration is carried across instead of silently dropped — which
+ * happened to is_deleted before this was written.
+ */
+export async function migrate_v36(db: Database): Promise<void> {
+  const info = await db.select<{ name: string; notnull: number }[]>(
+    "PRAGMA table_info(prescriptions)"
+  );
+  const licence = info.find((c) => c.name === "prescriber_license");
+  // Already nullable, or the table is not the shape we expect. Either way there is
+  // nothing to do, and rebuilding would be pure risk.
+  if (!licence || licence.notnull === 0) {
+    await db.execute("PRAGMA user_version = 36");
+    return;
+  }
+
+  const collist = info.map((c) => c.name).join(", ");
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    await db.execute("ALTER TABLE prescriptions RENAME TO prescriptions_v35");
+    // Same DDL as the v22 table (localDb.ts:1583-1611) with one difference:
+    // prescriber_license has no NOT NULL.
+    await db.execute(`
+      CREATE TABLE prescriptions (
+        id                    TEXT NOT NULL PRIMARY KEY,
+        organization_id       TEXT NOT NULL DEFAULT '',
+        branch_id             TEXT NOT NULL DEFAULT '',
+        prescription_number   TEXT NOT NULL DEFAULT '',
+        customer_id           TEXT NOT NULL DEFAULT '',
+        prescriber_name       TEXT NOT NULL DEFAULT '',
+        prescriber_license    TEXT,
+        prescriber_phone      TEXT,
+        prescriber_address    TEXT,
+        issue_date            TEXT NOT NULL DEFAULT '',
+        expiry_date           TEXT,
+        diagnosis             TEXT,
+        notes                 TEXT,
+        special_instructions  TEXT,
+        medications           TEXT NOT NULL DEFAULT '[]',
+        refills_allowed       INTEGER NOT NULL DEFAULT 0,
+        refills_remaining     INTEGER NOT NULL DEFAULT 0,
+        last_refill_date      TEXT,
+        status                TEXT NOT NULL DEFAULT 'active',
+        verified_by           TEXT,
+        verified_at           TEXT,
+        created_offline_at    TEXT,
+        is_deleted            INTEGER NOT NULL DEFAULT 0,
+        sync_status           TEXT NOT NULL DEFAULT 'synced',
+        sync_version          INTEGER NOT NULL DEFAULT 1,
+        synced_at             TEXT,
+        updated_at            TEXT NOT NULL DEFAULT '',
+        created_at            TEXT NOT NULL DEFAULT ''
+      )
+    `);
+    await db.execute(
+      `INSERT INTO prescriptions (${collist}) SELECT ${collist} FROM prescriptions_v35`
+    );
+    await db.execute("DROP TABLE prescriptions_v35");
+    await db.execute("PRAGMA user_version = 36");
+    await db.execute("COMMIT");
+  } catch (e) {
+    await db.execute("ROLLBACK");
+    throw e;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MIGRATION v35 — one-time purge of cross-organization price contracts
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * REMOVES price_contracts rows that belong to an organization other than the
+ * signed-in one.
+ *
+ * WHY THIS IS NEEDED
+ * ------------------
+ * `_priceContractCreated` uses `INSERT OR IGNORE`, so replaying an event for a
+ * contract that already exists locally never UPDATES it. An E2E fixture had
+ * seeded NHIS-2026 into this device under a test organization id
+ * (11111111-...). The real log later replayed the same contract id carrying the
+ * real org, and the projector silently kept the poisoned row.
+ *
+ * `getAvailableContractsForPos` filters on the signed-in org, so that row is
+ * invisible: the POS shows "Select a price contract" and the sale button stays
+ * disabled, with nothing on screen to explain it. A replay cannot repair it,
+ * because the projector will not overwrite an existing row — so the fix has to
+ * happen once, here.
+ *
+ * Deletion, not relabelling: an earlier draft of this migration rewrote foreign
+ * rows to the current org, which is strictly worse — it would have made another
+ * organization's contract OFFERABLE to this cashier. These rows belong to a
+ * different tenant and this device has no use for them; if that org is ever
+ * signed into on this device again, its contracts return with the next sync.
+ */
+export async function migrate_v35(db: Database, organizationId?: string | null): Promise<void> {
+  if (organizationId) {
+    await db.execute(
+      "DELETE FROM price_contracts WHERE organization_id IS NULL OR organization_id <> $1",
+      [organizationId]
+    );
+  }
+  await db.execute("PRAGMA user_version = 35");
+}
+
+/**
+ * Runs the v35 repair once the signed-in organization is known.
+ *
+ * Returns how many foreign rows were removed, so the caller can log it. Safe to
+ * call repeatedly: after the first run there is nothing left to delete.
+ */
+export async function repairCrossOrgPriceContracts(organizationId: string): Promise<number> {
+  const db = await getDb();
+  const before = await db.select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM price_contracts "
+    + "WHERE organization_id IS NULL OR organization_id <> $1",
+    [organizationId]
+  );
+  const removed = Number(before?.[0]?.n ?? 0);
+  if (removed > 0) {
+    await migrate_v35(db, organizationId);
+  }
+  return removed;
 }
 
 /** Attempts allowed before an event is quarantined and never retried again. */

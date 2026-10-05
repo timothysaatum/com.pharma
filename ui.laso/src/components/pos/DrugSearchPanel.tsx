@@ -17,11 +17,15 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { Search, Plus, X, ShieldAlert, Package } from "lucide-react";
 import { inventoryApi } from "@/api/inventory";
 import { localRead } from "@/lib/localRead";
+import { appEvents } from "@/lib/events";
 import { isBackendKnownUnreachable, isOfflineError } from "@/api/client";
 import { useDebounce } from "@/hooks/useDebounce";
 import { parseApiError } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import type { BranchInventoryWithDetails, Drug, DrugType } from "@/types";
+
+/** Coalesces a burst of stock events into one refetch. */
+const STOCK_REFRESH_DEBOUNCE_MS = 250;
 
 interface DrugSearchPanelProps {
     onAdd: (drug: Drug, availableStock?: number) => void;
@@ -127,7 +131,19 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
     const abortRef = useRef<AbortController | null>(null);
     const activeBranchId = useAuthStore((state) => state.activeBranchId);
 
-    const fetchDrugs = useCallback(async (pageNum: number, append: boolean) => {
+    /**
+     * `preservePage` is for REFRESHES, not navigation.
+     *
+     * A non-append fetch normally resets to page 1, which is right when the
+     * query changes but wrong when stock moves: the cashier has paged to page 3
+     * and filtered to "amox", and a sale that changes stock must not throw them
+     * back to the top of an unfiltered list.
+     */
+    const fetchDrugs = useCallback(async (
+        pageNum: number,
+        append: boolean,
+        preservePage = false
+    ) => {
         if (!activeBranchId) {
             setDrugs([]);
             setHasMore(false);
@@ -140,7 +156,7 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
             setIsLoading(true);
             setError(null);
             setFocusedIndex(-1);
-            setPage(1);
+            if (!preservePage) setPage(1);
             abortRef.current?.abort();
             const controller = new AbortController();
             abortRef.current = controller;
@@ -257,6 +273,47 @@ export function DrugSearchPanel({ onAdd, disabledDrugIds }: DrugSearchPanelProps
         fetchDrugs(1, false);
         return () => abortRef.current?.abort();
     }, [fetchDrugs]);
+
+    // ── Refresh when stock moves ─────────────────────────────────────────
+    //
+    // Without this the list showed PRE-SALE quantities until the cashier left
+    // and returned: POSPage emits inventory:changed and sales:changed after a
+    // sale (POSPage.tsx:589-590, :608-609), but nothing here listened, so the
+    // "N available" text kept whatever the drug object held at the last render
+    // while the cart — reading a different map — already used the new number.
+    //
+    // The fix is a subscription, NOT a merge of the two stock maps: this panel
+    // keeps its own and simply refetches through the existing path.
+    //
+    // Subscribed to all three stock-moving events: a sale or void (sales:changed
+    // / inventory:changed), and a PO receipt or adjustment, which emit
+    // purchases:changed / inventory:changed from the inventory pages.
+    //
+    // Debounced, because a single checkout emits several events in a row and an
+    // un-debounced listener would refetch once per emit.
+    useEffect(() => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+
+        const scheduleRefresh = () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+                timer = null;
+                // Same query, same filters, same page the cashier is on.
+                void fetchDrugs(page, false, true);
+            }, STOCK_REFRESH_DEBOUNCE_MS);
+        };
+
+        const unsubscribes = [
+            appEvents.on("inventory:changed", scheduleRefresh),
+            appEvents.on("sales:changed", scheduleRefresh),
+            appEvents.on("purchases:changed", scheduleRefresh),
+        ];
+
+        return () => {
+            if (timer) clearTimeout(timer);
+            for (const off of unsubscribes) off();
+        };
+    }, [fetchDrugs, page]);
 
     // Keyboard nav
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {

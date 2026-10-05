@@ -33,7 +33,7 @@ import logging
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 from sqlalchemy import and_, func, or_, select, update
@@ -60,6 +60,13 @@ from app.schemas.inventory_schemas import (
     LowStockReport,
 )
 from app.utils.pagination import PaginatedResponse, PaginationParams
+from app.schemas.event_envelope import AggregateType
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    branch_inventory_payload,
+    drug_batch_payload,
+    publish_stock_change,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -560,6 +567,7 @@ class InventoryService:
         organization_id: uuid.UUID,
         location: Optional[str] = None,
         selling_price: Optional[Decimal] = None,
+        authored_by: Optional[uuid.UUID] = None,
     ) -> BranchInventory:
         """Make an organization catalogue drug available for sale at a branch."""
         drug = await db.scalar(
@@ -598,6 +606,35 @@ class InventoryService:
         )
         inventory.mark_as_pending_sync()
         db.add(inventory)
+
+        # Publish inside this transaction, not after it. A device that never hears
+        # about this row keeps showing the drug as not stocked at the branch.
+        #
+        # quantity is explicit (0) because adding a drug to a branch stocks
+        # nothing. Under C-hybrid the device only USES this value when it holds no
+        # batch rows for the pair; once it has them, quantity is derived from them
+        # and this 0 is ignored. That is the correct outcome here: a device that
+        # already has batches for this drug at this branch has real stock, and must
+        # not be zeroed by a "added to branch" event.
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=organization_id,
+            event_type="branch_inventory_created",
+            aggregate_type=AggregateType.BRANCH_INVENTORY,
+            aggregate_id=inventory.id,
+            payload=branch_inventory_payload(
+                inventory_id=inventory.id,
+                branch_id=branch_id,
+                drug_id=drug_id,
+                quantity=0,
+                reserved_quantity=0,
+                location=location,
+                selling_price=selling_price,
+            ),
+            authored_by=authored_by or uuid.UUID(int=0),
+            branch_id=branch_id,
+        )
+
         await db.commit()
         await db.refresh(inventory)
         return inventory
@@ -1226,6 +1263,7 @@ class InventoryService:
                             "Use a distinct batch number for a different expiry lot."
                         ),
                     )
+                batch_created = False
                 existing_batch.quantity += batch_data.quantity
                 existing_batch.remaining_quantity += batch_data.quantity
                 if existing_batch.manufacturing_date is None:
@@ -1244,6 +1282,7 @@ class InventoryService:
                     created_at=datetime.now(timezone.utc),
                     updated_at=datetime.now(timezone.utc),
                 )
+                batch_created = True
                 batch.mark_as_pending_sync()
                 db.add(batch)
                 await db.flush()  # get batch.id before touching inventory
@@ -1330,6 +1369,17 @@ class InventoryService:
                 source_line_id=batch.id,
                 reference_number=batch_data.batch_number,
                 created_by=adjusted_by if (adjusted_by and adjusted_by.int != 0) else None,
+            )
+
+            # Publish before the commit below, inside the caller's transaction,
+            # with the lot's absolute remaining_quantity. See publish_stock_change.
+            await publish_stock_change(
+                db,
+                org_id=organization_id,
+                branch_id=batch.branch_id,
+                inventory=inventory,
+                batches=[(batch, batch_created)],
+                authored_by=(adjusted_by or uuid.UUID(int=0)),
             )
 
         await db.commit()
@@ -1467,6 +1517,20 @@ class InventoryService:
                     reason="Batch quantity correction",
                 )
 
+            # Publish inside the savepoint, before the commit below. A correction
+            # with no event leaves the device deriving from the old lot quantity,
+            # so this carries the corrected absolute remaining_quantity.
+            await publish_stock_change(
+                db,
+                org_id=await InventoryService._get_branch_organization_id(
+                    db, batch.branch_id
+                ),
+                branch_id=batch.branch_id,
+                inventory=inventory,
+                batches=[(batch, False)],
+                authored_by=uuid.UUID(int=0),
+            )
+
         await db.commit()
         await db.refresh(batch)
         return batch
@@ -1574,6 +1638,18 @@ class InventoryService:
                 source_id=batch.id,
                 reference_number=batch.batch_number,
                 reason="Direct batch consumption",
+            )
+
+            # Publish inside the savepoint, before the commit below.
+            await publish_stock_change(
+                db,
+                org_id=await InventoryService._get_branch_organization_id(
+                    db, batch.branch_id
+                ),
+                branch_id=batch.branch_id,
+                inventory=inventory,
+                batches=[(batch, False)],
+                authored_by=uuid.UUID(int=0),
             )
 
         await db.commit()
@@ -2057,6 +2133,43 @@ class InventoryService:
 
             # Resolve any existing alerts if the new quantity is healthy
             await InventoryService._resolve_inventory_alerts(db, branch_id, drug_id, new_qty)
+        else:
+            # No aggregate row for a pair that HAS lots. Previously this silently
+            # did nothing, which left quantity == SUM(lots) false with no trace —
+            # the invariant the device's C-hybrid derivation depends on. Three
+            # of the five callers would later raise somewhere unhelpful
+            # (update_batch's scalar_one -> NoResultFound, consume_from_batch and
+            # _apply_adjustment -> HTTPException 404/400), so the defect surfaced
+            # far from its cause.
+            #
+            # CREATE rather than raise: create_batch already creates the row when
+            # it is missing, so this is established behaviour here, and raising
+            # would turn currently-working paths into failures. The row is a
+            # faithful projection of the lots, which is exactly what this
+            # function exists to compute.
+            #
+            # Only ever reached when new_qty > 0 in practice — callers that
+            # validate the aggregate exists do so before getting here — but the
+            # row is created either way so the pair is never left inconsistent.
+            inventory = BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch_id,
+                drug_id=drug_id,
+                quantity=new_qty,
+                reserved_quantity=0,
+                sync_status="pending",
+                sync_version=1,
+                created_at=datetime.now(timezone.utc),
+                updated_at=datetime.now(timezone.utc),
+            )
+            inventory.mark_as_pending_sync()
+            db.add(inventory)
+            await db.flush()
+            logger.info(
+                "Created missing branch_inventory aggregate for branch=%s drug=%s "
+                "quantity=%s from %s lot(s)",
+                branch_id, drug_id, new_qty, "existing",
+            )
 
         return new_qty
 
@@ -2168,6 +2281,11 @@ class InventoryService:
                     )
                 )
 
+        # Every lot this adjustment touches, as (row, was_created). The ruling
+        # requires batch detail: the device derives quantity from its own lots, so
+        # a correction published without them would be ignored on the device.
+        touched_batches: List[Tuple[Any, bool]] = []
+
         # ── Update batches to maintain parity ──
         if quantity_change > 0:
             # For additions (return/correction), add to the earliest valid batch
@@ -2193,6 +2311,7 @@ class InventoryService:
 
                 target_batch.updated_at = datetime.now(timezone.utc)
                 target_batch.mark_as_pending_sync()
+                touched_batches.append((target_batch, False))
             else:
                 # No active batch found - create a system adjustment batch to prevent data loss
                 # during recalculation.
@@ -2210,6 +2329,7 @@ class InventoryService:
                 )
                 target_batch.mark_as_pending_sync()
                 db.add(target_batch)
+                touched_batches.append((target_batch, True))
 
             movement_type = (
                 "transfer_in"
@@ -2275,6 +2395,7 @@ class InventoryService:
                     batch.remaining_quantity -= take
                     batch.updated_at = datetime.now(timezone.utc)
                     batch.mark_as_pending_sync()
+                    touched_batches.append((batch, False))
                     qty_to_deduct -= take
 
                     await InventoryService._record_inventory_movement(
@@ -2329,6 +2450,7 @@ class InventoryService:
                     batch.remaining_quantity -= take
                     batch.updated_at = datetime.now(timezone.utc)
                     batch.mark_as_pending_sync()
+                    touched_batches.append((batch, False))
                     qty_to_deduct -= take
 
                     movement_type = (
@@ -2378,4 +2500,25 @@ class InventoryService:
         await InventoryService._recalculate_inventory_quantity(db, branch_id, drug_id)
 
         await db.flush()
+
+        # Publish inside the caller's transaction. _apply_adjustment does not
+        # commit — adjust_inventory and transfer_stock own the boundary — so the
+        # emit rides whichever savepoint/transaction they opened, and a failed
+        # append unwinds their stock change too.
+        #
+        # transfer_stock is out of scope for publication (single branch, and the
+        # payload carries no destination batch ids), so only its source side is
+        # published, and only when it is not a cross-branch transfer.
+        if touched_batches and adjustment_type != "transfer":
+            await publish_stock_change(
+                db,
+                org_id=await InventoryService._get_branch_organization_id(
+                    db, branch_id
+                ),
+                branch_id=branch_id,
+                inventory=inventory,
+                batches=touched_batches,
+                authored_by=adjusted_by,
+            )
+
         return adjustment, inventory

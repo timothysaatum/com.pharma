@@ -85,6 +85,15 @@ export interface EventPullResponse {
   events: EventEnvelope[];
   has_more: boolean;
   next_after_seq: number;
+  /**
+   * The server's true highest `seq` for this organisation, on every response.
+   *
+   * `next_after_seq` is a paging cursor and echoes the caller's own
+   * `after_seq` on an empty page, so it cannot answer "are you past my log?".
+   * Optional on the wire type so a response from an older server still parses;
+   * callers must treat `undefined` as "unknown" and fall back.
+   */
+  server_head_seq?: number;
 }
 
 // ── ULID generation ────────────────────────────────────────────────────────

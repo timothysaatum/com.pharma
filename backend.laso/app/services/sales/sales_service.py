@@ -45,7 +45,13 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
-from app.services.sync.eventlog.server_emitter import ServerEventEmitter
+from app.services.sync.eventlog.refill_event_id import (
+    prescription_refill_used_event_id,
+)
+from app.services.sync.eventlog.stock_emitter import (
+    StockEventEmitter,
+    publish_stock_change,
+)
 from app.schemas.event_envelope import AggregateType
 from app.schemas.sales_schemas import (
     ProcessSaleResponse,
@@ -1129,6 +1135,9 @@ class SalesService:
             # ------------------------------------------------------------------
             # 18. Prescription refill decrement
             # ------------------------------------------------------------------
+            # Post-state snapshot for the refill event emitted at step 20. Kept as
+            # a plain dict taken while the ORM object is still in the session.
+            _rx_refill_snapshot: Optional[Dict[str, Any]] = None
             if prescription:
                 prescription.refills_remaining -= 1
                 prescription.last_refill_date   = date.today()
@@ -1139,6 +1148,27 @@ class SalesService:
                 )
                 prescription.updated_at = datetime.now(timezone.utc)
                 prescription.mark_as_pending_sync()
+
+                # Snapshot the post-state while the ORM object is still in the
+                # session, for the event payload below (step 20).
+                _rx_refill_snapshot = {
+                    "refills_remaining": prescription.refills_remaining,
+                    "refills_allowed": prescription.refills_allowed,
+                    "status": prescription.status,
+                    "last_refill_date": (
+                        prescription.last_refill_date.isoformat()
+                        if prescription.last_refill_date
+                        else None
+                    ),
+                    "verified_by": (
+                        str(prescription.verified_by) if prescription.verified_by else None
+                    ),
+                    "verified_at": (
+                        prescription.verified_at.isoformat()
+                        if prescription.verified_at
+                        else None
+                    ),
+                }
 
             # ------------------------------------------------------------------
             # 19. Loyalty points + tier recalculation
@@ -1246,7 +1276,87 @@ class SalesService:
             }
 
         # ----------------------------------------------------------------------
-        # 20. Commit — outside the savepoint context
+        # 20. Publish sale_created — INSIDE the transaction, before the commit
+        # ----------------------------------------------------------------------
+        # This used to run at step 21.5, after the commit and through
+        # ServerEventEmitter, which swallows exceptions. A sale could therefore
+        # commit with no event at all: every device kept showing the pre-sale
+        # stock and nothing was logged anywhere. Now the append is part of the
+        # same unit of work as the sale, so a failed append aborts the sale.
+        #
+        # Placed after the savepoint exits (so the sale's own rollback semantics
+        # are untouched) but before the commit, which is what makes it atomic.
+        #
+        # NOTE: sale_created is the ONLY event this method publishes. It carries
+        # no drug_batch_* or branch_inventory_* of its own; the lot deductions
+        # travel as batch_changes inside its payload and are applied by the
+        # device relative to lot rows it already holds. A device that has not
+        # yet received those lots silently applies nothing.
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=sale.organization_id,
+            event_type="sale_created",
+            aggregate_type=AggregateType.SALE,
+            aggregate_id=_sale_id_for_event,
+            payload=_event_payload,
+            authored_by=user.id,
+            branch_id=sale_data.branch_id,
+        )
+
+        # ----------------------------------------------------------------------
+        # 20. Prescription refill event
+        # ------------------------------------------------------------------
+        # The decrement at step 18 changed a row every device caches, and until
+        # this existed nothing told them. The device's Prescriptions page and the
+        # POS pre-flight both read the LOCAL prescriptions row, so after an online
+        # sale the cart showed the pre-sale refill count and the page showed the
+        # prescription as untouched. That was P1.
+        #
+        # Emitted here, in the same transaction as the decrement and immediately
+        # after sale_created, so the row change and the event that announces it
+        # commit or roll back together. A failed append aborts the sale, which is
+        # the same trade sale_created already makes.
+        #
+        # Emitting absolute post-state (not a delta) is deliberate: a device that
+        # receives this twice, or receives it after having already applied its own
+        # offline decrement, converges on the server's number instead of drifting.
+        if _rx_refill_snapshot is not None and prescription is not None:
+            await StockEventEmitter.emit_in_transaction(
+                db,
+                org_id=sale.organization_id,
+                event_type="prescription_refill_used",
+                aggregate_type=AggregateType.PRESCRIPTION,
+                aggregate_id=prescription.id,
+                # Derived from the sale id, never random: one dispense must yield
+                # exactly one event id or the counter drops twice.
+                event_id=prescription_refill_used_event_id(prescription.id, sale.id),
+                payload={
+                    "prescription_id": str(prescription.id),
+                    "sale_id": str(sale.id),
+                    "sale_number": sale_number,
+                    "organization_id": str(sale.organization_id),
+                    "branch_id": str(sale_data.branch_id) if sale_data.branch_id else None,
+                    # Absolute post-state.
+                    **_rx_refill_snapshot,
+                    # How this dispense reached the server, so a reader can tell an
+                    # online dispense from one replayed off a device.
+                    "source": "online_sale",
+                    "over_dispensed": False,
+                },
+                authored_by=user.id,
+                branch_id=sale_data.branch_id,
+                # No `dependencies`: entries must be 26-char ULIDs
+                # (event_envelope.py:101) and a sale id is a UUID, so the sale
+                # cannot be named here at all. Ordering does not need it — this
+                # event is appended after sale_created so it carries a higher seq,
+                # and a device applies the log in seq order. Dependencies exist to
+                # park a client event whose FK target has not arrived yet, which
+                # does not apply: the prescription row is already on the server,
+                # mutated above in this same transaction.
+            )
+
+        # ----------------------------------------------------------------------
+        # 21. Commit — outside the savepoint context
         # ----------------------------------------------------------------------
         await db.commit()
 
@@ -1277,21 +1387,6 @@ class SalesService:
         except Exception:
             logger.exception("Failed to write process_sale audit log for sale %s", sale.id)
             await db.rollback()
-
-        # ----------------------------------------------------------------------
-        # 21.5 Emit sale_created event so other devices can pull it
-        # ----------------------------------------------------------------------
-        await ServerEventEmitter.emit(
-            db=db,
-            org_id=user.organization_id,
-            event_type="sale_created",
-            aggregate_type=AggregateType.SALE,
-            aggregate_id=_sale_id_for_event,
-            payload=_event_payload,
-            authored_by=user.id,
-            branch_id=sale_data.branch_id,
-        )
-        await db.commit()
 
         # ----------------------------------------------------------------------
         # 22. Build and return response
@@ -1581,6 +1676,12 @@ class SalesService:
                 inventory          = inv_res.scalar_one()
                 previous_qty       = inventory.quantity
                 running_inventory_qty = previous_qty
+                # Every lot this refund puts stock back into, as (row, was_created).
+                # Restocking into the ORIGINAL lots matters: the device derives
+                # quantity from its own lots, so a refund published against a
+                # fabricated RETURN- lot would leave the device's original lots
+                # short and its derived quantity wrong.
+                restored_batches: List[Tuple[Any, bool]] = []
                 inventory_restored += 1
 
                 qty_to_restore = refund_item.quantity
@@ -1600,6 +1701,7 @@ class SalesService:
                             .with_for_update()
                         )
                         batch = batch_res.scalar_one_or_none()
+                    batch_created = batch is None
 
                     if batch is None:
                         batch = DrugBatch(
@@ -1629,6 +1731,7 @@ class SalesService:
                     batch.updated_at = datetime.now(timezone.utc)
                     batch.mark_as_pending_sync()
                     batches_restored += 1
+                    restored_batches.append((batch, batch_created))
 
                     movement_before = running_inventory_qty
                     running_inventory_qty += restore_qty
@@ -1695,6 +1798,20 @@ class SalesService:
                     branch_id=sale.branch_id,
                     drug_id=sale_item.drug_id,
                 )
+
+                # Publish inside the refund's savepoint, before its commit. The
+                # recalculation above has already fixed inventory.quantity, so the
+                # event carries the post-refund absolute value.
+                mine = [b for b in restored_batches if b[0].drug_id == sale_item.drug_id]
+                if mine:
+                    await publish_stock_change(
+                        db,
+                        org_id=sale.organization_id,
+                        branch_id=sale.branch_id,
+                        inventory=inventory,
+                        batches=mine,
+                        authored_by=user.id,
+                    )
 
             # Reverse loyalty points + recalculate tier
             loyalty_points_deducted = 0

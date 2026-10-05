@@ -1069,7 +1069,7 @@ export interface Prescription extends TimestampFields, SyncFields {
     prescription_number: string;
     customer_id: string;
     prescriber_name: string;
-    prescriber_license: string;
+    prescriber_license: string | null;
     prescriber_phone: string | null;
     prescriber_address: string | null;
     issue_date: string;
@@ -1085,6 +1085,13 @@ export interface Prescription extends TimestampFields, SyncFields {
     verified_by: string | null;
     verified_at: string | null;
     created_offline_at?: string | null;
+    /**
+     * Completed sales linked to this prescription. DERIVED from the sales table on
+     * every read (server `_dispensed_counts`, local correlated subquery) and never
+     * stored, because the stored `refills_remaining` counter drifts when a dispense
+     * happens somewhere that is not authoritative for it — which is what P1 was.
+     */
+    dispensed_count?: number | null;
     renumbered_from?: string | null;
     renumbered_to?: string | null;
     renumbered_at?: string | null;

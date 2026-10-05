@@ -25,6 +25,40 @@ from app.models.customer.customer_model import Customer
 
 DATABASE_URL_TEST = os.environ["DATABASE_URL"]
 
+
+def _assert_not_production_database(url: str) -> None:
+    """Refuse to run the suite against the live clinic database.
+
+    The `db` fixture below runs `DROP SCHEMA IF EXISTS public CASCADE` on every
+    PostgreSQL target. That is correct for a disposable cluster and catastrophic
+    for production, and nothing in the URL distinguishes the two by itself.
+
+    This has already happened: atlasdb carried 9 `prescription_created` events
+    using fixture UUIDs (aggregate `aaaaaaaa-…`, author `44444444…`), which can
+    only have come from the integration suite running against it.
+
+    So the fence is explicit rather than clever: name the database, and refuse
+    anything that is not obviously a throwaway.
+    """
+    if not url.startswith("postgresql"):
+        return
+    # The database name is the last path segment before any query string.
+    db_name = url.split("?", 1)[0].rstrip("/").rsplit("/", 1)[-1].lower()
+    forbidden = {"atlasdb", "postgres", "template0", "template1"}
+    if db_name in forbidden:
+        raise RuntimeError(
+            f"REFUSING TO RUN: the test database is named {db_name!r}. "
+            "tests/conftest.py drops the public schema on every PostgreSQL "
+            "target, so this would destroy live data. Point "
+            "TEST_DATABASE_URL at a disposable cluster, e.g. "
+            "postgresql+asyncpg://postgres@/rx_impl?host=/tmp/... "
+            "(see /tmp/pharmacare-investigation/pg.sh)."
+        )
+
+
+_assert_not_production_database(DATABASE_URL_TEST)
+
+
 @pytest_asyncio.fixture(scope="function")
 async def db():
     engine_kwargs = {}
@@ -51,6 +85,34 @@ async def db():
                 await conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
                 await conn.execute(text("CREATE SCHEMA public"))
             await conn.run_sync(Base.metadata.create_all)
+            if DATABASE_URL_TEST.startswith("postgresql"):
+                # The event-sourced spine is owned by Alembic, not by an ORM model,
+                # so Base.metadata.create_all never builds it. Any test that reaches
+                # a stock write path now publishes an event inside the caller's
+                # transaction, so the table has to exist for those tests to run.
+                # Tests that need it with specific columns still drop and recreate
+                # it themselves; IF NOT EXISTS keeps both paths working.
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS event_log (
+                        event_id TEXT NOT NULL,
+                        org_id UUID NOT NULL,
+                        seq BIGINT NOT NULL,
+                        aggregate_id UUID NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        schema_version SMALLINT NOT NULL DEFAULT 1,
+                        payload JSONB NOT NULL,
+                        dependencies TEXT[] NOT NULL DEFAULT '{}',
+                        authored_at TIMESTAMPTZ NOT NULL,
+                        authored_by UUID NOT NULL,
+                        branch_id UUID NOT NULL,
+                        hash_self TEXT NOT NULL,
+                        hash_prev TEXT NOT NULL,
+                        received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (org_id, event_id),
+                        UNIQUE (org_id, seq)
+                    )
+                """))
     finally:
         for table, index in postgres_only_indexes:
             table.indexes.add(index)

@@ -11,7 +11,6 @@
  * by the production migration chain, and assert the persisted column.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import type { DatabaseSync } from "node:sqlite";
 import {
   GEBEDOL,
   OTHER_BRANCH,
@@ -264,7 +263,6 @@ describe("branch_inventory projector writes sellable_quantity", () => {
   });
 
   it("stock_adjusted recomputes sellable after moving quantity", async () => {
-    const db = await getDb();
     const raw = rawDb();
     insertInventory(raw, { quantity: 100 });
     insertBatch(raw, { remaining: 100 });
@@ -293,7 +291,6 @@ describe("branch_inventory projector writes sellable_quantity", () => {
   });
 
   it("sale_created recomputes sellable for every deducted drug", async () => {
-    const db = await getDb();
     const raw = rawDb();
     insertInventory(raw, { quantity: 117 });
     insertBatch(raw, { id: "b1", remaining: 117 });
