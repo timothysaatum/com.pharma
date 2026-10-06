@@ -56,6 +56,9 @@ export async function applyEventLocally(envelope: EventEnvelope): Promise<void> 
     case "customer_deleted":
       await _customerDeleted(db, envelope);
       break;
+    case "customer_loyalty_changed":
+      await _customerLoyaltyChanged(db, envelope);
+      break;
 
     // ── Sale ────────────────────────────────────────────────────────────
     case "sale_created":
@@ -274,6 +277,71 @@ async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
       e.authored_at ?? now,
     ]
   );
+}
+
+/**
+ * Apply the server's ABSOLUTE loyalty post-state.
+ *
+ * A deliberately separate handler from `_customerUpdated`, for two reasons:
+ *
+ *  1. `_customerUpdated` overwrites every field present in the payload, including
+ *     the name, contact details and marketing consent. This event carries only a
+ *     balance, and the server is authoritative about the balance alone. Routing
+ *     it through the update handler would mean a loyalty event silently
+ *     discarding edits the user made offline on a `pending` row.
+ *
+ *  2. It matches on id AND organization_id. A loyalty event for a customer this
+ *     device does not hold - or holds under a different org - is recorded as a
+ *     projection failure rather than silently ignored or applied to the wrong
+ *     tenant.
+ *
+ * The value is absolute, so applying the same event twice lands on the same
+ * number. See ADR 0010.
+ */
+async function _customerLoyaltyChanged(db: Db, e: EventEnvelope): Promise<void> {
+  const p = e.payload as Record<string, unknown>;
+  const now = new Date().toISOString();
+  const customerId = String(p.customer_id ?? e.aggregate_id ?? "");
+  const points = Number(p.loyalty_points);
+  const tier = String(p.loyalty_tier ?? "");
+
+  if (!customerId || !Number.isFinite(points) || !tier) {
+    throw new Error(
+      `customer_loyalty_changed ${e.event_id}: payload must carry customer_id, ` +
+      `loyalty_points and loyalty_tier`,
+    );
+  }
+
+  const existing = await db.select<{ organization_id: string }[]>(
+    "SELECT organization_id FROM customers WHERE id = $1",
+    [customerId],
+  );
+  if (existing.length === 0) {
+    throw new Error(
+      `customer_loyalty_changed ${e.event_id}: customer ${customerId} is not in the ` +
+      `local read model. The server is authoritative about the balance; this device ` +
+      `needs the customer_created event first.`,
+    );
+  }
+  if (String(existing[0].organization_id) !== String(e.org_id)) {
+    throw new Error(
+      `customer_loyalty_changed ${e.event_id}: customer ${customerId} is held locally ` +
+      `under organization ${existing[0].organization_id}, not ${e.org_id}. Refusing to ` +
+      `apply a loyalty balance across organizations.`,
+    );
+  }
+
+  // ONLY these two columns. The name, contact details and every other locally
+  // edited field are untouched by design.
+  await db.execute(
+    "UPDATE customers SET loyalty_points = $1, loyalty_tier = $2, updated_at = $3 " +
+    "WHERE id = $4 AND organization_id = $5",
+    [points, tier, now, customerId, String(e.org_id)],
+  );
+
+  // Without this the Customers page and the POS typeahead keep showing the
+  // pre-sync balance until something else happens to re-render them.
+  appEvents.emit("customers:changed");
 }
 
 async function _customerUpdated(db: Db, e: EventEnvelope): Promise<void> {

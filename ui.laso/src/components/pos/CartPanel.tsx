@@ -30,6 +30,7 @@ import { PaymentMethod } from "@/types";
 import { CartItem, CartTotals, CartValidationError, SplitPayment } from "@/hooks/useCart";
 import { apiClient, isBackendKnownUnreachable } from "@/api/client";
 import { localRead } from "@/lib/localRead";
+import { appEvents } from "@/lib/events";
 import { useAuthStore } from "@/stores/authStore";
 import { PrescriptionSelector } from "@/components/pos/PrescriptionSelector";
 
@@ -120,6 +121,27 @@ function CustomerSearchWidget({
     useEffect(() => {
         return () => abortRef.current?.abort();
     }, []);
+
+    // A loyalty change published by the server (or by another device's sale) can
+    // change the tier shown beside a matched customer. Re-run the active query so
+    // the typeahead does not keep displaying a stale tier. Debounced, and it only
+    // re-queries when there is something to re-query for, so a closed typeahead
+    // costs nothing.
+    useEffect(() => {
+        if (!open || query.length < 2) return;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribe = appEvents.on("customers:changed", () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+                search(query);
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, 400);
+        });
+        return () => {
+            unsubscribe();
+            if (timer) clearTimeout(timer);
+        };
+    }, [open, query]);
 
     const search = (q: string) => {
         if (debounceRef.current) clearTimeout(debounceRef.current);

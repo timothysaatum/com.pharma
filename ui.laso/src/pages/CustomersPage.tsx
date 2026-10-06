@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { customersApi, type CustomerWithDetails } from "@/api/customers";
 import { localRead } from "@/lib/localRead";
+import { appEvents } from "@/lib/events";
 import { isBackendKnownUnreachable } from "@/api/client";
 import { useAuthStore } from "@/stores/authStore";
 import { parseApiError } from "@/api/client";
@@ -150,6 +151,25 @@ export default function CustomersPage() {
             if (abortRef.current === ctrl) setIsLoading(false);
         }
     }, [page, debouncedSearch, filterType, filterTier, user?.organization_id]);
+
+    // A loyalty change on another device, or one that arrives on the next pull,
+    // updates a row this page is showing. Without this subscription the list kept
+    // the balance it loaded at until something unrelated forced a re-render.
+    // Debounced, and it re-runs the existing fetcher, so the active search term,
+    // type/tier filters and page are all preserved.
+    useEffect(() => {
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const unsubscribe = appEvents.on("customers:changed", () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => {
+                void fetchCustomers();
+            }, 400);
+        });
+        return () => {
+            unsubscribe();
+            if (timer) clearTimeout(timer);
+        };
+    }, [fetchCustomers]);
 
     useEffect(() => { fetchCustomers(); return () => abortRef.current?.abort(); }, [fetchCustomers]);
 
