@@ -12,13 +12,18 @@ import uuid
 import random
 import sys
 import os
+from pathlib import Path
 from decimal import Decimal
 from datetime import date, datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sqlalchemy import select, text
-from refuse_real_database import require_disposable_database
+try:  # as a package: `from scripts.x import ...`
+    from scripts.refuse_real_database import require_disposable_database
+except ImportError:  # run directly: `python scripts/x.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from refuse_real_database import require_disposable_database
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 

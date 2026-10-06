@@ -28,7 +28,11 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
-from refuse_real_database import require_disposable_database  # noqa: E402
+try:  # as a package: `from scripts.x import ...`
+    from scripts.refuse_real_database import require_disposable_database
+except ImportError:  # run directly: `python scripts/x.py`
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from refuse_real_database import require_disposable_database
 
 from app.core.config import get_settings  # noqa: E402
 from app.models.inventory.branch_inventory import BranchInventory  # noqa: E402
