@@ -59,8 +59,10 @@ describe("MIGRATION v36", () => {
         await installRealDb();
     });
 
-    it("runs the chain up to 36", async () => {
-        expect(await userVersion()).toBe(36);
+    it("runs the chain up to the current head", async () => {
+        // Bumped by migration v37 (cross-org customer cleanup). This asserts the
+        // CHAIN reached its head, not that it stopped at a particular number.
+        expect(await userVersion()).toBe(37);
     });
 
     it("leaves prescriber_license nullable", async () => {
