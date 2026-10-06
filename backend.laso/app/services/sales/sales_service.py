@@ -45,6 +45,13 @@ from app.models.sales.sales_model import Sale, SaleItem, SaleItemBatchAllocation
 from app.models.system_md.sys_models import SystemAlert
 from app.models.user.user_model import Permission, User
 from app.services.inventory.inventory_service import InventoryService
+from app.services.sales.utils.loyalty import (
+    apply_loyalty_award,
+    loyalty_payload,
+)
+from app.services.sync.eventlog.loyalty_event_id import (
+    customer_loyalty_changed_event_id,
+)
 from app.services.sync.eventlog.refill_event_id import (
     prescription_refill_used_event_id,
 )
@@ -1179,25 +1186,27 @@ class SalesService:
             # ------------------------------------------------------------------
             points_earned = 0
             loyalty_enabled = bool(organization.settings.get("enable_loyalty_program", False))
+            _loyalty_award = None
             if customer and loyalty_enabled:
-                loyalty_cfg   = organization.settings.get("loyalty", {})
-                points_rate   = _d(loyalty_cfg.get("points_per_unit", "1.0"))
-                points_earned = int(total_amount * points_rate)
-
-                # Increment denormalized purchase counters
-                customer.total_orders = (customer.total_orders or 0) + 1
-                customer.total_value  = _r2(_d(customer.total_value or 0) + total_amount)
-
-                previous_tier         = customer.loyalty_tier
-                customer.loyalty_points += points_earned
-
-                tier_thresholds = loyalty_cfg.get(
-                    "tier_thresholds",
-                    DEFAULT_LOYALTY_THRESHOLDS,
+                # The formula now lives in one shared place so the offline
+                # SaleProjector cannot drift from it. See app/services/sales/
+                # utils/loyalty.py and ADR 0010.
+                # Read the tier BEFORE the award: the helper sets it, and the
+                # upgrade alert below is driven by the difference.
+                previous_tier = customer.loyalty_tier
+                _loyalty_award = await apply_loyalty_award(
+                    db,
+                    customer,
+                    organization,
+                    sale_id=sale.id,
+                    direction="earn",
+                    total_amount=total_amount,
+                    increment_orders=True,
                 )
-                new_tier = resolve_loyalty_tier(customer.loyalty_points, tier_thresholds)
+                points_earned = _loyalty_award.points_awarded if _loyalty_award else 0
+                new_tier = _loyalty_award.loyalty_tier if _loyalty_award else previous_tier
 
-                if new_tier != previous_tier:
+                if _loyalty_award is not None and new_tier != previous_tier:
                     customer.loyalty_tier  = new_tier
                     loyalty_tier_upgraded   = True
                     new_loyalty_tier_value  = new_tier
@@ -1302,6 +1311,51 @@ class SalesService:
             authored_by=user.id,
             branch_id=sale_data.branch_id,
         )
+
+        # ----------------------------------------------------------------------
+        # 19b. Loyalty change event
+        # ----------------------------------------------------------------------
+        # The points mutation at step 19 changed a row every device caches, and
+        # until this existed nothing told them: no customer event carried loyalty,
+        # so Joe's server row sat at sync_status='pending' with no event behind it
+        # and his device row stayed at 0/bronze forever.
+        #
+        # Emitted here, in the same transaction as the mutation and immediately
+        # after sale_created, so the new balance and the event announcing it commit
+        # or roll back together. A failed append aborts the sale, which is the same
+        # trade sale_created already makes.
+        #
+        # The payload is ABSOLUTE post-state, not a delta, so a device that receives
+        # it twice - or receives it after having applied its own guess - converges on
+        # the server's number instead of drifting. The event id is derived from
+        # (customer, sale, direction), so re-projecting the same sale emits nothing.
+        # See ADR 0010.
+        if _loyalty_award is not None:
+            await StockEventEmitter.emit_in_transaction(
+                db,
+                org_id=sale.organization_id,
+                event_type="customer_loyalty_changed",
+                aggregate_type=AggregateType.CUSTOMER,
+                aggregate_id=customer.id,
+                event_id=customer_loyalty_changed_event_id(
+                    customer.id, sale.id, "earn"
+                ),
+                payload=loyalty_payload(
+                    _loyalty_award,
+                    customer_id=customer.id,
+                    sale_id=sale.id,
+                    direction="earn",
+                    organization_id=sale.organization_id,
+                    sale_number=sale_number,
+                    source="online_sale",
+                ),
+                authored_by=user.id,
+                branch_id=sale_data.branch_id,
+            )
+            # The change is now published as an event, so the row is no longer
+            # "pending with nothing behind it" - which is how Joe's row got stuck.
+            # Server-side counterpart of the device reconciliation in 88162ed.
+            customer.mark_as_synced()
 
         # ----------------------------------------------------------------------
         # 20. Prescription refill event
@@ -1815,6 +1869,7 @@ class SalesService:
 
             # Reverse loyalty points + recalculate tier
             loyalty_points_deducted = 0
+            _loyalty_refund_award = None
             if sale.customer_id:
                 cust_res = await db.execute(
                     select(Customer)
@@ -1841,17 +1896,60 @@ class SalesService:
                         points_to_deduct = int(refund_amount * points_rate)
 
                         customer.loyalty_points = max(0, customer.loyalty_points - points_to_deduct)
-
-                        tier_thresholds = loyalty_cfg.get(
-                            "tier_thresholds",
-                            DEFAULT_LOYALTY_THRESHOLDS,
-                        )
-                        customer.loyalty_tier = resolve_loyalty_tier(
-                            customer.loyalty_points, tier_thresholds
-                        )
                         loyalty_points_deducted = points_to_deduct
+
+                        # Re-derive the tier through the shared helper so the
+                        # invariant points==tier is enforced in exactly one place.
+                        # direction='refund' does not re-award or touch the
+                        # denormalized order counters - see the report: a refund
+                        # does not reverse total_orders/total_value, and that is
+                        # deliberately left as-is for now.
+                        _loyalty_refund_award = await apply_loyalty_award(
+                            db,
+                            customer,
+                            organization,
+                            sale_id=sale.id,
+                            direction="refund",
+                            increment_orders=False,
+                        )
                     customer.updated_at     = datetime.now(timezone.utc)
                     customer.mark_as_pending_sync()
+
+            # 7b. Loyalty reversal event.
+            #
+            # Same contract as the earn side, opposite direction: absolute
+            # post-state and an id derived from (customer, sale, 'refund'). The
+            # direction is part of the seed precisely so this cannot collide with
+            # the sale's own earn event - otherwise event_log's (org_id, event_id)
+            # primary key would swallow the reversal as a duplicate and the
+            # customer would keep the points they just gave back.
+            #
+            # Emitted before the commit at step 8, so the reversal and the balance
+            # it describes commit together.
+            if _loyalty_refund_award is not None:
+                await StockEventEmitter.emit_in_transaction(
+                    db,
+                    org_id=sale.organization_id,
+                    event_type="customer_loyalty_changed",
+                    aggregate_type=AggregateType.CUSTOMER,
+                    aggregate_id=customer.id,
+                    event_id=customer_loyalty_changed_event_id(
+                        customer.id, sale.id, "refund"
+                    ),
+                    payload=loyalty_payload(
+                        _loyalty_refund_award,
+                        customer_id=customer.id,
+                        sale_id=sale.id,
+                        direction="refund",
+                        organization_id=sale.organization_id,
+                        sale_number=sale.sale_number,
+                        source="refund",
+                    ),
+                    authored_by=user.id,
+                    branch_id=sale.branch_id,
+                )
+                # Published as an event now, so not "pending with nothing behind it".
+                customer.mark_as_synced()
 
         # 8. Commit
         await db.commit()

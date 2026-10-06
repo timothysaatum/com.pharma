@@ -35,6 +35,14 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.schemas.event_envelope import AggregateType, EventEnvelope
+from app.services.sales.utils.loyalty import (
+    apply_loyalty_award,
+    loyalty_payload,
+)
+from app.services.sync.eventlog.loyalty_event_id import (
+    customer_loyalty_changed_event_id,
+)
+from app.services.sync.eventlog.stock_emitter import StockEventEmitter
 from app.services.sync.eventlog.projector import (
     Projector,
     ProjectorRegistry,
@@ -336,6 +344,157 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
         branch_id=branch_id,
         payload=payload,
     )
+
+    # ── 4. Award loyalty for the offline sale ───────────────────────────────
+    # Placed after the `RETURNING id` gate for the same reason as the refill: a
+    # replayed sale_created finds the existing row and returns None before
+    # reaching here, so the award and the emit happen together or not at all.
+    await _apply_offline_loyalty(
+        db=db,
+        event=event,
+        sale_id=sale_id,
+        org_id=org_id,
+        branch_id=branch_id,
+        payload=payload,
+    )
+
+
+async def _apply_offline_loyalty(
+    *,
+    db: AsyncSession,
+    event: EventEnvelope,
+    sale_id: str,
+    org_id: str,
+    branch_id: str,
+    payload: Dict[str, Any],
+) -> None:
+    """Award loyalty for an offline-synced sale, then announce it.
+
+    Before this, an offline sale produced a `sales` row with no points behind it:
+    the only award code path was `SalesService.process_sale`, which an offline
+    device never calls. Mike's single offline sale of 5 is the production
+    instance - he has been at 0 points ever since.
+
+    The award goes through the SAME helper the online path uses
+    (`app/services/sales/utils/loyalty.apply_loyalty_award`), so points_per_unit
+    and the post-discount total cannot drift between the two paths.
+
+    NEVER REJECTS. Loyalty is a consequence of a sale that already happened; the
+    medicine has left the shelf and refusing the event would not undo it. A
+    failure here is logged and swallowed so a loyalty problem can never cost the
+    pharmacy a sale record.
+
+    Walk-in sales earn nothing: they carry no customer_id. Loyalty disabled at the
+    org earns nothing. Re-projecting an existing sale changes nothing, because the
+    `RETURNING id` gate above returns before this is ever reached.
+    """
+    customer_id = _uuid_str_or_none(payload.get("customer_id"))
+    if not customer_id:
+        return  # walk-in
+
+    try:
+        customer_row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT c.id, c.loyalty_points, c.loyalty_tier,
+                           c.total_orders, c.total_value, c.customer_type,
+                           o.settings::json AS settings
+                      FROM customers c
+                      JOIN organizations o ON o.id = c.organization_id
+                     WHERE c.id = :customer_id AND c.organization_id = :org_id
+                     FOR UPDATE OF c
+                    """
+                ),
+                {"customer_id": customer_id, "org_id": org_id},
+            )
+        ).first()
+        if customer_row is None:
+            return
+
+        # Only a registered profile earns. A walk_in row is a till artefact with
+        # nobody to credit; the online path treats those the same way.
+        if customer_row.customer_type == "walk_in":
+            return
+
+        org = _SimpleOrg(settings=customer_row.settings)
+        customer = _SimpleCustomer(
+            loyalty_points=customer_row.loyalty_points,
+            loyalty_tier=customer_row.loyalty_tier,
+            total_orders=customer_row.total_orders,
+            total_value=customer_row.total_value,
+        )
+
+        # The post-discount total is what the online path awards on.
+        total_amount = payload.get("total_amount")
+        if total_amount in (None, ""):
+            subtotal = _decimal_or_zero(payload.get("subtotal"))
+            discount = _decimal_or_zero(payload.get("discount_amount"))
+            total_amount = float(subtotal - discount)
+
+        award = await apply_loyalty_award(
+            db,
+            customer,
+            org,
+            sale_id=sale_id,
+            direction="earn",
+            total_amount=total_amount,
+            increment_orders=True,
+        )
+        if award is None:
+            return
+
+        await db.execute(
+            text(
+                """
+                UPDATE customers
+                   SET loyalty_points = :points,
+                       loyalty_tier   = :tier,
+                       total_orders   = :orders,
+                       total_value    = :value,
+                       updated_at     = now()
+                 WHERE id = :customer_id AND organization_id = :org_id
+                """
+            ),
+            {
+                "points": award.loyalty_points,
+                "tier": award.loyalty_tier,
+                "orders": customer.total_orders,
+                "value": customer.total_value,
+                "customer_id": customer_id,
+                "org_id": org_id,
+            },
+        )
+
+        await StockEventEmitter.emit_in_transaction(
+            db,
+            org_id=uuid.UUID(org_id),
+            event_type="customer_loyalty_changed",
+            aggregate_type=AggregateType.CUSTOMER,
+            aggregate_id=uuid.UUID(customer_id),
+            # Derived, never random: re-projecting the same sale derives the same
+            # id, so the append returns ALREADY_APPENDED and a duplicate is free.
+            event_id=customer_loyalty_changed_event_id(customer_id, sale_id, "earn"),
+            payload=loyalty_payload(
+                award,
+                customer_id=customer_id,
+                sale_id=sale_id,
+                direction="earn",
+                organization_id=org_id,
+                sale_number=payload.get("sale_number"),
+                source="offline_sale",
+            ),
+            authored_by=event.authored_by,
+            branch_id=uuid.UUID(branch_id) if branch_id else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - a sale must never fail on loyalty
+        logger.warning(
+            "Loyalty award skipped for offline sale %s (customer %s): %s",
+            sale_id,
+            customer_id,
+            exc,
+            exc_info=True,
+        )
 
 
 async def _apply_prescription_refill(
@@ -1084,6 +1243,48 @@ def _decimal_str(v: Any) -> str:
     if v is None:
         return "0"
     return str(v)
+
+
+class _SimpleOrg:
+    """Minimal stand-in: `apply_loyalty_award` only reads `.settings`."""
+
+    __slots__ = ("settings",)
+
+    def __init__(self, settings: Any) -> None:
+        self.settings = settings if isinstance(settings, dict) else {}
+
+
+class _SimpleCustomer:
+    """Minimal stand-in for the loyalty helper's mutations.
+
+    A plain object rather than the ORM row: the row was read with `FOR UPDATE`
+    through raw SQL to keep the lock, and writing it back is one explicit UPDATE
+    below. Using the ORM object here would open a second, unlocked read.
+    """
+
+    __slots__ = ("loyalty_points", "loyalty_tier", "total_orders", "total_value")
+
+    def __init__(
+        self,
+        loyalty_points: Any,
+        loyalty_tier: Any,
+        total_orders: Any,
+        total_value: Any,
+    ) -> None:
+        self.loyalty_points = int(loyalty_points or 0)
+        self.loyalty_tier = loyalty_tier
+        self.total_orders = int(total_orders or 0)
+        self.total_value = float(total_value or 0)
+
+
+def _decimal_or_zero(v: Any):
+    """Coerce a payload money value to Decimal, defaulting to 0."""
+    from decimal import Decimal, InvalidOperation
+
+    try:
+        return Decimal(str(v if v not in (None, "") else 0))
+    except (InvalidOperation, ValueError, TypeError):
+        return Decimal(0)
 
 
 def _decimal_str_or_none(v: Any) -> Optional[str]:

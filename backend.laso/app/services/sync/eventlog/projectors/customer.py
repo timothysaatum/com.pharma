@@ -51,6 +51,7 @@ from app.services.sync.eventlog.projector import (
     ProjectorResult,
     ProjectorStatus,
 )
+from app.services.sales.utils.sale_helpers import resolve_loyalty_tier
 from app.services.sync.eventlog.vector_clock import concurrent, dominates, merge
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,10 @@ VALID_CONTACT_METHODS = {"email", "phone", "sms"}
 EVENT_CREATED = "customer_created"
 EVENT_UPDATED = "customer_updated"
 EVENT_DELETED = "customer_deleted"
+EVENT_LOYALTY_CHANGED = "customer_loyalty_changed"
+
+#: The only two directions a loyalty change can move in.
+VALID_LOYALTY_DIRECTIONS = {"earn", "refund"}
 
 UPDATABLE_FIELDS = {
     "first_name",
@@ -117,6 +122,9 @@ class CustomerProjector(Projector):
         if etype == EVENT_DELETED:
             return await _validate_mutation(event, db, allow_missing=False)
 
+        if etype == EVENT_LOYALTY_CHANGED:
+            return _validate_loyalty_changed(event)
+
         return ProjectorResult(
             status=ProjectorStatus.REJECTED_PERMANENT,
             error_code="unknown_event_type",
@@ -139,6 +147,9 @@ class CustomerProjector(Projector):
             return
         if etype == EVENT_DELETED:
             await _apply_deleted(event, db)
+            return
+        if etype == EVENT_LOYALTY_CHANGED:
+            await _apply_loyalty_changed(event, db)
             return
         # Unreachable — validate would have rejected.
         raise RuntimeError(
@@ -250,6 +261,93 @@ async def _validate_mutation(
             )
 
     return ProjectorResult(status=ProjectorStatus.OK)
+
+
+def _validate_loyalty_changed(event: EventEnvelope) -> ProjectorResult:
+    """Shape and org checks for the absolute loyalty post-state.
+
+    Deliberately does NOT check that the row exists. Unlike update/delete, this
+    event is SERVER-AUTHORITATIVE: the server is telling devices what the balance
+    is, and a device that has never seen the customer must still record it rather
+    than dead-letter the fact.
+    """
+    payload = event.payload
+
+    if not payload.get("customer_id"):
+        return _reject("missing_customer_id", "customer_loyalty_changed must include customer_id")
+    try:
+        uuid.UUID(str(payload["customer_id"]))
+    except (ValueError, TypeError):
+        return _reject("invalid_customer_id", f"customer_id={payload['customer_id']!r} is not a UUID")
+
+    if payload.get("organization_id") and str(payload["organization_id"]) != str(event.org_id):
+        return _reject(
+            "org_scope_violation",
+            f"payload.organization_id ({payload['organization_id']}) does not match "
+            f"envelope.org_id ({event.org_id})",
+        )
+
+    points = payload.get("loyalty_points")
+    if not isinstance(points, int) or isinstance(points, bool) or points < 0:
+        return _reject(
+            "invalid_loyalty_points",
+            f"loyalty_points={points!r} must be a non-negative int",
+        )
+
+    tier = payload.get("loyalty_tier")
+    if tier not in VALID_LOYALTY_TIERS:
+        return _reject("invalid_loyalty_tier", f"loyalty_tier={tier!r} not in {sorted(VALID_LOYALTY_TIERS)}")
+
+    # The invariant this whole event exists to carry. Catching it here means a
+    # bad payload is quarantined instead of silently written.
+    expected = resolve_loyalty_tier(points)
+    if tier != expected:
+        return _reject(
+            "loyalty_tier_inconsistent",
+            f"loyalty_tier={tier!r} does not match resolve_loyalty_tier({points})={expected!r}",
+        )
+
+    direction = payload.get("direction")
+    if direction not in VALID_LOYALTY_DIRECTIONS:
+        return _reject(
+            "invalid_direction",
+            f"direction={direction!r} not in {sorted(VALID_LOYALTY_DIRECTIONS)}",
+        )
+
+    return ProjectorResult(status=ProjectorStatus.OK)
+
+
+async def _apply_loyalty_changed(event: EventEnvelope, db: AsyncSession) -> None:
+    """Write the ABSOLUTE loyalty post-state.
+
+    Absolute, not a delta: replaying this event lands on the same number, which is
+    what makes duplicates safe without the server tracking which devices have
+    applied what. `loyalty_tier` is taken from the payload, which validate has
+    already proved is consistent with the points.
+
+    Scoped to the envelope's org, and a no-op when the row is absent: a loyalty
+    event must never create a customer.
+    """
+    payload = event.payload
+    await db.execute(
+        text(
+            """
+            UPDATE customers
+               SET loyalty_points = :points,
+                   loyalty_tier   = :tier,
+                   sync_status    = 'synced',
+                   updated_at     = :updated_at
+             WHERE id = :customer_id AND organization_id = :org_id
+            """
+        ),
+        {
+            "points": int(payload["loyalty_points"]),
+            "tier": payload["loyalty_tier"],
+            "customer_id": str(payload["customer_id"]),
+            "org_id": str(event.org_id),
+            "updated_at": event.authored_at,
+        },
+    )
 
 
 def _reject(code: str, message: str) -> ProjectorResult:
