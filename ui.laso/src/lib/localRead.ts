@@ -438,14 +438,38 @@ export const localRead = {
     return roots;
   },
 
+  /**
+   * `organization_id` is REQUIRED and always applied.
+   *
+   * It used to sit behind `if (params.organization_id)`, so a caller that
+   * forgot it (or passed it before the signed-in user had loaded) silently
+   * read EVERY tenant's customers: the device table held rows under more than
+   * one organization. A missing scope must fail closed, never open.
+   */
   async searchCustomers(
-    params: CustomerSearchParams = {},
+    params: CustomerSearchParams,
     page = 1,
     page_size = 25
   ): Promise<CustomerListResponse> {
     const db = await getDb();
     const qualifiers: string[] = ["is_deleted = 0"];
     const values: unknown[] = [];
+
+    if (!params?.organization_id) {
+      console.warn(
+        "[localRead.searchCustomers] organization_id is required; refusing to " +
+          "query customers unscoped. Returning no rows."
+      );
+      return {
+        customers: [],
+        total: 0,
+        page,
+        page_size,
+        total_pages: 1,
+      };
+    }
+    values.push(params.organization_id);
+    qualifiers.push(`organization_id = $${values.length}`);
 
     if (params.is_active !== undefined) {
       values.push(boolToInt(params.is_active));
@@ -458,10 +482,6 @@ export const localRead = {
     if (params.loyalty_tier) {
       values.push(params.loyalty_tier);
       qualifiers.push(`loyalty_tier = $${values.length}`);
-    }
-    if (params.organization_id) {
-      values.push(params.organization_id);
-      qualifiers.push(`organization_id = $${values.length}`);
     }
     if (params.search) {
       values.push(sqlLike(params.search));
@@ -511,6 +531,16 @@ export const localRead = {
     const term = query.trim();
     if (term.length < 2) return [];
 
+    // Same fail-closed rule as searchCustomers: the POS customer typeahead
+    // must never match a customer from another organization.
+    if (!organization_id) {
+      console.warn(
+        "[localRead.searchCustomerMatches] organization_id is required; " +
+          "refusing to match customers unscoped."
+      );
+      return [];
+    }
+
     const db = await getDb();
     const values: unknown[] = [sqlLike(term), limit];
     const qualifiers = [
@@ -526,10 +556,8 @@ export const localRead = {
       )`,
     ];
 
-    if (organization_id) {
-      values.push(organization_id);
-      qualifiers.push(`organization_id = ?${values.length}`);
-    }
+    values.push(organization_id);
+    qualifiers.push(`organization_id = ?${values.length}`);
 
     let rows: Record<string, unknown>[] = [];
     try {

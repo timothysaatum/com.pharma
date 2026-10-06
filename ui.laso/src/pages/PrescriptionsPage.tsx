@@ -335,7 +335,10 @@ export default function PrescriptionsPage() {
       setCustomerSearching(true);
       try {
         if (!navigator.onLine || isBackendKnownUnreachable()) {
-          const result = await localRead.searchCustomers({ search: customerSearch.trim() });
+          const result = await localRead.searchCustomers({
+            search: customerSearch.trim(),
+            organization_id: user?.organization_id,
+          });
           setCustomerMatches(
             result.customers.map((c) => ({
               id: c.id,
@@ -366,7 +369,7 @@ export default function PrescriptionsPage() {
       ctrl.abort();
       clearTimeout(timer);
     };
-  }, [createOpen, customerSearch, selectedCustomer]);
+  }, [createOpen, customerSearch, selectedCustomer, user?.organization_id]);
 
   // Memoize drugSearches to prevent excessive dependency updates
   const drugSearchesKey = useMemo(() => JSON.stringify(drugSearches), [drugSearches]);

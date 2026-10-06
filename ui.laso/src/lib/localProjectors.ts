@@ -204,6 +204,45 @@ async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const now = new Date().toISOString();
   const incomingVector = (p.version_vector ?? {}) as VectorClock;
+
+  // Organization scope is fail-closed, mirroring the server's CustomerProjector
+  // (`_validate_created`, which rejects a payload/envelope disagreement).
+  //
+  // The device table has no foreign key on organization_id, so a payload that
+  // names another org used to be written verbatim: the row landed under the
+  // wrong tenant, `INSERT OR IGNORE` then made the correct-org event a silent
+  // no-op, and `organization_id` is absent from the `_customerUpdated` UPDATABLE
+  // list — so the misattribution could never be repaired by any later event.
+  const envelopeOrg = String(e.org_id ?? "");
+  const payloadOrg = p.organization_id == null ? envelopeOrg : String(p.organization_id);
+  if (payloadOrg !== envelopeOrg) {
+    const msg =
+      `customer_created ${e.event_id}: payload.organization_id (${payloadOrg}) does not ` +
+      `match envelope.org_id (${envelopeOrg}). Refusing to insert a cross-org customer.`;
+    console.error(`[localProjectors] ${msg}`);
+    // Throwing is what makes this durable: syncEngine catches it and calls
+    // recordEventProjectionFailure, then advances the cursor past the poison
+    // event instead of freezing the device on it.
+    throw new Error(msg);
+  }
+
+  // A same-id row that already exists under ANOTHER org is a collision we must
+  // not paper over with INSERT OR IGNORE — that is exactly how the stale
+  // foreign-org row survived in the first place. Fail loudly instead.
+  const existing = await db.select<{ organization_id: string }[]>(
+    "SELECT organization_id FROM customers WHERE id = $1",
+    [String(e.aggregate_id)],
+  );
+  if (existing.length > 0 && String(existing[0].organization_id) !== envelopeOrg) {
+    const msg =
+      `customer_created ${e.event_id}: customer ${e.aggregate_id} already exists locally ` +
+      `under organization ${existing[0].organization_id}, but this event is for ` +
+      `${envelopeOrg}. Refusing to ignore the conflict — the local row needs the ` +
+      `one-time foreign-org cleanup before this event can apply.`;
+    console.error(`[localProjectors] ${msg}`);
+    throw new Error(msg);
+  }
+
   await db.execute(
     `INSERT OR IGNORE INTO customers
        (id, organization_id, first_name, last_name, phone, email,
@@ -217,7 +256,7 @@ async function _customerCreated(db: Db, e: EventEnvelope): Promise<void> {
         'synced',1,NULL,$17,$17)`,
     [
       String(e.aggregate_id),
-      String(p.organization_id ?? e.org_id),
+      envelopeOrg,
       String(p.first_name ?? ""),
       String(p.last_name ?? ""),
       p.phone != null ? String(p.phone) : null,
