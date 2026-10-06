@@ -220,6 +220,43 @@ export const useAuthStore = create<AuthState>((set, get) => ({
             } catch (err) {
                 console.warn("[auth] cross-org price contract cleanup failed:", err);
             }
+
+            // One-time local repair (migration v37): same idea for customers.
+            // A customer left here by another organization can never be
+            // corrected by a replay, because the projector inserts with
+            // INSERT OR IGNORE and organization_id is not updatable. Rows with
+            // an unsent outbox event are kept so no pending work is orphaned.
+            try {
+                const { repairCrossOrgCustomers } = await import("@/lib/localDb");
+                const removedCustomers = await repairCrossOrgCustomers(
+                    String(data.user.organization_id)
+                );
+                console.info(
+                    `[auth] cross-org customer cleanup: removed ${removedCustomers} row(s)`
+                );
+            } catch (err) {
+                console.warn("[auth] cross-org customer cleanup failed:", err);
+            }
+
+            // One-time sweep: rows stranded at sync_status='pending' whose events
+            // were all accepted before the reconciliation existed. Non-fatal and
+            // idempotent - it reports what it found and moves on.
+            try {
+                const { repairStalePendingMarkers } = await import("@/lib/localDb");
+                const repaired = await repairStalePendingMarkers();
+                const total = Object.values(repaired).reduce((a, b) => a + b, 0);
+                if (total > 0) {
+                    console.info(
+                        `[auth] stale pending-marker repair: ${total} row(s) ` +
+                        `(${Object.entries(repaired)
+                            .filter(([, n]) => n > 0)
+                            .map(([t, n]) => `${t}=${n}`)
+                            .join(", ")})`
+                    );
+                }
+            } catch (err) {
+                console.warn("[auth] stale pending-marker repair failed:", err);
+            }
         }
 
         const setupState = deriveSetupState(data.user);

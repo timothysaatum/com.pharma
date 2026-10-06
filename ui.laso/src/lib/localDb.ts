@@ -305,6 +305,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 34) await migrate_v34(db);
         if (user_version < 35) await migrate_v35(db);
         if (user_version < 36) await migrate_v36(db);
+        if (user_version < 37) await migrate_v37(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -2363,9 +2364,29 @@ export async function hasUnsentEventForAggregate(
   return rows.length > 0;
 }
 
-/** Aggregate type -> local read-model table, for the reconciled aggregates. */
+/**
+ * Aggregate type -> local read-model table, for the reconciled aggregates.
+ *
+ * Each entry was verified: the table exists in the device schema, carries a
+ * `sync_status` column, and the aggregate_id written by the device's emitter is
+ * that table's `id`.
+ *
+ * Verified and DELIBERATELY ABSENT:
+ *   stock — the emitter writes `aggregate_type: "stock"` with
+ *     `aggregate_id = adjustment.id`, but there is no `stock_adjustments` table
+ *     in the local SQLite schema at all (StockAdjustment has no SyncTrackingMixin
+ *     on the server and is write-once; localWrite.stockAdjustment skips the local
+ *     INSERT and goes straight to the outbox). Nothing to flip.
+ *   purchase_order — `purchase_orders` DOES have `sync_status` and the mapping is
+ *     clear, so this one could be added safely. Left out only because it was not
+ *     in scope for this change.
+ */
 const AGGREGATE_TABLES: Record<string, string> = {
   prescription: "prescriptions",
+  customer: "customers",
+  sale: "sales",
+  drug_batch: "drug_batches",
+  branch_inventory: "branch_inventory",
 };
 
 /**
@@ -2978,6 +2999,124 @@ export async function repairCrossOrgPriceContracts(organizationId: string): Prom
     await migrate_v35(db, organizationId);
   }
   return removed;
+}
+
+/**
+ * MIGRATION v37 — remove customers belonging to another organization.
+ *
+ * Same shape and same reasoning as the v35 price-contract repair, one table over.
+ * WHY THIS IS NEEDED
+ * ------------------
+ * The device held 49 `customers` rows under the E2E sentinel org
+ * `11111111-...`, including Kwame Nkrumah (88888888-...), whose real-org
+ * `customer_created` (event_log seq 25) had been dropped on arrival because
+ * `_customerCreated` is `INSERT OR IGNORE` on the primary key. Nothing could
+ * ever repair that row: `organization_id` is absent from the
+ * `_customerUpdated` UPDATABLE list, so it is written exactly once, on insert.
+ *
+ * Deletion, not relabelling: relabelling would hand another tenant's customers
+ * to this pharmacy, which is strictly worse than having none of them. Rows
+ * belonging to a different org are useless here; if that org is ever signed into
+ * on this device again, its customers return with the next sync.
+ *
+ * The signed-in org is only known at login, so the migration itself is a no-op
+ * during the schema chain (like v35) and the work happens in
+ * `repairCrossOrgCustomers`, called from the auth store.
+ *
+ * SAFETY: a foreign row that still has an UNSENT event in the outbox is kept.
+ * Deleting it would orphan work this device has not yet handed to the server.
+ * 'synced' means already delivered, so those rows are safe to remove.
+ */
+export async function migrate_v37(db: Database, organizationId?: string | null): Promise<void> {
+  if (organizationId) {
+    await db.execute(
+      `DELETE FROM customers
+        WHERE (organization_id IS NULL OR organization_id <> $1)
+          AND id NOT IN (
+            SELECT aggregate_id FROM event_outbox
+             WHERE aggregate_type = 'customer'
+               AND status IN ('pending', 'failed', 'accepted_deferred')
+          )`,
+      [organizationId],
+    );
+  }
+  await db.execute("PRAGMA user_version = 37");
+}
+
+/**
+ * Runs the v37 repair once the signed-in organization is known.
+ *
+ * Returns how many foreign rows were removed, so the caller can log it. Safe to
+ * call repeatedly: after the first run there is nothing left to delete. Never
+ * throws for data reasons - a failure here must not block sign-in.
+ */
+export async function repairCrossOrgCustomers(organizationId: string): Promise<number> {
+  const db = await getDb();
+  const before = await db.select<{ n: number }[]>(
+    "SELECT COUNT(*) AS n FROM customers "
+    + "WHERE (organization_id IS NULL OR organization_id <> $1) "
+    + "AND id NOT IN (SELECT aggregate_id FROM event_outbox "
+    + "WHERE aggregate_type = 'customer' "
+    + "AND status IN ('pending', 'failed', 'accepted_deferred'))",
+    [organizationId],
+  );
+  const removed = Number(before?.[0]?.n ?? 0);
+  if (removed > 0) {
+    await migrate_v37(db, organizationId);
+  }
+  return removed;
+}
+
+/**
+ * One-time repair for rows already stuck at sync_status='pending' with nothing
+ * left in flight.
+ *
+ * `reconcileAcceptedAggregate` only runs at the moment an event is accepted, so
+ * rows that were already stranded before this code existed (the device had a
+ * pending `customer_created` sitting next to an 'accepted' one) would stay
+ * pending forever. This sweeps them once per table.
+ *
+ * The predicate is deliberately identical to the runtime rule: 'pending' AND no
+ * outbox row for that aggregate in an unsent state. 'conflict' is NOT swept -
+ * that is a real unresolved conflict awaiting a human.
+ *
+ * Returns per-table counts so the caller can log them. Non-fatal by design.
+ */
+export async function repairStalePendingMarkers(): Promise<Record<string, number>> {
+  const db = await getDb();
+  const counts: Record<string, number> = {};
+  const now = new Date().toISOString();
+  for (const [aggregateType, table] of Object.entries(AGGREGATE_TABLES)) {
+    try {
+      const before = await db.select<{ n: number }[]>(
+        `SELECT COUNT(*) AS n FROM ${table}
+          WHERE sync_status = 'pending'
+            AND id NOT IN (
+              SELECT aggregate_id FROM event_outbox
+               WHERE aggregate_type = $1 AND status IN ${UNSENT_EVENT_STATUSES}
+            )`,
+        [aggregateType],
+      );
+      const stranded = Number(before?.[0]?.n ?? 0);
+      if (stranded > 0) {
+        await db.execute(
+          `UPDATE ${table} SET sync_status = 'synced', updated_at = $1
+            WHERE sync_status = 'pending'
+              AND id NOT IN (
+                SELECT aggregate_id FROM event_outbox
+                 WHERE aggregate_type = $2 AND status IN ${UNSENT_EVENT_STATUSES}
+              )`,
+          [now, aggregateType],
+        );
+      }
+      counts[table] = stranded;
+    } catch (err) {
+      // One bad table must not stop the rest, and must never block sign-in.
+      console.warn(`[localDb] stale-pending repair skipped for ${table}:`, err);
+      counts[table] = 0;
+    }
+  }
+  return counts;
 }
 
 /** Attempts allowed before an event is quarantined and never retried again. */
