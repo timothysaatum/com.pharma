@@ -245,31 +245,53 @@ row whose stored tier contradicts `resolve_loyalty_tier(points)`.
 
 **Do not run these blind — step 0 first.**
 
-### Step 0 — read this before touching anything
+### Step 0 — what is actually running
 
-There is **no PharmaCare backend running right now.** Verified, not assumed:
+The PharmaCare backend **is** running, as `python main.py`. Verified:
 
 ```
-$ ss -lntpH | grep -E ':(8000|8001)\b'
+$ pgrep -af main.py
+174977 python main.py
+
+$ readlink /proc/174977/cwd
+/home/vermithor/Desktop/inventory/com.pharma/backend.laso
+
+$ ss -lntpH 'sport = :8000'
 LISTEN 127.0.0.1:8000  users:(("python",pid=175371),("python",pid=174977))
+
+$ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/health
+200
 ```
 
-- **Port 8001 is CLOSED.** `ui.laso/.env` sets `VITE_API_URL=http://127.0.0.1:8001`,
-  so that is the port the app talks to.
-- **Port 8000 is open but is NOT this project.** The listener is
-  `kratos_backend` (image `election-system-backend`), a different application:
-  ```
-  $ docker ps --format '{{.ID}}\t{{.Names}}\t{{.Image}}'
-  cb1aa56ad872  kratos_database   postgres:15-alpine
-  e5f4ab9ebbd5  kratos_backend    election-system-backend
-  3bae5cc2ed49  a27aeb74216c_kratos_frontend  election-system-frontend
-  ```
-  **Do not restart or stop `kratos_backend`.** It is unrelated to this work and
-  `start_backend.sh` would try to bind 8000.
+`main.py:241-255` runs uvicorn on `127.0.0.1:8000` with `reload = ENVIRONMENT !=
+"production"`, and `.env` sets `ENVIRONMENT=development`, so **the reloader is
+active** (pid 175371 is uvicorn's spawned worker). It currently serves commit
+`88162ed` from the main tree.
 
-Running: the Tauri dev app from the **main** tree — `tauri.js dev` (node) and
-`target/debug/pharmacare`, with Vite on 1420. Because it runs from the main tree it
-is still serving `88162ed`, not this branch.
+**The port is 8000, and that is what the app uses — but read `.env.local`, not
+`.env`:**
+
+| File | `VITE_API_URL` | Effective? |
+|------|----------------|-----------|
+| `ui.laso/.env` | `http://127.0.0.1:8001` | no — overridden |
+| `ui.laso/.env.local` | `http://127.0.0.1:8000` | **yes** |
+
+Vite resolves `.env.local` over `.env`, so the app talks to
+`http://127.0.0.1:8000`, which is exactly where `python main.py` listens. **The two
+agree and there is no port mismatch.** Port 8001 is simply unused.
+
+One unrelated thing on this host, so nobody "fixes" it by mistake: a Docker
+container `kratos_backend` (image `election-system-backend`) also runs uvicorn on
+`0.0.0.0:8000`, inside its own network namespace. It is a different application
+and is **not** what serves `127.0.0.1:8000` — that is pid 174977. Leave it alone.
+
+Also running: the Tauri dev app from the main tree (`tauri.js dev`, Vite on 1420,
+`target/debug/pharmacare`), so the UI is currently serving `88162ed` too.
+
+**No database migration is part of this change.** The only schema change is the
+device-side SQLite migration v37, which the app applies itself at startup. There is
+no new Alembic revision, so `alembic upgrade head` is not required — but running it
+is harmless.
 
 ### Step 1 — pg_dump and verify it
 
@@ -327,43 +349,48 @@ That is destructive to everything written since the dump — restore only if you
 nothing else to lose, and prefer leaving the events in place, which is harmless:
 the device handler writes two columns.
 
-### Step 4 — switch the main tree and start the API
+### Step 4 — switch the main tree (the backend reloads itself)
 
 ```bash
 cd /home/vermithor/Desktop/inventory/com.pharma
 git status                     # expect: only the 4 untracked docs
 git fetch origin               # read-only
 git checkout fix/customers-sync
-git log --oneline -1           # expect db19dbd
+git log --oneline -1           # expect 2a0f7c5
 ```
 
-Then start the backend on **8001** to match `.env` (the launcher defaults to 8000,
-which is occupied):
+**No backend restart is needed.** `python main.py` runs with `reload=True`, and
+uvicorn watches `backend.laso`, so the checkout triggers a reload on its own. Watch
+for it in the terminal running `python main.py`, then confirm:
 
 ```bash
-cd /home/vermithor/Desktop/inventory/com.pharma
-PORT=8001 ./start_backend.sh
+sleep 3
+curl -s -o /dev/null -w 'health=%{http_code}\n' http://127.0.0.1:8000/health
 ```
 
-Confirm it is yours before trusting it:
+If `/health` does not answer, the reloader did not pick it up — restart it yourself:
 
 ```bash
-ss -lntpH 'sport = :8001'
-curl -s http://127.0.0.1:8001/health || curl -s http://127.0.0.1:8001/docs -o /dev/null -w '%{http_code}\n'
+cd /home/vermithor/Desktop/inventory/com.pharma/backend.laso
+python main.py
 ```
 
-*Rollback:* `git checkout feat/rx-sync-and-forms` and stop the 8001 process.
-`start_backend.sh` only kills a listener whose cwd is this backend, so it will
-refuse to touch anything else.
+Restarting the UI is recommended rather than assumed: the checkout rewrites many
+files at once and Vite's HMR can be left in a confused state.
+
+```bash
+pkill -f 'tauri.js dev'
+cd /home/vermithor/Desktop/inventory/com.pharma/ui.laso && pnpm tauri dev
+```
+
+*Rollback:* `git checkout feat/rx-sync-and-forms`. The reloader picks that up too;
+restart `python main.py` only if it does not.
 
 **Which commit is the running app using?**
 
 ```bash
 cd /home/vermithor/Desktop/inventory/com.pharma && git rev-parse --short HEAD
 ```
-
-For the UI, the Tauri/Vite dev server must be restarted after the checkout:
-`pkill -f 'tauri.js dev'` then `cd ui.laso && pnpm tauri dev`.
 
 ### Step 5 — log in once so the repairs run
 
@@ -461,7 +488,8 @@ Expected: only your org under the first query; Joe `125/silver`, Mike
 Still unguarded, and reported rather than changed:
 
 - **`alembic upgrade head`** — no fence anywhere. `start_backend.sh` runs it on
-  every start.
+  every start; `main.py` does not, so on your run command a migration is only
+  applied when someone runs alembic deliberately.
 - **Playwright specs that talk to a real backend over HTTP** rather than through
   `BackendDatabase` — the helper fence cannot see them.
 - **Any future script** that reads `settings.DATABASE_URL` without calling
@@ -492,14 +520,15 @@ Still unguarded, and reported rather than changed:
 
 ## 8. Open questions
 
-1. **The UI observation may have a simpler explanation than I gave.** `ui.laso/.env`
-   points at port **8001**, and 8001 is closed. If the app was offline when you saw
-   "2 customers", the page took the offline branch and read the device — which is
-   consistent. But the "after sync it showed 3, Joe 125" requires a reachable
-   backend returning 125, and there is no PharmaCare backend running now. Either one
-   was running at the time and has since stopped, or something else is serving
-   8001 intermittently. **Worth confirming before assuming the sync path is what you
-   saw.**
+1. **The UI observation is consistent with the two-branch page, but I have not
+   reproduced it live.** The backend is up on `127.0.0.1:8000` and the app resolves
+   that same port, so the offline/online split has an obvious reading: offline, the
+   page reads the device's SQLite and shows the two local rows (Joe 0, Mike 0);
+   online, it takes `customersApi.list()` and shows the server's three (Joe 125,
+   Mike 0, Kwame 150). That matches the addendum's conclusion. It is still an
+   inference about *your* session, though: I did not drive the app, and the 49-row
+   foreign block plus a Kwame row under `11111111-…` mean the device's own customer
+   list was wider than 2 before the cleanup. Worth a look after step 5.
 2. **Was the 49-row foreign block ever a real leak?** `searchCustomers` without an
    org returned every org, and the device held 49 foreign customers. Any page or
    report that read customers unscoped would have shown them. I fixed the read path
