@@ -49,6 +49,18 @@ export const syncApi = {
         post<EventPushResponse>("/sync/events", req),
 
     /** GET /sync/events?after_seq=N&limit=N — pull events since a seq cursor */
-    pullEvents: (afterSeq: number, limit = 200): Promise<EventPullResponse> =>
-        get<EventPullResponse>(`/sync/events?after_seq=${afterSeq}&limit=${limit}`),
+    /**
+     * Pull envelopes after `afterSeq` for the caller's org.
+     *
+     * `aggregateTypes` narrows the pull server-side without touching this
+     * device's stored cursor, which is what makes a targeted re-pull (for
+     * example every customer event from seq 0) possible: the device keeps its
+     * real position and simply replays one aggregate's history.
+     */
+    pullEvents: (afterSeq: number, limit = 200, aggregateTypes?: string[]): Promise<EventPullResponse> => {
+        const scope = aggregateTypes?.length
+            ? `&aggregate_types=${encodeURIComponent(aggregateTypes.join(","))}`
+            : "";
+        return get<EventPullResponse>(`/sync/events?after_seq=${afterSeq}&limit=${limit}${scope}`);
+    },
 };

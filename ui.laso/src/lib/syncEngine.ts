@@ -770,3 +770,53 @@ export class SyncEngine {
 }
 
 export const syncEngine = new SyncEngine();
+
+/**
+ * One-shot, opt-in re-pull of a single aggregate type from seq 0.
+ *
+ * WHY IT EXISTS
+ * -------------
+ * `repairCrossOrgCustomers` deletes foreign-org rows that were poisoning an
+ * aggregate id. The matching real-org event for that id is usually far behind
+ * this device's cursor, so the ordinary pull will never deliver it again: the
+ * row stays missing until the cursor happens to wrap.
+ *
+ * This deliberately does NOT touch the stored cursor. It issues a scoped
+ * `aggregate_types` pull from seq 0 and applies what comes back, so the device
+ * keeps its real position in the log and simply replays one aggregate's
+ * history. Nothing is lost if it is never called: the cleanup is idempotent and
+ * the event will arrive on a fresh device or a full cursor reset.
+ *
+ * Returns how many envelopes were applied, for logging. Non-fatal.
+ */
+export async function repullAggregateOnce(
+    aggregateType: string,
+    organizationId: string,
+): Promise<number> {
+    let applied = 0;
+    let afterSeq = 0;
+    // Bounded so a large history cannot spin forever; the server caps the page.
+    for (let page = 0; page < 200; page += 1) {
+        const response = await syncApi.pullEvents(afterSeq, 200, [aggregateType]);
+        for (const envelope of response.events) {
+            if (envelope.org_id !== organizationId) continue;
+            try {
+                await applyEventLocally(envelope);
+                applied += 1;
+            } catch (err) {
+                console.warn(
+                    `[syncEngine] scoped re-pull could not apply ${envelope.event_id} ` +
+                    `(${envelope.event_type}):`,
+                    err,
+                );
+            }
+        }
+        if (!response.has_more || response.events.length === 0) break;
+        afterSeq = response.next_after_seq;
+    }
+    console.info(
+        `[syncEngine] scoped re-pull of aggregate_type=${aggregateType}: ` +
+        `applied ${applied} envelope(s); stored cursor untouched`,
+    );
+    return applied;
+}
