@@ -28,6 +28,8 @@ BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(BACKEND_ROOT))
 
+from refuse_real_database import require_disposable_database  # noqa: E402
+
 from app.core.config import get_settings  # noqa: E402
 from app.models.inventory.branch_inventory import BranchInventory  # noqa: E402
 from app.models.inventory.inventory_model import Drug, DrugCategory  # noqa: E402
@@ -284,6 +286,11 @@ demo metadata but preserves existing stock quantities.
 
 async def _run(args: argparse.Namespace) -> int:
     settings = get_settings()
+    # Fence: every subcommand except `status` mutates rows. settings.DATABASE_URL
+    # points at atlasdb from .env, and neither the pytest fence (e8dd90c) nor the
+    # Playwright helper fence (213b6fc) covers a script run by hand.
+    if getattr(args, "command", "") != "status":
+        require_disposable_database(settings.DATABASE_URL)
     engine = create_async_engine(settings.DATABASE_URL, echo=False, pool_pre_ping=True)
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:

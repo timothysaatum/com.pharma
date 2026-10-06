@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from sqlalchemy import select, text
+from refuse_real_database import require_disposable_database
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
 
@@ -530,6 +531,12 @@ async def seed_price_contract(db: AsyncSession):
 
 async def main():
     settings = get_settings()
+    # Fence: this script WRITES. Without it, settings.DATABASE_URL silently
+    # points at atlasdb from .env and the fixture rows land in the live database
+    # - which is how sentinel-UUID customers and sales got there in the first
+    # place. Neither the pytest fence (e8dd90c) nor the Playwright helper fence
+    # (213b6fc) covers a script run by hand.
+    require_disposable_database(settings.DATABASE_URL)
     engine = create_async_engine(settings.DATABASE_URL, echo=False)
     Session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
