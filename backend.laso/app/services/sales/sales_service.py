@@ -1234,6 +1234,69 @@ class SalesService:
 
                 customer.updated_at = datetime.now(timezone.utc)
                 customer.mark_as_pending_sync()
+                # ------------------------------------------------------------------
+                # 19a. Loyalty event, isolated in its own savepoint
+                # ------------------------------------------------------------------
+                # Loyalty must never be able to fail a sale. The points update
+                # above is a plain in-session mutation that cannot fail on its
+                # own; the only realistic failure is the event append, and the
+                # emitter is deliberately non-swallowing (it must be, so a failed
+                # append rolls back whatever it was meant to describe). Left
+                # unguarded, a failed append escapes the outer savepoint at
+                # :379, unwinds the entire sale — row, line items, stock
+                # deduction and points — and the endpoint returns 500. A customer
+                # then has paid for medicine that the till says was never sold.
+                #
+                # So: flush first, which puts the points and the denormalized
+                # counters into the OUTER transaction, then open a savepoint
+                # that contains the append alone. A failure unwinds only the
+                # event; the sale and the balance still commit.
+                #
+                # COST, stated plainly. The event for this sale is lost, so
+                # devices stay on the previous balance until the next loyalty
+                # event. That is bounded, not cumulative: every event carries the
+                # ABSOLUTE balance, so the next sale republishes the correct
+                # number and the device converges rather than drifting. The
+                # missed earn is not lost from the server's books at all — only
+                # from the notification.
+                await db.flush()
+                try:
+                    async with db.begin_nested():
+                        await StockEventEmitter.emit_in_transaction(
+                            db,
+                            org_id=sale.organization_id,
+                            event_type="customer_loyalty_changed",
+                            aggregate_type=AggregateType.CUSTOMER,
+                            aggregate_id=customer.id,
+                            event_id=customer_loyalty_changed_event_id(
+                                customer.id, sale.id, "earn"
+                            ),
+                            payload=loyalty_payload(
+                                _loyalty_award,
+                                customer_id=customer.id,
+                                sale_id=sale.id,
+                                direction="earn",
+                                organization_id=sale.organization_id,
+                                sale_number=sale_number,
+                                source="online_sale",
+                            ),
+                            authored_by=user.id,
+                            branch_id=sale_data.branch_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Loyalty event for sale %s (customer %s) could not be "
+                        "appended; the sale and the %s points are committed "
+                        "anyway. Devices stay on the previous balance until the "
+                        "next customer_loyalty_changed, which carries the "
+                        "absolute balance.",
+                        sale.id, customer.id, points_earned,
+                    )
+                else:
+                    # Published as an event, so not "pending with nothing behind
+                    # it" — which is how Joe's row got stuck.
+                    customer.mark_as_synced()
+
 
             # Always increment purchase counters even when loyalty is off
             elif customer:
@@ -1311,51 +1374,6 @@ class SalesService:
             authored_by=user.id,
             branch_id=sale_data.branch_id,
         )
-
-        # ----------------------------------------------------------------------
-        # 19b. Loyalty change event
-        # ----------------------------------------------------------------------
-        # The points mutation at step 19 changed a row every device caches, and
-        # until this existed nothing told them: no customer event carried loyalty,
-        # so Joe's server row sat at sync_status='pending' with no event behind it
-        # and his device row stayed at 0/bronze forever.
-        #
-        # Emitted here, in the same transaction as the mutation and immediately
-        # after sale_created, so the new balance and the event announcing it commit
-        # or roll back together. A failed append aborts the sale, which is the same
-        # trade sale_created already makes.
-        #
-        # The payload is ABSOLUTE post-state, not a delta, so a device that receives
-        # it twice - or receives it after having applied its own guess - converges on
-        # the server's number instead of drifting. The event id is derived from
-        # (customer, sale, direction), so re-projecting the same sale emits nothing.
-        # See ADR 0010.
-        if _loyalty_award is not None:
-            await StockEventEmitter.emit_in_transaction(
-                db,
-                org_id=sale.organization_id,
-                event_type="customer_loyalty_changed",
-                aggregate_type=AggregateType.CUSTOMER,
-                aggregate_id=customer.id,
-                event_id=customer_loyalty_changed_event_id(
-                    customer.id, sale.id, "earn"
-                ),
-                payload=loyalty_payload(
-                    _loyalty_award,
-                    customer_id=customer.id,
-                    sale_id=sale.id,
-                    direction="earn",
-                    organization_id=sale.organization_id,
-                    sale_number=sale_number,
-                    source="online_sale",
-                ),
-                authored_by=user.id,
-                branch_id=sale_data.branch_id,
-            )
-            # The change is now published as an event, so the row is no longer
-            # "pending with nothing behind it" - which is how Joe's row got stuck.
-            # Server-side counterpart of the device reconciliation in 88162ed.
-            customer.mark_as_synced()
 
         # ----------------------------------------------------------------------
         # 20. Prescription refill event
@@ -1912,10 +1930,10 @@ class SalesService:
                             direction="refund",
                             increment_orders=False,
                         )
-                    customer.updated_at     = datetime.now(timezone.utc)
-                    customer.mark_as_pending_sync()
+                customer.updated_at = datetime.now(timezone.utc)
+                customer.mark_as_pending_sync()
 
-            # 7b. Loyalty reversal event.
+            # 7b. Loyalty reversal event, isolated in its own savepoint.
             #
             # Same contract as the earn side, opposite direction: absolute
             # post-state and an id derived from (customer, sale, 'refund'). The
@@ -1924,32 +1942,54 @@ class SalesService:
             # primary key would swallow the reversal as a duplicate and the
             # customer would keep the points they just gave back.
             #
-            # Emitted before the commit at step 8, so the reversal and the balance
-            # it describes commit together.
+            # Same isolation as step 19a, and the same reasoning: the refund must
+            # not be undone because its notification could not be delivered. Flush
+            # the deduction into the outer transaction first, then savepoint the
+            # append alone.
+            #
+            # COST, stated plainly. If this append fails the reversal commits
+            # without an event, so devices keep showing the pre-refund balance
+            # until the next loyalty event republishes the absolute number. The
+            # server's own balance is correct throughout, so the next sale
+            # republishes the truth and the device converges.
             if _loyalty_refund_award is not None:
-                await StockEventEmitter.emit_in_transaction(
-                    db,
-                    org_id=sale.organization_id,
-                    event_type="customer_loyalty_changed",
-                    aggregate_type=AggregateType.CUSTOMER,
-                    aggregate_id=customer.id,
-                    event_id=customer_loyalty_changed_event_id(
-                        customer.id, sale.id, "refund"
-                    ),
-                    payload=loyalty_payload(
-                        _loyalty_refund_award,
-                        customer_id=customer.id,
-                        sale_id=sale.id,
-                        direction="refund",
-                        organization_id=sale.organization_id,
-                        sale_number=sale.sale_number,
-                        source="refund",
-                    ),
-                    authored_by=user.id,
-                    branch_id=sale.branch_id,
-                )
-                # Published as an event now, so not "pending with nothing behind it".
-                customer.mark_as_synced()
+                await db.flush()
+                try:
+                    async with db.begin_nested():
+                        await StockEventEmitter.emit_in_transaction(
+                            db,
+                            org_id=sale.organization_id,
+                            event_type="customer_loyalty_changed",
+                            aggregate_type=AggregateType.CUSTOMER,
+                            aggregate_id=customer.id,
+                            event_id=customer_loyalty_changed_event_id(
+                                customer.id, sale.id, "refund"
+                            ),
+                            payload=loyalty_payload(
+                                _loyalty_refund_award,
+                                customer_id=customer.id,
+                                sale_id=sale.id,
+                                direction="refund",
+                                organization_id=sale.organization_id,
+                                sale_number=sale.sale_number,
+                                source="refund",
+                            ),
+                            authored_by=user.id,
+                            branch_id=sale.branch_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "Loyalty reversal event for sale %s (customer %s) could "
+                        "not be appended; the refund and its deduction are "
+                        "committed anyway. Devices stay on the pre-refund balance "
+                        "until the next customer_loyalty_changed, which carries "
+                        "the absolute balance.",
+                        sale.id, customer.id,
+                    )
+                else:
+                    # Published as an event, so not "pending with nothing behind
+                    # it".
+                    customer.mark_as_synced()
 
         # 8. Commit
         await db.commit()
