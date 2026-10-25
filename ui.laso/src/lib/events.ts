@@ -18,6 +18,7 @@ type AppEventType =
     | "sales:changed"       // sale completed / voided
     | "purchases:changed"   // PO created / received / updated
     | "customers:changed"   // customer created / updated
+    | "price-contracts:changed" // contract lifecycle event applied locally
     // Prescription created / edited / cancelled, or a refill consumed. This type
     // did not exist until P1: the Prescriptions page had no subscription and
     // nothing to subscribe TO, so after any sale it kept showing the

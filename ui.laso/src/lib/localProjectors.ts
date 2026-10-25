@@ -403,13 +403,64 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
   const items = (p.items ?? []) as Array<Record<string, unknown>>;
   const now = new Date().toISOString();
 
-  // Idempotency guard: skip entirely if already applied (online sale the client
-  // authored directly, or duplicate event delivery).
+  // A replayed sale must not move stock twice, but an existing row may still
+  // need contract metadata: older server events omitted it entirely. Update
+  // only the contract snapshot, then stop before the stock side effects.
   const existing = await db.select<{ id: string }[]>(
     "SELECT id FROM sales WHERE id = $1",
     [String(e.aggregate_id)]
   );
-  if (existing.length > 0) return;
+  if (existing.length > 0) {
+    const contractFields: Array<[string, unknown]> = [];
+    if ("price_contract_id" in p) {
+      contractFields.push([
+        "price_contract_id",
+        p.price_contract_id != null ? String(p.price_contract_id) : null,
+      ]);
+    }
+    if ("contract_name" in p) {
+      contractFields.push([
+        "contract_name",
+        p.contract_name != null ? String(p.contract_name) : null,
+      ]);
+    }
+    if ("contract_discount_percentage" in p) {
+      contractFields.push([
+        "contract_discount_percentage",
+        p.contract_discount_percentage != null
+          ? Number(p.contract_discount_percentage)
+          : null,
+      ]);
+    }
+    if ("contract_type" in p) {
+      contractFields.push([
+        "contract_type",
+        p.contract_type != null ? String(p.contract_type) : null,
+      ]);
+    }
+    if ("contract_resolution" in p) {
+      contractFields.push([
+        "contract_resolution",
+        p.contract_resolution != null ? String(p.contract_resolution) : null,
+      ]);
+    }
+    if (contractFields.length > 0) {
+      const setClauses = contractFields
+        .map(([name], index) => `${name} = $${index + 1}`)
+        .join(", ");
+      const timestampIndex = contractFields.length + 1;
+      await db.execute(
+        `UPDATE sales SET ${setClauses}, updated_at = $${timestampIndex}
+          WHERE id = $${timestampIndex + 1}`,
+        [
+          ...contractFields.map(([, value]) => value),
+          e.authored_at ?? now,
+          String(e.aggregate_id),
+        ]
+      );
+    }
+    return;
+  }
 
   // Write the sale row.
   await db.execute(
@@ -417,6 +468,7 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
        (id, organization_id, branch_id, sale_number, customer_id, customer_name,
         subtotal, discount_amount, tax_amount, total_amount,
         price_contract_id, contract_name, contract_discount_percentage,
+        contract_type, contract_resolution,
         payment_method, payment_status, amount_paid, change_amount,
         payment_reference, prescription_id, prescription_number, prescriber_name,
         cashier_id, pharmacist_id,
@@ -428,12 +480,12 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
      VALUES
        ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
         $20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,
-        'synced',1,NULL,$36,$36)`,
+        $36,$37,'synced',1,NULL,$38,$38)`,
     [
       String(e.aggregate_id),
       String(p.organization_id ?? e.org_id),
       String(p.branch_id ?? e.branch_id),
-      p.sale_number != null ? String(p.sale_number) : null,
+      p.sale_number != null ? String(p.sale_number) : "",
       p.customer_id != null ? String(p.customer_id) : null,
       p.customer_name != null ? String(p.customer_name) : null,
       Number(p.subtotal ?? 0),
@@ -443,10 +495,12 @@ async function _saleCreated(db: Db, e: EventEnvelope): Promise<void> {
       p.price_contract_id != null ? String(p.price_contract_id) : null,
       p.contract_name != null ? String(p.contract_name) : null,
       p.contract_discount_percentage != null ? Number(p.contract_discount_percentage) : null,
+      p.contract_type != null ? String(p.contract_type) : null,
+      p.contract_resolution != null ? String(p.contract_resolution) : null,
       String(p.payment_method ?? "cash"),
       String(p.payment_status ?? "paid"),
       p.amount_paid != null ? Number(p.amount_paid) : null,
-      p.change_amount != null ? Number(p.change_amount) : null,
+      p.change_amount != null ? Number(p.change_amount) : 0,
       p.payment_reference != null ? String(p.payment_reference) : null,
       p.prescription_id != null ? String(p.prescription_id) : null,
       p.prescription_number != null ? String(p.prescription_number) : null,
@@ -714,10 +768,14 @@ function toOptionalNumber(v: unknown): number | null {
 
 // ── Price Contract projectors ──────────────────────────────────────────────
 
-async function _priceContractCreated(db: Db, e: EventEnvelope): Promise<void> {
+async function _priceContractCreated(
+  db: Db,
+  e: EventEnvelope,
+  fallBackToUpdate = true,
+): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const now = e.authored_at ?? new Date().toISOString();
-  await db.execute(
+  const result = await db.execute(
     `INSERT OR IGNORE INTO price_contracts (
       id, organization_id, contract_code, contract_name, contract_type,
       is_default_contract, discount_type, discount_percentage,
@@ -752,7 +810,7 @@ async function _priceContractCreated(db: Db, e: EventEnvelope): Promise<void> {
       p.applies_to_otc !== false ? 1 : 0,
       p.applies_to_all_branches !== false ? 1 : 0,
       JSON.stringify(p.applicable_branch_ids ?? []),
-      String(p.effective_from ?? now),
+      String(p.effective_from ?? now).slice(0, 10),
       p.effective_to != null ? String(p.effective_to) : null,
       p.requires_verification ? 1 : 0,
       p.requires_approval ? 1 : 0,
@@ -769,9 +827,24 @@ async function _priceContractCreated(db: Db, e: EventEnvelope): Promise<void> {
       now,
     ]
   );
+  if (result.rowsAffected === 0) {
+    if (fallBackToUpdate) {
+      await _priceContractUpdated(db, e, false);
+    } else {
+      console.warn(
+        `[localProjectors] price_contract_created ${e.aggregate_id} conflicted with another row`
+      );
+    }
+    return;
+  }
+  appEvents.emit("price-contracts:changed");
 }
 
-async function _priceContractUpdated(db: Db, e: EventEnvelope): Promise<void> {
+async function _priceContractUpdated(
+  db: Db,
+  e: EventEnvelope,
+  fallBackToCreate = true,
+): Promise<void> {
   const p = e.payload as Record<string, unknown>;
   const UPDATABLE = [
     "contract_code", "contract_name", "contract_type", "discount_type",
@@ -780,15 +853,28 @@ async function _priceContractUpdated(db: Db, e: EventEnvelope): Promise<void> {
     "requires_verification", "requires_approval", "daily_usage_limit",
     "per_customer_usage_limit", "insurance_provider_id", "requires_preauthorization",
     "minimum_purchase_amount", "maximum_purchase_amount", "status", "is_active",
-    "copay_amount", "copay_percentage",
+    "copay_amount", "copay_percentage", "is_default_contract",
   ];
   const fields: [string, unknown][] = [];
   if ("applicable_branch_ids" in p) {
-    fields.push(["applicable_branch_ids", JSON.stringify(p.applicable_branch_ids)]);
+    fields.push([
+      "applicable_branch_ids",
+      JSON.stringify(p.applicable_branch_ids ?? []),
+    ]);
   }
+  const BOOLEAN_FIELDS = new Set([
+    "applies_to_prescription_only", "applies_to_otc", "applies_to_all_branches",
+    "requires_verification", "requires_approval", "requires_preauthorization",
+    "is_active", "is_default_contract",
+  ]);
   for (const key of UPDATABLE) {
     if (key in p) {
-      fields.push([key, p[key]]);
+      const value = p[key];
+      if (BOOLEAN_FIELDS.has(key)) {
+        fields.push([key, value ? 1 : 0]);
+      } else {
+        fields.push([key, value ?? null]);
+      }
     }
   }
   if (fields.length === 0) return;
@@ -799,8 +885,16 @@ async function _priceContractUpdated(db: Db, e: EventEnvelope): Promise<void> {
     [...fields.map((f) => f[1]), now, String(e.aggregate_id)]
   );
   if (result.rowsAffected === 0) {
-    await _priceContractCreated(db, e);
+    if (fallBackToCreate) {
+      await _priceContractCreated(db, e, false);
+    } else {
+      console.warn(
+        `[localProjectors] price_contract_updated ${e.aggregate_id} has no local row and could not be created`
+      );
+    }
+    return;
   }
+  appEvents.emit("price-contracts:changed");
 }
 
 async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
@@ -809,6 +903,11 @@ async function _priceContractDeleted(db: Db, e: EventEnvelope): Promise<void> {
     "UPDATE price_contracts SET is_deleted = 1, is_active = 0, updated_at = $1 WHERE id = $2",
     [now, String(e.aggregate_id)]
   );
+  await db.execute(
+    "DELETE FROM price_contract_availability WHERE contract_id = $1",
+    [String(e.aggregate_id)]
+  );
+  appEvents.emit("price-contracts:changed");
 }
 
 // ── Stock projectors ───────────────────────────────────────────────────────

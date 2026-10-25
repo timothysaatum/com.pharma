@@ -69,6 +69,9 @@ _VALID_PAYMENT_STATUSES = {
 _VALID_SALE_STATUSES = {
     "draft", "completed", "cancelled", "refunded", "partially_refunded",
 }
+_VALID_CONTRACT_RESOLUTIONS = {
+    "client", "server_default", "missing_offline", "invalid_client_snapshot",
+}
 
 
 @ProjectorRegistry.register
@@ -80,7 +83,7 @@ class SaleProjector(Projector):
     ) -> ProjectorResult:
         etype = event.event_type
         if etype == "sale_created":
-            return _validate_created(event)
+            return await _validate_created(event, db)
         if etype == "sale_voided":
             return await _validate_voided(event, db)
         return ProjectorResult(
@@ -107,7 +110,9 @@ class SaleProjector(Projector):
 # ── validate helpers ─────────────────────────────────────────────────────────
 
 
-def _validate_created(event: EventEnvelope) -> ProjectorResult:
+async def _validate_created(
+    event: EventEnvelope, db: AsyncSession
+) -> ProjectorResult:
     payload = event.payload
 
     org_id = payload.get("organization_id")
@@ -167,7 +172,191 @@ def _validate_created(event: EventEnvelope) -> ProjectorResult:
                 f"items[{i}].quantity must be a positive integer, got {qty!r}",
             )
 
+    return await _validate_contract(event, db)
+
+
+def _contract_resolution(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    return str(value)
+
+
+def _contract_branch_ids(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (TypeError, ValueError):
+            return []
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    return [str(item) for item in value]
+
+
+def _contract_policy_violation(
+    row: Any, payload: Dict[str, Any], sale_date: Any
+) -> bool:
+    if not row.applies_to_all_branches:
+        branch_id = str(payload.get("branch_id"))
+        if branch_id not in _contract_branch_ids(row.applicable_branch_ids):
+            return True
+    effective_from = row.effective_from
+    if effective_from is not None and hasattr(effective_from, "date"):
+        effective_from = effective_from.date()
+    if effective_from is not None and sale_date < effective_from:
+        return True
+    effective_to = row.effective_to
+    if effective_to is not None and hasattr(effective_to, "date"):
+        effective_to = effective_to.date()
+    if effective_to is not None and sale_date > effective_to:
+        return True
+    return bool(
+        row.requires_verification
+        or row.requires_approval
+        or row.requires_preauthorization
+    )
+
+
+async def _load_contract_row(
+    db: AsyncSession, contract_id: Any, org_id: Any
+) -> Any:
+    return (
+        await db.execute(
+            text(
+                """
+                SELECT id, organization_id, contract_name, contract_type,
+                       discount_percentage, applies_to_all_branches,
+                       applicable_branch_ids, effective_from, effective_to,
+                       requires_verification, requires_approval,
+                       requires_preauthorization
+                  FROM price_contracts
+                 WHERE id = :contract_id
+                   AND organization_id = :org_id
+                """
+            ),
+            {"contract_id": str(contract_id), "org_id": str(org_id)},
+        )
+    ).first()
+
+
+async def _validate_contract(
+    event: EventEnvelope, db: AsyncSession
+) -> ProjectorResult:
+    """Validate the client's contract claim without mutating the event.
+
+    Projector validation runs *before* the event is appended to the log, and
+    the append path verifies ``hash_self`` over the payload. Mutating the
+    payload here therefore corrupts the hash and turns a valid offline sale
+    into a permanent rejection. The resolved marker and any server-side
+    snapshot backfill are computed in ``_resolved_sale_contract`` during
+    apply instead.
+    """
+    payload = event.payload
+    contract_id = payload.get("price_contract_id")
+    resolution = _contract_resolution(payload.get("contract_resolution"))
+
+    if resolution is not None and resolution not in _VALID_CONTRACT_RESOLUTIONS:
+        return _reject(
+            "invalid_contract_resolution",
+            f"contract_resolution={resolution!r} is not a known marker",
+        )
+
+    if contract_id in (None, ""):
+        if resolution in {"client", "server_default", "invalid_client_snapshot"}:
+            return _reject(
+                "contract_resolution_mismatch",
+                f"contract_resolution={resolution!r} requires price_contract_id",
+            )
+        return ProjectorResult(status=ProjectorStatus.OK)
+
+    try:
+        contract_uuid = uuid.UUID(str(contract_id))
+    except (TypeError, ValueError, AttributeError):
+        return _reject(
+            "invalid_contract_id",
+            f"price_contract_id={contract_id!r} is not a UUID",
+        )
+
+    if resolution == "missing_offline":
+        return _reject(
+            "contract_resolution_mismatch",
+            "contract_resolution='missing_offline' cannot carry a contract id",
+        )
+
+    row = await _load_contract_row(db, contract_uuid, event.org_id)
+    if row is None:
+        return _reject(
+            "contract_not_found",
+            f"Price contract {contract_uuid} not found for org {event.org_id}",
+        )
+
     return ProjectorResult(status=ProjectorStatus.OK)
+
+
+async def _resolved_sale_contract(
+    event: EventEnvelope, db: AsyncSession
+) -> Dict[str, Any]:
+    """Compute the contract snapshot persisted on the sale.
+
+    ``sale_created`` stays immutable in the event log, including events that
+    were deferred before validation. Everything derived from the server's
+    current contract row is therefore resolved here, at apply time.
+    """
+    payload = event.payload
+    contract_id = payload.get("price_contract_id")
+    resolution = _contract_resolution(payload.get("contract_resolution"))
+
+    if contract_id in (None, ""):
+        return {
+            "price_contract_id": None,
+            "contract_name": payload.get("contract_name"),
+            "contract_type": payload.get("contract_type"),
+            "contract_discount_percentage": payload.get(
+                "contract_discount_percentage"
+            ),
+            "contract_resolution": "missing_offline",
+        }
+
+    contract_uuid = uuid.UUID(str(contract_id))
+    row = await _load_contract_row(db, contract_uuid, event.org_id)
+    if row is None:
+        # Validation runs before apply on both the live and deferred paths. A
+        # row disappearing between those steps is a server bug, not a client
+        # claim we can honour.
+        raise RuntimeError(
+            f"Price contract {contract_uuid} disappeared between validation "
+            f"and apply for org {event.org_id}"
+        )
+
+    sale_date = event.authored_at
+    if hasattr(sale_date, "date"):
+        sale_date = sale_date.date()
+
+    if _contract_policy_violation(row, payload, sale_date):
+        resolved = "invalid_client_snapshot"
+    elif resolution is None:
+        resolved = "client"
+    else:
+        resolved = resolution
+
+    contract_name = payload.get("contract_name")
+    if contract_name in (None, ""):
+        contract_name = row.contract_name
+    contract_type = payload.get("contract_type")
+    if contract_type in (None, ""):
+        contract_type = row.contract_type
+    discount = payload.get("contract_discount_percentage")
+    if discount is None:
+        discount = float(row.discount_percentage or 0)
+
+    return {
+        "price_contract_id": str(row.id),
+        "contract_name": contract_name,
+        "contract_type": contract_type,
+        "contract_discount_percentage": discount,
+        "contract_resolution": resolved,
+    }
 
 
 async def _validate_voided(
@@ -209,6 +398,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
     sale_id = str(event.aggregate_id)
     org_id = str(event.org_id)
     branch_id = str(payload["branch_id"])
+    contract = await _resolved_sale_contract(event, db)
 
     # ── 1. INSERT sale header (idempotent) ───────────────────────────────────
     result = await db.execute(
@@ -219,6 +409,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 subtotal, discount_amount, tax_amount, total_amount,
                 price_contract_id, contract_name,
                 contract_discount_percentage, contract_type,
+                contract_resolution,
                 payment_method, payment_status,
                 amount_paid, change_amount, payment_reference,
                 split_payment_details,
@@ -239,6 +430,7 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
                 :subtotal, :discount_amount, :tax_amount, :total_amount,
                 :price_contract_id, :contract_name,
                 :contract_discount_pct, :contract_type,
+                :contract_resolution,
                 :payment_method, :payment_status,
                 :amount_paid, :change_amount, :payment_reference,
                 :split_payment_details,
@@ -267,12 +459,15 @@ async def _apply_created(event: EventEnvelope, db: AsyncSession) -> None:
             "discount_amount": _decimal_str(payload.get("discount_amount", 0)),
             "tax_amount": _decimal_str(payload.get("tax_amount", 0)),
             "total_amount": _decimal_str(payload.get("total_amount", 0)),
-            "price_contract_id": _uuid_str_or_none(payload.get("price_contract_id")),
-            "contract_name": payload.get("contract_name"),
-            "contract_discount_pct": _decimal_str_or_none(
-                payload.get("contract_discount_percentage")
+            "price_contract_id": _uuid_str_or_none(
+                contract["price_contract_id"]
             ),
-            "contract_type": payload.get("contract_type"),
+            "contract_name": contract["contract_name"],
+            "contract_discount_pct": _decimal_str_or_none(
+                contract["contract_discount_percentage"]
+            ),
+            "contract_type": contract["contract_type"],
+            "contract_resolution": contract["contract_resolution"],
             "payment_method": payload["payment_method"],
             "payment_status": payload.get("payment_status", "completed"),
             "amount_paid": _decimal_str_or_none(payload.get("amount_paid")),

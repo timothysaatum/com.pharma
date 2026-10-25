@@ -838,6 +838,9 @@ class SalesService:
                 contract_name=contract.contract_name,
                 contract_discount_percentage=float(contract.discount_percentage),
                 contract_type=contract.contract_type,
+                contract_resolution=(
+                    "client" if sale_data.price_contract_id else "server_default"
+                ),
                 # Payment
                 payment_method=sale_data.payment_method,
                 payment_status="completed",
@@ -1329,6 +1332,20 @@ class SalesService:
                 "subtotal": float(str(subtotal)),
                 "discount_amount": float(str(total_discount)),
                 "tax_amount": float(str(total_tax)),
+                "price_contract_id": str(contract.id),
+                "contract_name": contract.contract_name,
+                "contract_type": contract.contract_type,
+                "contract_discount_percentage": float(
+                    contract.discount_percentage or 0
+                ),
+                "contract_resolution": (
+                    sale.contract_resolution
+                    or (
+                        "client"
+                        if sale_data.price_contract_id
+                        else "server_default"
+                    )
+                ),
                 "amount_paid": float(amount_paid),
                 "change_amount": float(change_amount),
                 "prescription_id": str(sale_data.prescription_id) if sale_data.prescription_id else None,

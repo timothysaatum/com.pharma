@@ -146,7 +146,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                 set({ user, isAuthenticated: true, activeBranchId, setupState });
 
                 if (activeBranchId) {
-                    syncEngine.start(activeBranchId, user.organization_id);
+                    syncEngine.start(activeBranchId, user.organization_id, undefined, {
+                        userId: user.id,
+                        assignedBranches: user.assigned_branches,
+                    });
                 }
 
                 // Cached identity keeps offline startup fast, but authority can
@@ -173,7 +176,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
                             ) {
                                 freshBranchId = String(freshUser.assigned_branches[0]);
                                 await authStorage.setActiveBranch(freshBranchId);
-                                syncEngine.start(freshBranchId, freshUser.organization_id);
+                                syncEngine.start(freshBranchId, freshUser.organization_id, undefined, {
+                                    userId: freshUser.id,
+                                    assignedBranches: freshUser.assigned_branches,
+                                });
                             }
 
                             await authStorage.setUser(freshUser);
@@ -278,7 +284,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         });
 
         if (branchId) {
-            syncEngine.start(branchId, data.user.organization_id);
+            syncEngine.start(branchId, data.user.organization_id, undefined, {
+                userId: data.user.id,
+                assignedBranches: data.user.assigned_branches,
+            });
         }
     },
 
@@ -323,7 +332,10 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         authStorage.setActiveBranch(branchId);
         set({ activeBranchId: branchId });
         syncEngine.stop();
-        syncEngine.start(branchId, user?.organization_id ?? null);
+        syncEngine.start(branchId, user?.organization_id ?? null, undefined, user ? {
+            userId: user.id,
+            assignedBranches: user.assigned_branches,
+        } : undefined);
     },
 
     /**
@@ -335,6 +347,9 @@ export const useAuthStore = create<AuthState>((set, get) => ({
         if (!user) return;
         authStorage.setActiveBranch(branchId);
         set({ activeBranchId: branchId, setupState: "ready" });
-        syncEngine.start(branchId, user.organization_id);
+        syncEngine.start(branchId, user.organization_id, undefined, {
+            userId: user.id,
+            assignedBranches: user.assigned_branches,
+        });
     },
 }));

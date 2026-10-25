@@ -68,3 +68,48 @@ describe("useCart corporate checkout", () => {
         expect(payload.insurance_claim_number).toBeUndefined();
     });
 });
+
+
+const otcDrug = {
+    id: "drug-otc",
+    name: "Paracetamol",
+    unit_price: 10,
+    tax_rate: 0,
+    requires_prescription: false,
+} as Drug;
+
+describe("useCart optional contract", () => {
+    it("rejects a contractless sale by default", () => {
+        const { result } = renderHook(() => useCart());
+
+        act(() => {
+            result.current.addItem(otcDrug);
+            result.current.setStockQuantities({ [otcDrug.id]: 10 }, {});
+        });
+
+        expect(result.current.validationErrors).toContainEqual({
+            field: "contract",
+            message: "Select a price contract",
+        });
+        expect(() => result.current.buildSaleCreate("branch-1")).toThrow(
+            "No contract selected"
+        );
+    });
+
+    it("accepts a contractless sale when offline missing-contract mode is enabled", () => {
+        const { result } = renderHook(() =>
+            useCart(false, { allowMissingContract: true })
+        );
+
+        act(() => {
+            result.current.addItem(otcDrug);
+            result.current.setStockQuantities({ [otcDrug.id]: 10 }, {});
+        });
+
+        expect(
+            result.current.validationErrors.some((error) => error.field === "contract")
+        ).toBe(false);
+        expect(result.current.isValid).toBe(true);
+        expect(result.current.buildSaleCreate("branch-1").price_contract_id).toBeUndefined();
+    });
+});

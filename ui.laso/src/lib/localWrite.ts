@@ -59,6 +59,7 @@ export const SALE_COLUMNS = new Set([
     "contract_name",
     "contract_discount_percentage",
     "contract_type",
+    "contract_resolution",
     "payment_method",
     "payment_status",
     "amount_paid",
@@ -238,6 +239,13 @@ export async function buildSaleCreatedEnvelope(
         amount_paid: Number(sale.amount_paid ?? 0),
         change_amount: Number((sale as Record<string, unknown>).change_amount ?? 0),
         prescription_id: sale.prescription_id ?? null,
+        price_contract_id: sale.price_contract_id ?? null,
+        contract_name: sale.contract_name ?? null,
+        contract_discount_percentage: sale.contract_discount_percentage ?? null,
+        contract_type: sale.contract_type ?? null,
+        contract_resolution:
+            (sale as Record<string, unknown>).contract_resolution
+            ?? (sale.price_contract_id ? "client" : "missing_offline"),
         status: (sale as Record<string, unknown>).status ?? "completed",
         sync_version: 2,
         sync_protocol_version: 2,

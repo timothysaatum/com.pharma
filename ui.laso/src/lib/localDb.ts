@@ -172,7 +172,7 @@ async function initDb(): Promise<Database> {
 
 /** Highest schema version this build knows how to migrate to. Bump this
  * alongside adding a new migrate_vN. */
-const MAX_KNOWN_SCHEMA_VERSION = 36;
+const MAX_KNOWN_SCHEMA_VERSION = 38;
 
 /**
  * One-time repair for devices whose local DB was left in the specific
@@ -306,6 +306,7 @@ export async function runMigrations(db: Database): Promise<void> {
         if (user_version < 35) await migrate_v35(db);
         if (user_version < 36) await migrate_v36(db);
         if (user_version < 37) await migrate_v37(db);
+        if (user_version < 38) await migrate_v38(db);
         await ensureAuditLogSchema(db);
         await ensurePrescriptionSchema(db);
     } catch (e) {
@@ -3041,6 +3042,38 @@ export async function migrate_v37(db: Database, organizationId?: string | null):
     );
   }
   await db.execute("PRAGMA user_version = 37");
+}
+
+export async function migrate_v38(db: Database): Promise<void> {
+  await db.execute("BEGIN IMMEDIATE");
+  try {
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS price_contract_availability (
+        organization_id TEXT NOT NULL,
+        user_id         TEXT NOT NULL,
+        branch_id       TEXT NOT NULL,
+        contract_id     TEXT NOT NULL,
+        cached_at       TEXT NOT NULL,
+        PRIMARY KEY (user_id, branch_id, contract_id)
+      )
+    `);
+    await db.execute(
+      "CREATE INDEX IF NOT EXISTS idx_price_contract_availability_org_branch "
+      + "ON price_contract_availability (organization_id, branch_id)"
+    );
+    for (const table of ["sales", "sales_crr"]) {
+      const columns = await db.select<{ name: string }[]>(`PRAGMA table_info(${table})`);
+      if (columns.length === 0) continue;
+      if (!columns.some((column) => column.name === "contract_resolution")) {
+        await db.execute(`ALTER TABLE ${table} ADD COLUMN contract_resolution TEXT`);
+      }
+    }
+    await db.execute("PRAGMA user_version = 38");
+    await db.execute("COMMIT");
+  } catch (error) {
+    await db.execute("ROLLBACK");
+    throw error;
+  }
 }
 
 /**

@@ -20,13 +20,14 @@
  *      could never correct the poisoned row — the damage was permanent.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { installRealDb, rawDb } from "./realDb";
+import { insertBatch, insertInventory, installRealDb, rawDb } from "./realDb";
 import type { AvailableContract } from "@/api/contracts";
 
 const ORG = "2d060ef8-a302-447c-91f4-b2fd30268341";
 const TEST_ORG = "11111111-1111-1111-1111-111111111111";
 const BRANCH = "72b2433d-120b-42a2-918b-e6dfcf176b1a";
 const OTHER_BRANCH = "99999999-9999-9999-9999-999999999999";
+const USER = "user-pos-1";
 
 function insertContract(opts: {
     id: string;
@@ -39,6 +40,13 @@ function insertContract(opts: {
     effectiveFrom?: string;
     effectiveTo?: string | null;
     allBranches?: boolean;
+    contractType?: string;
+    requiresVerification?: boolean;
+    requiresApproval?: boolean;
+    requiresPreauthorization?: boolean;
+    insuranceProviderId?: string | null;
+    withAvailability?: boolean;
+    availabilityUser?: string;
 }): void {
     const now = new Date().toISOString();
     rawDb()
@@ -48,14 +56,16 @@ function insertContract(opts: {
                 is_default_contract, discount_type, discount_percentage,
                 applies_to_all_branches, applicable_branch_ids,
                 effective_from, effective_to, status, is_active, is_deleted,
-                requires_verification, requires_approval,
+                requires_verification, requires_approval, requires_preauthorization,
+                insurance_provider_id,
                 sync_status, sync_version, created_at, updated_at
              ) VALUES (
-                ?, ?, ?, ?, 'standard',
+                ?, ?, ?, ?, ?,
                 ?, 'percentage', 0,
                 ?, ?,
                 ?, ?, ?, ?, 0,
-                0, 0,
+                ?, ?, ?,
+                ?,
                 'synced', 1, ?, ?
              )`
         )
@@ -64,6 +74,7 @@ function insertContract(opts: {
             opts.organizationId,
             opts.code,
             opts.name,
+            opts.contractType ?? "standard",
             opts.isDefault ? 1 : 0,
             opts.allBranches === false ? 0 : 1,
             // A branch-scoped contract must name a DIFFERENT branch, otherwise
@@ -74,9 +85,39 @@ function insertContract(opts: {
             opts.effectiveTo ?? null,
             opts.status ?? "active",
             opts.isActive === false ? 0 : 1,
+            opts.requiresVerification ? 1 : 0,
+            opts.requiresApproval ? 1 : 0,
+            opts.requiresPreauthorization ? 1 : 0,
+            opts.insuranceProviderId ?? null,
             now,
             now
         );
+    if (opts.withAvailability !== false) {
+        rawDb()
+            .prepare(
+                `INSERT INTO price_contract_availability
+                    (organization_id, user_id, branch_id, contract_id, cached_at)
+                 VALUES (?, ?, ?, ?, ?)`
+            )
+            .run(
+                opts.organizationId,
+                opts.availabilityUser ?? USER,
+                BRANCH,
+                opts.id,
+                now
+            );
+    }
+}
+
+
+function insertAvailability(contractId: string, organizationId: string): void {
+    rawDb()
+        .prepare(
+            `INSERT INTO price_contract_availability
+                (organization_id, user_id, branch_id, contract_id, cached_at)
+             VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(organizationId, USER, BRANCH, contractId, new Date().toISOString());
 }
 
 /** The POS selection rule, isolated so both failure modes can be driven. */
@@ -89,6 +130,7 @@ describe("POS price contract availability", () => {
     beforeEach(async () => {
         await installRealDb();
         rawDb().exec("DELETE FROM price_contracts");
+        rawDb().exec("DELETE FROM price_contract_availability");
     });
 
     afterEach(() => {
@@ -107,7 +149,7 @@ describe("POS price contract availability", () => {
             isDefault: true,
         });
 
-        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG);
+        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
 
         // The old org-less contract must never be offered to this org's cashier.
         expect(contracts).toHaveLength(0);
@@ -142,7 +184,7 @@ describe("POS price contract availability", () => {
             isDefault: true,
         });
 
-        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG);
+        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
         expect(contracts).toHaveLength(1);
         expect(contracts[0].code).toBe("STANDARD-PRICE");
         expect(autoSelect(contracts)?.code).toBe("STANDARD-PRICE");
@@ -153,7 +195,7 @@ describe("POS price contract availability", () => {
     it("excludes an inactive contract", async () => {
         const { localRead } = await import("@/lib/localRead");
         insertContract({ id: "c1", code: "X", name: "X", organizationId: ORG, isActive: false });
-        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG)).toHaveLength(0);
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
     });
 
     it("excludes a contract whose status is not active", async () => {
@@ -161,7 +203,7 @@ describe("POS price contract availability", () => {
         insertContract({
             id: "c1", code: "X", name: "X", organizationId: ORG, status: "draft",
         });
-        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG)).toHaveLength(0);
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
     });
 
     it("excludes a contract whose effective window has passed", async () => {
@@ -170,7 +212,7 @@ describe("POS price contract availability", () => {
             id: "c1", code: "X", name: "X", organizationId: ORG,
             effectiveFrom: "2020-01-01", effectiveTo: "2020-12-31",
         });
-        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG)).toHaveLength(0);
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
     });
 
     it("excludes a contract that has not started yet", async () => {
@@ -179,7 +221,7 @@ describe("POS price contract availability", () => {
             id: "c1", code: "X", name: "X", organizationId: ORG,
             effectiveFrom: "2099-01-01",
         });
-        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG)).toHaveLength(0);
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
     });
 
     it("excludes a contract scoped to other branches only", async () => {
@@ -187,7 +229,63 @@ describe("POS price contract availability", () => {
         insertContract({
             id: "c1", code: "X", name: "X", organizationId: ORG, allBranches: false,
         });
-        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG)).toHaveLength(0);
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
+    });
+
+    it("requires a local availability mapping for this branch", async () => {
+        const { localRead } = await import("@/lib/localRead");
+        insertContract({
+            id: "c1", code: "X", name: "X", organizationId: ORG,
+            withAvailability: false,
+        });
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
+    });
+
+    it("does not leak another user's availability mapping", async () => {
+        const { localRead } = await import("@/lib/localRead");
+        insertContract({
+            id: "c1", code: "X", name: "X", organizationId: ORG,
+            availabilityUser: "user-other",
+        });
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
+    });
+
+    it.each([
+        ["verification", { requiresVerification: true }],
+        ["approval", { requiresApproval: true }],
+        ["preauthorization", { requiresPreauthorization: true }],
+        ["insurance type", { contractType: "insurance" }],
+        ["insurance provider", { insuranceProviderId: "provider-1" }],
+    ])("excludes a contract requiring %s", async (_label, overrides) => {
+        const { localRead } = await import("@/lib/localRead");
+        insertContract({
+            id: "c1", code: "X", name: "X", organizationId: ORG, ...overrides,
+        });
+        expect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER)).toHaveLength(0);
+    });
+
+    it("maps the new availability response fields for the POS", async () => {
+        const { localRead } = await import("@/lib/localRead");
+        insertContract({
+            id: "c1",
+            code: "X",
+            name: "X",
+            organizationId: ORG,
+            effectiveFrom: "2026-01-01",
+            effectiveTo: "2027-01-01",
+        });
+
+        const [contract] = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
+        expect(contract).toMatchObject({
+            organization_id: ORG,
+            discount_type: "percentage",
+            effective_from: "2026-01-01",
+            effective_to: "2027-01-01",
+            status: "active",
+            is_active: true,
+            applies_to_all_branches: true,
+            applicable_branch_ids: [BRANCH],
+        });
     });
 
     it("prefers the default contract when several qualify", async () => {
@@ -197,7 +295,7 @@ describe("POS price contract availability", () => {
             id: "c2", code: "STANDARD-PRICE", name: "Standard",
             organizationId: ORG, isDefault: true,
         });
-        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG);
+        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
         expect(autoSelect(contracts)?.code).toBe("STANDARD-PRICE");
     });
 
@@ -240,7 +338,7 @@ describe("POS price contract availability", () => {
             id: "nhis-1", code: "NHIS-2026", name: "NHIS", organizationId: TEST_ORG,
             isDefault: true,
         });
-        expect(autoSelect(await localRead.getAvailableContractsForPos(BRANCH, ORG))).toBeNull();
+        expect(autoSelect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER))).toBeNull();
 
         await repairCrossOrgPriceContracts(ORG);
         insertContract({
@@ -248,7 +346,7 @@ describe("POS price contract availability", () => {
             isDefault: true,
         });
 
-        expect(autoSelect(await localRead.getAvailableContractsForPos(BRANCH, ORG))?.code).toBe(
+        expect(autoSelect(await localRead.getAvailableContractsForPos(BRANCH, ORG, USER))?.code).toBe(
             "STANDARD-PRICE"
         );
     });
@@ -277,31 +375,27 @@ describe("POS contract load outcomes", () => {
                 message:
                     opts.local.length > 0
                         ? null
-                        : "Offline, and no price contract is stored on this device for this branch.",
+                        : "Offline, and no usable price contract is stored on this device for this branch. This sale will be recorded without a contract.",
             };
         }
         if (!opts.serverResult.ok) {
             return {
-                contracts: opts.local,
-                kind: opts.local.length > 0 ? null : "error",
+                contracts: [],
+                kind: "error",
                 message:
-                    opts.local.length > 0
-                        ? null
-                        : "Could not load price contracts from the server (401). " +
-                          "The sale button stays disabled until a contract is available.",
+                    "Could not load price contracts from the server (401). " +
+                    "The sale button stays disabled until a contract is available.",
             };
         }
         if (opts.serverResult.data.length > 0) {
             return { contracts: opts.serverResult.data, kind: null, message: null };
         }
         return {
-            contracts: opts.local,
-            kind: opts.local.length > 0 ? null : "empty",
+            contracts: [],
+            kind: "empty",
             message:
-                opts.local.length > 0
-                    ? null
-                    : "The server has no active price contract for this branch. " +
-                      "Check Settings → Price Contracts.",
+                "The server has no active price contract for this branch. " +
+                "Check Settings → Price Contracts.",
         };
     }
 
@@ -355,10 +449,17 @@ describe("POS contract load outcomes", () => {
         expect(r.message).toContain("Settings");
     });
 
-    it("a cached contract rescues a failed online load, with no error shown", async () => {
+    it("a cached contract does not rescue a failed online load", async () => {
         const r = await loadContracts({ online: true, serverResult: { ok: false }, local: [std] });
-        expect(r.kind).toBeNull();
-        expect(autoSelect(r.contracts)?.code).toBe("STANDARD-PRICE");
+        expect(r.kind).toBe("error");
+        expect(r.contracts).toHaveLength(0);
+        expect(autoSelect(r.contracts)).toBeNull();
+    });
+
+    it("a cached contract does not rescue an online empty list", async () => {
+        const r = await loadContracts({ online: true, serverResult: { ok: true, data: [] }, local: [std] });
+        expect(r.kind).toBe("empty");
+        expect(r.contracts).toHaveLength(0);
     });
 });
 
@@ -440,8 +541,9 @@ describe("org log + price_contract_created replay", () => {
                 payload: STANDARD_PAYLOAD,
             })
         );
+        insertAvailability("a01ce0ba-acd0-4bef-ae68-0461d8459e86", ORG);
 
-        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG);
+        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
         expect(contracts.map((c) => c.code)).toEqual(["STANDARD-PRICE"]);
         expect(autoSelect(contracts)?.code).toBe("STANDARD-PRICE");
         expect(autoSelect(contracts)?.is_default).toBe(true);
@@ -457,7 +559,8 @@ describe("org log + price_contract_created replay", () => {
         });
         await applyEventLocally(ev);
         await applyEventLocally({ ...ev, seq: CONTRACT_SEQ + 1 });
-        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG);
+        insertAvailability("a01ce0ba-acd0-4bef-ae68-0461d8459e86", ORG);
+        const contracts = await localRead.getAvailableContractsForPos(BRANCH, ORG, USER);
         expect(contracts).toHaveLength(1);
     });
 
@@ -473,7 +576,7 @@ describe("org log + price_contract_created replay", () => {
         });
 
         expect(autoSelect(await (await import("@/lib/localRead"))
-            .localRead.getAvailableContractsForPos(BRANCH, ORG))).toBeNull();
+            .localRead.getAvailableContractsForPos(BRANCH, ORG, USER))).toBeNull();
 
         expect(await repairCrossOrgPriceContracts(ORG)).toBe(1);
         const left = rawDb()
@@ -501,8 +604,9 @@ describe("org log + price_contract_created replay", () => {
             })
         );
 
+        insertAvailability("a01ce0ba-acd0-4bef-ae68-0461d8459e86", ORG);
         await repairCrossOrgPriceContracts(ORG);
-        const codes = (await localRead.getAvailableContractsForPos(BRANCH, ORG))
+        const codes = (await localRead.getAvailableContractsForPos(BRANCH, ORG, USER))
             .map((c) => c.code)
             .sort();
         expect(codes).toEqual(["STANDARD-PRICE"]);
@@ -514,5 +618,276 @@ describe("org log + price_contract_created replay", () => {
         // changes the plan is caught here rather than on the device.
         expect(LOG_HEAD).toBe(84);
         expect(CONTRACT_SEQ).toBeGreaterThan(LOG_HEAD);
+    });
+});
+
+
+describe("sale contract projection", () => {
+    const SALE_ID = "aa11bb22-cc33-dd44-ee55-ff6677889900";
+    const DRUG_ID = "drug-sale-contract";
+    const BATCH_ID = "batch-sale-contract";
+
+    function saleEnvelope(payload: Record<string, unknown>, eventId: string) {
+        return {
+            event_id: eventId,
+            org_id: ORG,
+            seq: 1,
+            aggregate_id: SALE_ID,
+            aggregate_type: "sale",
+            event_type: "sale_created",
+            schema_version: 1,
+            payload: {
+                organization_id: ORG,
+                branch_id: BRANCH,
+                sale_number: "SALE-CONTRACT-1",
+                cashier_id: USER,
+                payment_method: "cash",
+                payment_status: "completed",
+                total_amount: 50,
+                items: [{ drug_id: DRUG_ID, quantity: 1 }],
+                batch_changes: [{ batch_id: BATCH_ID, quantity_used: 1 }],
+                ...payload,
+            },
+            dependencies: [],
+            authored_at: "2026-10-25T00:00:00Z",
+            authored_by: USER,
+            branch_id: BRANCH,
+            hash_self: "0".repeat(64),
+            hash_prev: "0".repeat(64),
+        } as unknown as import("@/lib/eventEnvelope").EventEnvelope;
+    }
+
+    beforeEach(async () => {
+        await installRealDb();
+        rawDb().exec("DELETE FROM sales");
+        rawDb().exec("DELETE FROM drug_batches");
+        rawDb().exec("DELETE FROM branch_inventory");
+        insertBatch(rawDb(), {
+            id: BATCH_ID,
+            branchId: BRANCH,
+            drugId: DRUG_ID,
+            remaining: 10,
+        });
+        insertInventory(rawDb(), {
+            id: "inv-sale-contract",
+            branchId: BRANCH,
+            drugId: DRUG_ID,
+            quantity: 10,
+            sellable: 10,
+        });
+    });
+
+    it("adds contract metadata to an existing sale without deducting stock twice", async () => {
+        const { applyEventLocally } = await import("@/lib/localProjectors");
+
+        await applyEventLocally(saleEnvelope({}, "sale-event-1"));
+        await applyEventLocally(
+            saleEnvelope(
+                {
+                    price_contract_id: "contract-1",
+                    contract_name: "Standard Pricing",
+                    contract_type: "standard",
+                    contract_discount_percentage: 10,
+                    contract_resolution: "client",
+                },
+                "sale-event-2",
+            ),
+        );
+
+        const sale = rawDb()
+            .prepare(
+                "SELECT price_contract_id, contract_name, contract_type, contract_resolution FROM sales WHERE id = ?"
+            )
+            .get(SALE_ID) as Record<string, unknown>;
+        expect(sale).toMatchObject({
+            price_contract_id: "contract-1",
+            contract_name: "Standard Pricing",
+            contract_type: "standard",
+            contract_resolution: "client",
+        });
+
+        const batch = rawDb()
+            .prepare("SELECT remaining_quantity FROM drug_batches WHERE id = ?")
+            .get(BATCH_ID) as { remaining_quantity: number };
+        const inventory = rawDb()
+            .prepare(
+                "SELECT quantity FROM branch_inventory WHERE branch_id = ? AND drug_id = ?"
+            )
+            .get(BRANCH, DRUG_ID) as { quantity: number };
+        expect(batch.remaining_quantity).toBe(9);
+        expect(inventory.quantity).toBe(9);
+    });
+});
+
+
+describe("contract lifecycle projectors", () => {
+    beforeEach(async () => {
+        await installRealDb();
+        rawDb().exec("DELETE FROM price_contracts");
+        rawDb().exec("DELETE FROM price_contract_availability");
+    });
+
+    it("inserts a contract when its update event arrives before its create", async () => {
+        const { applyEventLocally } = await import("@/lib/localProjectors");
+
+        await applyEventLocally({
+            event_id: "contract-update-first",
+            org_id: ORG,
+            seq: 1,
+            aggregate_id: "contract-before-create",
+            aggregate_type: "price_contract",
+            event_type: "price_contract_updated",
+            schema_version: 1,
+            payload: {
+                id: "contract-before-create",
+                organization_id: ORG,
+                contract_code: "EARLY",
+                contract_name: "Early contract",
+                contract_type: "standard",
+                discount_type: "percentage",
+                discount_percentage: 7,
+                applies_to_all_branches: true,
+                applicable_branch_ids: [],
+                effective_from: "2026-01-01",
+                requires_verification: false,
+                requires_approval: false,
+                requires_preauthorization: false,
+                status: "active",
+                is_active: true,
+            },
+            dependencies: [],
+            authored_at: "2026-10-25T00:00:00Z",
+            authored_by: USER,
+            branch_id: BRANCH,
+            hash_self: "0".repeat(64),
+            hash_prev: "0".repeat(64),
+        } as never);
+
+        const row = rawDb()
+            .prepare("SELECT contract_name, discount_percentage FROM price_contracts WHERE id = ?")
+            .get("contract-before-create") as Record<string, unknown>;
+        expect(row).toMatchObject({
+            contract_name: "Early contract",
+            discount_percentage: 7,
+        });
+    });
+
+    it("deletes availability and emits a change when a contract is deleted", async () => {
+        const { applyEventLocally } = await import("@/lib/localProjectors");
+        const { appEvents } = await import("@/lib/events");
+        const changed = vi.fn();
+        const off = appEvents.on("price-contracts:changed", changed);
+
+        insertContract({
+            id: "contract-delete",
+            code: "DELETE-ME",
+            name: "Delete me",
+            organizationId: ORG,
+        });
+
+        await applyEventLocally({
+            event_id: "contract-delete-event",
+            org_id: ORG,
+            seq: 2,
+            aggregate_id: "contract-delete",
+            aggregate_type: "price_contract",
+            event_type: "price_contract_deleted",
+            schema_version: 1,
+            payload: { id: "contract-delete", organization_id: ORG },
+            dependencies: [],
+            authored_at: "2026-10-25T00:00:00Z",
+            authored_by: USER,
+            branch_id: BRANCH,
+            hash_self: "0".repeat(64),
+            hash_prev: "0".repeat(64),
+        } as never);
+
+        off();
+        const row = rawDb()
+            .prepare("SELECT is_deleted, is_active FROM price_contracts WHERE id = ?")
+            .get("contract-delete") as Record<string, unknown>;
+        expect(row).toMatchObject({ is_deleted: 1, is_active: 0 });
+        expect(
+            rawDb()
+                .prepare("SELECT COUNT(*) AS n FROM price_contract_availability WHERE contract_id = ?")
+                .get("contract-delete")
+        ).toMatchObject({ n: 0 });
+        expect(changed).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("offline sale envelope", () => {
+    const baseSale = {
+        id: "sale-envelope-1",
+        organization_id: ORG,
+        branch_id: BRANCH,
+        sale_number: "ENV-1",
+        customer_id: null,
+        customer_name: null,
+        cashier_id: USER,
+        payment_method: "cash",
+        payment_status: "completed",
+        total_amount: 100,
+        subtotal: 100,
+        discount_amount: 10,
+        tax_amount: 0,
+        amount_paid: 100,
+        change_amount: 0,
+        prescription_id: null,
+        price_contract_id: "contract-envelope",
+        contract_name: "Standard Pricing",
+        contract_discount_percentage: 10,
+        contract_type: "standard",
+        contract_resolution: "client",
+        status: "completed",
+    };
+
+    beforeEach(async () => {
+        await installRealDb();
+    });
+
+    it("carries every contract snapshot field and the resolution marker", async () => {
+        const { buildSaleCreatedEnvelope } = await import("@/lib/localWrite");
+        const { GENESIS_HASH } = await import("@/lib/eventEnvelope");
+
+        const envelope = await buildSaleCreatedEnvelope(
+            { ...baseSale, items: [] } as never,
+            [],
+            "2026-10-25T00:00:00Z",
+            GENESIS_HASH,
+        );
+
+        expect(envelope.payload).toMatchObject({
+            price_contract_id: "contract-envelope",
+            contract_name: "Standard Pricing",
+            contract_type: "standard",
+            contract_discount_percentage: 10,
+            contract_resolution: "client",
+        });
+    });
+
+    it("marks a contractless sale as missing_offline", async () => {
+        const { buildSaleCreatedEnvelope } = await import("@/lib/localWrite");
+        const { GENESIS_HASH } = await import("@/lib/eventEnvelope");
+
+        const envelope = await buildSaleCreatedEnvelope(
+            {
+                ...baseSale,
+                price_contract_id: null,
+                contract_name: null,
+                contract_discount_percentage: null,
+                contract_type: null,
+                contract_resolution: "missing_offline",
+                items: [],
+            } as never,
+            [],
+            "2026-10-25T00:00:00Z",
+            GENESIS_HASH,
+        );
+
+        expect(envelope.payload).toMatchObject({
+            price_contract_id: null,
+            contract_resolution: "missing_offline",
+        });
     });
 });

@@ -992,6 +992,8 @@ export interface Sale extends TimestampFields, SyncFields {
     price_contract_id: string | null;
     contract_name: string | null;
     contract_discount_percentage: number | null;
+    contract_type?: string | null;
+    contract_resolution?: "client" | "server_default" | "missing_offline" | "invalid_client_snapshot" | null;
     payment_method: PaymentMethod;
     payment_status: PaymentStatus;
     amount_paid: number | null;

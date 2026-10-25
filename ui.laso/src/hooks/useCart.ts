@@ -336,7 +336,8 @@ export interface CartValidationError {
 
 function validateCart(
     state: CartState,
-    totals: CartTotals
+    totals: CartTotals,
+    allowMissingContract = false,
 ): CartValidationError[] {
     const errors: CartValidationError[] = [];
 
@@ -365,7 +366,7 @@ function validateCart(
         }
     }
 
-    if (!state.contract) {
+    if (!state.contract && !allowMissingContract) {
         errors.push({ field: "contract", message: "Select a price contract" });
     }
 
@@ -494,14 +495,18 @@ function validateCart(
 
 // ── Hook ──────────────────────────────────────────────────────────────────────
 
-export function useCart(taxInclusive = false) {
+export function useCart(
+    taxInclusive = false,
+    options: { allowMissingContract?: boolean } = {},
+) {
+    const { allowMissingContract = false } = options;
     const [state, dispatch] = useReducer(cartReducer, INITIAL_STATE);
 
     const totals = useMemo(() => computeTotals(state, taxInclusive), [state, taxInclusive]);
 
     const validationErrors = useMemo(
-        () => validateCart(state, totals),
-        [state, totals]
+        () => validateCart(state, totals, allowMissingContract),
+        [state, totals, allowMissingContract]
     );
 
     const isValid = validationErrors.length === 0;
@@ -512,7 +517,9 @@ export function useCart(taxInclusive = false) {
      */
     const buildSaleCreate = useCallback(
         (branchId: string): SaleCreate => {
-            if (!state.contract) throw new Error("No contract selected");
+            if (!state.contract && !allowMissingContract) {
+                throw new Error("No contract selected");
+            }
 
             const splitDetails =
                 state.paymentMethod === "split" &&
@@ -522,7 +529,7 @@ export function useCart(taxInclusive = false) {
 
             return {
                 branch_id: branchId,
-                price_contract_id: state.contract.id,
+                price_contract_id: state.contract?.id ?? undefined,
                 customer_id: state.customerId ?? undefined,
                 customer_name: state.customerName.trim() || undefined,
                 items: state.items.map((item) => ({
@@ -545,7 +552,7 @@ export function useCart(taxInclusive = false) {
                 notes: state.notes.trim() || undefined,
             } as SaleCreate;
         },
-        [state]
+        [state, allowMissingContract]
     );
 
     return {

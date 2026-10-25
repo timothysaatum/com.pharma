@@ -28,8 +28,16 @@ export interface AvailableContract {
     code: string;
     name: string;
     type: ContractType;
+    organization_id?: string;
+    discount_type?: string;
     discount_percentage: number;
     is_default: boolean;
+    effective_from?: string;
+    effective_to?: string | null;
+    status?: string;
+    is_active?: boolean;
+    applies_to_all_branches?: boolean;
+    applicable_branch_ids?: string[];
     requires_verification: boolean;
     requires_approval: boolean;
     display: string;

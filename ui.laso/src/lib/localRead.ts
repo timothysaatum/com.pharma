@@ -149,6 +149,12 @@ function toSale(row: Record<string, unknown>): Sale {
     price_contract_id: row.price_contract_id === null ? null : String(row.price_contract_id),
     contract_name: row.contract_name === null ? null : String(row.contract_name),
     contract_discount_percentage: row.contract_discount_percentage === null ? null : toNumber(row.contract_discount_percentage),
+    contract_type: row.contract_type === null || row.contract_type === undefined
+        ? null
+        : (String(row.contract_type) as any),
+    contract_resolution: row.contract_resolution === null || row.contract_resolution === undefined
+        ? null
+        : (String(row.contract_resolution) as any),
     payment_method: String(row.payment_method) as PaymentMethod,
     payment_status: String(row.payment_status) as PaymentStatus,
     amount_paid: row.amount_paid === null ? null : toNumber(row.amount_paid),
@@ -195,7 +201,9 @@ function toSaleWithDetails(row: Record<string, unknown>): SaleWithDetails {
     contract_discount_amount: row.discount_amount === null ? 0 : toNumber(row.discount_amount),
     additional_discount_amount: 0,
     total_discount_amount: row.discount_amount === null ? 0 : toNumber(row.discount_amount),
-    contract_type: null,
+    contract_type: row.contract_type === null || row.contract_type === undefined
+        ? null
+        : String(row.contract_type),
     insurance_preauth_number: null,
     split_payment_details: null,
     cashier_name: null,
@@ -884,35 +892,38 @@ export const localRead = {
     return rows.map(toSupplierFromPurchaseOrders);
   },
 
-  async getAvailableContractsForPos(branchId: string, organizationId?: string): Promise<AvailableContract[]> {
+  async getAvailableContractsForPos(
+    branchId: string,
+    organizationId?: string,
+    userId?: string,
+  ): Promise<AvailableContract[]> {
     const db = await getDb();
     const today = new Date().toISOString().slice(0, 10);
-    const values: unknown[] = [today, `%"${branchId}"%`];
-    let query = `SELECT * FROM price_contracts
-       WHERE is_deleted = 0
-         AND is_active = 1
-         AND status = 'active'
-         AND effective_from <= $1
-         AND (effective_to IS NULL OR effective_to >= $1)
-         AND (
-           applies_to_all_branches = 1
-           OR applicable_branch_ids LIKE $2
-         )`;
-
-    // NEVER offer another organization's contract.
-    //
-    // This used to be conditional on `organizationId` being provided, so a
-    // caller without a loaded user got every contract on the device with no
-    // tenant filter at all. A POS must never be able to price a sale against
-    // another org's contract, so the filter is now mandatory: with no
-    // organizationId the query returns nothing rather than everything.
-    if (!organizationId) {
+    if (!organizationId || !userId) {
       return [];
     }
-    values.push(organizationId);
-    query += ` AND organization_id = $${values.length}`;
-
-    query += ` ORDER BY is_default_contract DESC, contract_name ASC`;
+    const values: unknown[] = [organizationId, userId, branchId, today];
+    const query = `SELECT pc.* FROM price_contracts pc
+       INNER JOIN price_contract_availability a
+         ON a.contract_id = pc.id
+        AND a.organization_id = $1
+        AND a.user_id = $2
+        AND a.branch_id = $3
+       WHERE pc.is_deleted = 0
+         AND pc.is_active = 1
+         AND pc.status = 'active'
+         AND pc.effective_from <= $4
+         AND (pc.effective_to IS NULL OR pc.effective_to >= $4)
+         AND pc.contract_type <> 'insurance'
+         AND pc.insurance_provider_id IS NULL
+         AND pc.requires_verification = 0
+         AND pc.requires_approval = 0
+         AND pc.requires_preauthorization = 0
+         AND (
+           pc.applies_to_all_branches = 1
+           OR pc.applicable_branch_ids LIKE '%' || $3 || '%'
+         )
+       ORDER BY pc.is_default_contract DESC, pc.contract_name ASC`;
 
     const rows = await db.select<PriceContract[]>(query, values);
 
@@ -921,8 +932,16 @@ export const localRead = {
       code: row.contract_code,
       name: row.contract_name,
       type: row.contract_type as any,
+      organization_id: row.organization_id,
+      discount_type: row.discount_type,
       discount_percentage: row.discount_percentage,
       is_default: toBoolean(row.is_default_contract),
+      effective_from: row.effective_from,
+      effective_to: row.effective_to,
+      status: row.status,
+      is_active: toBoolean(row.is_active),
+      applies_to_all_branches: toBoolean(row.applies_to_all_branches),
+      applicable_branch_ids: parseJsonArray<string>(row.applicable_branch_ids),
       requires_verification: toBoolean(row.requires_verification),
       requires_approval: toBoolean(row.requires_approval),
       display: row.contract_name,

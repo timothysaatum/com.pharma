@@ -6,6 +6,7 @@ import pytest
 from datetime import date, datetime, timezone, timedelta
 from decimal import Decimal
 import uuid
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.sales.sales_model import Sale, SaleItem
@@ -326,6 +327,115 @@ class TestPriceContractsIntegration:
         response = await SalesService.process_sale(db, sale_data, user)
         assert response.sale.total_amount == Decimal("100.00")
         assert response.sale.price_contract_id == default_contract.id
+
+    async def test_explicit_contract_event_payload_carries_snapshot(
+        self, db: AsyncSession, setup_test_data
+    ):
+        org, branch, user, drugs, customer = setup_test_data
+        contract = await self.setup_sale_data(
+            db, setup_test_data, "corporate", Decimal("15.00")
+        )
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            price_contract_id=contract.id,
+            customer_id=customer.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=1)],
+            payment_method="credit",
+        )
+        response = await SalesService.process_sale(db, sale_data, user)
+
+        row = (
+            await db.execute(
+                text(
+                    "SELECT payload FROM event_log"
+                    " WHERE org_id = :org_id"
+                    "   AND aggregate_id = :sale_id"
+                    "   AND event_type = 'sale_created'"
+                ),
+                {
+                    "org_id": str(org.id),
+                    "sale_id": str(response.sale.id),
+                },
+            )
+        ).fetchone()
+        assert row is not None
+        payload = row.payload
+        assert payload["price_contract_id"] == str(contract.id)
+        assert payload["contract_name"] == contract.contract_name
+        assert payload["contract_type"] == "corporate"
+        assert payload["contract_discount_percentage"] == 15.0
+        assert payload["contract_resolution"] == "client"
+
+    async def test_default_contract_event_payload_is_marked_server_default(
+        self, db: AsyncSession, setup_test_data
+    ):
+        org, branch, user, drugs, customer = setup_test_data
+        default_contract = PriceContract(
+            id=uuid.uuid4(),
+            organization_id=org.id,
+            contract_code="STANDARD",
+            contract_name="Standard Pricing",
+            contract_type="standard",
+            is_default_contract=True,
+            discount_percentage=0,
+            applies_to_all_branches=True,
+            effective_from=date.today() - timedelta(days=1),
+            status="active",
+            is_active=True,
+            created_by=user.id,
+        )
+        db.add(default_contract)
+        db.add(
+            DrugBatch(
+                id=uuid.uuid4(),
+                drug_id=drugs[0].id,
+                branch_id=branch.id,
+                batch_number="BATCH-EVENT-DEFAULT",
+                expiry_date=date.today() + timedelta(days=365),
+                quantity=100,
+                remaining_quantity=100,
+            )
+        )
+        db.add(
+            BranchInventory(
+                id=uuid.uuid4(),
+                branch_id=branch.id,
+                drug_id=drugs[0].id,
+                quantity=100,
+                reserved_quantity=0,
+                selling_price=Decimal("100.00"),
+            )
+        )
+        await db.commit()
+
+        sale_data = SaleCreate(
+            branch_id=branch.id,
+            items=[SaleItemCreate(drug_id=drugs[0].id, quantity=1)],
+            payment_method="cash",
+            amount_paid=Decimal("100.00"),
+        )
+        response = await SalesService.process_sale(db, sale_data, user)
+
+        row = (
+            await db.execute(
+                text(
+                    "SELECT payload FROM event_log"
+                    " WHERE org_id = :org_id"
+                    "   AND aggregate_id = :sale_id"
+                    "   AND event_type = 'sale_created'"
+                ),
+                {
+                    "org_id": str(org.id),
+                    "sale_id": str(response.sale.id),
+                },
+            )
+        ).fetchone()
+        assert row is not None
+        payload = row.payload
+        assert payload["price_contract_id"] == str(default_contract.id)
+        assert payload["contract_name"] == "Standard Pricing"
+        assert payload["contract_resolution"] == "server_default"
 
     async def test_sale_without_contract_and_without_org_default_gives_actionable_error(
         self, db: AsyncSession, setup_test_data

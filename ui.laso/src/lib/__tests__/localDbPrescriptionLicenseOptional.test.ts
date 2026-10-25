@@ -60,9 +60,10 @@ describe("MIGRATION v36", () => {
     });
 
     it("runs the chain up to the current head", async () => {
-        // Bumped by migration v37 (cross-org customer cleanup). This asserts the
-        // CHAIN reached its head, not that it stopped at a particular number.
-        expect(await userVersion()).toBe(37);
+        // Bumped by migration v38 (price-contract availability). This asserts
+        // the chain reached its head, not that it stopped at a particular
+        // number; update this when the schema head moves.
+        expect(await userVersion()).toBe(38);
     });
 
     it("leaves prescriber_license nullable", async () => {

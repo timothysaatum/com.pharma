@@ -46,6 +46,8 @@ import { useSyncStatus } from "@/hooks/useSyncStatus";
 import { useCart } from "@/hooks/useCart";
 import { useOrganization } from "@/hooks/useOrganization";
 import { localRead } from "@/lib/localRead";
+import { getDb } from "@/lib/localDb";
+import { replacePriceContractAvailability } from "@/lib/priceContractStore";
 import { DrugSearchPanel } from "@/components/pos/DrugSearchPanel";
 import { CartPanel } from "@/components/pos/CartPanel";
 import { SaleSuccessModal } from "@/components/pos/SaleSuccessModal";
@@ -101,8 +103,18 @@ export default function POSPage() {
     const taxInclusive = Boolean(settings.tax_inclusive);
     const footerMessage = (settings.receipt_footer as string) ?? "";
 
+    // ── Contract state ─────────────────────────────────────────────────────────
+    const [contracts, setContracts] = useState<AvailableContract[]>([]);
+    const [contractsLoading, setContractsLoading] = useState(true);
+    const [contractsIssue, setContractsIssue] = useState<{
+        kind: 'offline' | 'error' | 'empty' | null;
+        message: string | null;
+    }>({ kind: null, message: null });
+    const allowMissingContract =
+        contractsIssue.kind === 'offline' && contracts.length === 0;
+
     // ── Cart state ─────────────────────────────────────────────────────────────
-    const cart = useCart(taxInclusive);
+    const cart = useCart(taxInclusive, { allowMissingContract });
 
     // ── Stock validation ─────────────────────────────────────────────────────
     const [stockQuantities, setStockQuantities] = useState<Record<string, number>>({});
@@ -160,31 +172,18 @@ export default function POSPage() {
     }, [activeBranchId, cart.state.items, refreshStock]);
 
     // ── Contracts ──────────────────────────────────────────────────────────────
-    const [contracts, setContracts] = useState<AvailableContract[]>([]);
-    const [contractsLoading, setContractsLoading] = useState(true);
-    /**
-     * Why the contract list is what it is, for display.
-     *
-     * 'offline'      — deliberately served from the local cache; not an error.
-     * 'error'        — the online load FAILED for a reason that is not being
-     *                  offline (401/403/404/5xx/timeout). Previously this was
-     *                  swallowed into a silent empty list, so the cashier saw
-     *                  "Select a price contract" and a disabled sale button with
-     *                  no idea the server was unreachable or rejecting them.
-     * 'empty'        — the server answered with no contracts for this branch.
-     */
-    const [contractsIssue, setContractsIssue] = useState<{
-        kind: 'offline' | 'error' | 'empty' | null;
-        message: string | null;
-    }>({ kind: null, message: null });
-
     const loadContracts = useCallback(async () => {
-        if (!activeBranchId) return;
+        if (!activeBranchId || !user?.id || !user.organization_id) {
+            setContracts([]);
+            setContractsLoading(false);
+            return;
+        }
         setContractsLoading(true);
         const loadLocalContracts = () =>
             localRead.getAvailableContractsForPos(
                 activeBranchId,
-                user?.organization_id,
+                user.organization_id,
+                user.id,
             );
         try {
             if (isOffline || !navigator.onLine || isBackendKnownUnreachable()) {
@@ -196,25 +195,28 @@ export default function POSPage() {
                         : {
                               kind: 'offline',
                               message:
-                                  'Offline, and no price contract is stored on this device for this branch.',
+                                  'Offline, and no usable price contract is stored on this device for this branch. This sale will be recorded without a contract.',
                           }
                 );
                 return;
             }
 
             const data = await contractsApi.getAvailableForPos(activeBranchId);
-            if (data.length > 0) {
-                setContracts(data);
-                setContractsIssue({ kind: null, message: null });
-                return;
+            try {
+                const db = await getDb();
+                await replacePriceContractAvailability(db, {
+                    scope: 'branch',
+                    organizationId: user.organization_id,
+                    userId: user.id,
+                    branchId: activeBranchId,
+                    branches: [{ branchId: activeBranchId, contracts: data }],
+                });
+            } catch (cacheError) {
+                console.warn('[POS] contract cache update failed:', cacheError);
             }
-
-            // The server answered, but with nothing for this branch. Fall back
-            // to the cache so a stocked-but-unsynced contract is still usable.
-            const fallback = await loadLocalContracts();
-            setContracts(fallback);
+            setContracts(data);
             setContractsIssue(
-                fallback.length > 0
+                data.length > 0
                     ? { kind: null, message: null }
                     : {
                           kind: 'empty',
@@ -223,28 +225,24 @@ export default function POSPage() {
                       }
             );
         } catch (err) {
-            // A real failure, not an offline state. Say so instead of handing
-            // back a silent empty list that reads as "pick a contract".
-            const local = await loadLocalContracts().catch(() => [] as AvailableContract[]);
-            setContracts(local);
+            setContracts([]);
             setContractsIssue({
-                kind: local.length > 0 ? null : 'error',
-                message:
-                    local.length > 0
-                        ? null
-                        : `Could not load price contracts from the server (${
-                              (err as { response?: { status?: number } })?.response?.status ??
-                              'network error'
-                          }). The sale button stays disabled until a contract is available.`,
+                kind: 'error',
+                message: `Could not load price contracts from the server (${
+                    (err as { response?: { status?: number } })?.response?.status ??
+                    'network error'
+                }). The sale button stays disabled until a contract is available.`,
             });
         } finally {
             setContractsLoading(false);
         }
-    }, [activeBranchId, isOffline, user?.organization_id]);
+    }, [activeBranchId, isOffline, user?.id, user?.organization_id]);
 
     useEffect(() => {
         loadContracts();
     }, [loadContracts]);
+
+    useAppEvent("price-contracts:changed", loadContracts);
 
     // ── Checkout ───────────────────────────────────────────────────────────────
     const [isSubmitting, setIsSubmitting] = useState(false);
@@ -412,10 +410,14 @@ export default function POSPage() {
                 total_discount_amount: sanitizeNum(totals.discountAmount),
                 tax_amount: sanitizeNum(totals.taxAmount),
                 total_amount: sanitizeNum(totals.total),
-                price_contract_id: payload.price_contract_id,
-                contract_name: cart.state.contract?.name ?? null,
+                price_contract_id: payload.price_contract_id ?? null,
+                contract_name: cart.state.contract?.name ?? "Unresolved (offline)",
                 contract_type: cart.state.contract?.type ?? null,
-                contract_discount_percentage: cart.state.contract?.discount_percentage ?? 0,
+                contract_discount_percentage:
+                    cart.state.contract?.discount_percentage ?? null,
+                contract_resolution: cart.state.contract
+                    ? ("client" as const)
+                    : ("missing_offline" as const),
                 payment_method: payload.payment_method,
                 payment_status: "completed" as const,
                 amount_paid: payload.amount_paid ?? totals.total,
@@ -541,7 +543,7 @@ export default function POSPage() {
                 new_loyalty_tier: null,
                 low_stock_alerts_created: 0,
                 expiry_alerts_created: 0,
-                contract_applied: cart.state.contract?.name ?? "Standard",
+                contract_applied: cart.state.contract?.name ?? "Unresolved (offline)",
                 contract_discount_given: totals.discountAmount,
                 estimated_savings: totals.discountAmount,
                 success: true,
@@ -552,12 +554,15 @@ export default function POSPage() {
 
             try {
             let result: ProcessSaleResponse;
+            const useOfflinePath =
+                shouldUseOfflineSalePath({
+                    browserOnline: navigator.onLine,
+                    appOffline: isOffline,
+                    backendReachable: backendWasReachable,
+                })
+                || !payload.price_contract_id;
 
-            if (shouldUseOfflineSalePath({
-                browserOnline: navigator.onLine,
-                appOffline: isOffline,
-                backendReachable: backendWasReachable,
-            })) {
+            if (useOfflinePath) {
                 // ── Offline path ─────────────────────────────────────────────
                 if (requiresOnlineContractVerification) {
                     throw new Error("This contract requires online verification before checkout.");
@@ -738,6 +743,7 @@ export default function POSPage() {
                         onRemoveItem={cart.removeItem}
                         onSetPrescriptionVerified={cart.setPrescriptionVerified}
                         onSetContract={cart.setContract}
+                        allowMissingContract={allowMissingContract}
                         onSetCustomerId={cart.setCustomerId}
                         onSetCustomerName={cart.setCustomerName}
                         onSetPaymentMethod={cart.setPaymentMethod}

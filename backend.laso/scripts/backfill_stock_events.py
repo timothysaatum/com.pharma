@@ -111,7 +111,7 @@ def connect(read_only: bool):
     m = re.match(
         r"postgresql(?:\+\w+)?://"
         r"(?:(?P<user>[^:@/]+)(?::(?P<pw>[^@]*))?@)?"
-        r"(?P<host>[^:/@]+)(?::(?P<port>\d+))?"
+        r"(?P<host>[^:/@]*)(?::(?P<port>\d+))?"
         r"/(?P<db>[^?]+)",
         url,
     )

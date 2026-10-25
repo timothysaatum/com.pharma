@@ -30,6 +30,8 @@ import {
     isOfflineError,
 } from "@/api/client";
 import { RetryBackoff } from "@/lib/syncRetryBackoff";
+import { hydratePriceContractAvailability } from "@/lib/contractCache";
+import { appEvents } from "@/lib/events";
 import type { SyncStatus } from "@/types";
 
 export type { SyncStatus } from "@/types";
@@ -82,6 +84,10 @@ export class SyncEngine {
     })();
     private _isSyncing = false;
     private networkRetryAttempt = 0;
+    private _priceContractUserId: string | null = null;
+    private _priceContractAssignedBranches: string[] = [];
+    private _priceContractRefreshTimeout: ReturnType<typeof setTimeout> | null = null;
+    private _unsubscribePriceContracts: (() => void) | null = null;
     private _dbInitError: string | null = null;
     private _pulledSeq = 0;
     private _serverHeadSeq: number | null = null;
@@ -105,6 +111,16 @@ export class SyncEngine {
     };
 
     private readonly _onOnline = () => this.onOnline();
+    private readonly _onPriceContractsChanged = () => {
+        if (!this._priceContractUserId) return;
+        if (this._priceContractRefreshTimeout) {
+            clearTimeout(this._priceContractRefreshTimeout);
+        }
+        this._priceContractRefreshTimeout = setTimeout(() => {
+            this._priceContractRefreshTimeout = null;
+            this.refreshPriceContracts(true);
+        }, 2_000);
+    };
     private readonly _onOffline = () => this.onOffline();
     private readonly _onBackendConnectivityChange = (event: Event) => {
         const detail = (event as CustomEvent<{ reachable?: boolean }>).detail;
@@ -127,7 +143,8 @@ export class SyncEngine {
     start(
         branchId: string,
         organizationIdOrIntervalMs?: string | number | null,
-        intervalMs = 30_000
+        intervalMs = 30_000,
+        priceContractContext?: { userId: string; assignedBranches?: string[] | null },
     ): void {
         const organizationId =
             typeof organizationIdOrIntervalMs === "number"
@@ -148,6 +165,14 @@ export class SyncEngine {
         this.stop();
         this.branchId = branchId;
         this.organizationId = organizationId;
+        this._priceContractUserId = priceContractContext?.userId ?? null;
+        this._priceContractAssignedBranches = [
+            ...(priceContractContext?.assignedBranches ?? []),
+        ];
+        this._unsubscribePriceContracts = appEvents.on(
+            "price-contracts:changed",
+            this._onPriceContractsChanged,
+        );
 
         // Immediately restore last known sync timestamp from localStorage cache
         try {
@@ -177,6 +202,7 @@ export class SyncEngine {
 
         if (navigator.onLine && isBackendReachable()) {
             this.sync();
+            this.refreshPriceContracts();
         } else {
             this.setStatus("offline");
         }
@@ -202,6 +228,12 @@ export class SyncEngine {
             clearTimeout(this.retryTimeoutId);
             this.retryTimeoutId = null;
         }
+        if (this._priceContractRefreshTimeout) {
+            clearTimeout(this._priceContractRefreshTimeout);
+            this._priceContractRefreshTimeout = null;
+        }
+        this._unsubscribePriceContracts?.();
+        this._unsubscribePriceContracts = null;
         window.removeEventListener("online", this._onOnline);
         window.removeEventListener("offline", this._onOffline);
         window.removeEventListener(
@@ -210,6 +242,8 @@ export class SyncEngine {
         );
         this.branchId = null;
         this.organizationId = null;
+        this._priceContractUserId = null;
+        this._priceContractAssignedBranches = [];
         this._status = "idle";
         // Health is per-branch: the cursor, head, and failure counts all belong
         // to the branch we just left, so carrying them over would show the next
@@ -332,6 +366,7 @@ export class SyncEngine {
 
             const pending = await getPendingOutboxCount();
             this.notify(pending, nowIso);
+            this.refreshPriceContracts();
 
             this.setStatus(eventPushResult?.hadFailures ? "error" : "idle");
         } catch (err) {
@@ -606,10 +641,29 @@ export class SyncEngine {
         });
     }
 
+    private refreshPriceContracts(force = false): void {
+        if (
+            !this._priceContractUserId
+            || !this.organizationId
+            || !navigator.onLine
+            || !isBackendReachable()
+        ) {
+            return;
+        }
+        void hydratePriceContractAvailability({
+            userId: this._priceContractUserId,
+            organizationId: this.organizationId,
+            assignedBranches: this._priceContractAssignedBranches,
+            activeBranchId: this.branchId,
+            force,
+        });
+    }
+
     private onOnline(): void {
         console.info("[SyncEngine] Back online — triggering sync");
         this.networkRetryAttempt = 0;
         this.sync();
+        this.refreshPriceContracts();
     }
 
     private onOffline(): void {

@@ -1134,8 +1134,16 @@ class PriceContractService:
             "code":                 contract.contract_code,
             "name":                 contract.contract_name,
             "type":                 contract.contract_type,
+            "organization_id":      str(contract.organization_id),
+            "discount_type":        contract.discount_type,
             "discount_percentage":  float(contract.discount_percentage),
             "is_default":           contract.is_default_contract,
+            "effective_from":       contract.effective_from.isoformat(),
+            "effective_to":         contract.effective_to.isoformat() if contract.effective_to else None,
+            "status":               contract.status,
+            "is_active":            contract.is_active,
+            "applies_to_all_branches": contract.applies_to_all_branches,
+            "applicable_branch_ids": [str(branch_id) for branch_id in (contract.applicable_branch_ids or [])],
             "requires_verification": contract.requires_verification,
             "requires_approval":     contract.requires_approval,
             "requires_preauthorization": contract.requires_preauthorization,
@@ -1166,4 +1174,85 @@ class PriceContractService:
                 if contract.requires_preauthorization
                 else None
             ),
+        }
+
+    @staticmethod
+    def format_contract_event_payload(contract: PriceContract) -> Dict:
+        """Full snapshot carried by price_contract_* sync events."""
+        return {
+            "id": str(contract.id),
+            "organization_id": str(contract.organization_id),
+            "contract_code": contract.contract_code,
+            "contract_name": contract.contract_name,
+            "description": contract.description,
+            "contract_type": contract.contract_type,
+            "is_default_contract": contract.is_default_contract,
+            "discount_type": contract.discount_type,
+            "discount_percentage": float(contract.discount_percentage),
+            "applies_to_prescription_only": contract.applies_to_prescription_only,
+            "applies_to_otc": contract.applies_to_otc,
+            "excluded_drug_categories": contract.excluded_drug_categories or [],
+            "excluded_drug_ids": [
+                str(drug_id) for drug_id in (contract.excluded_drug_ids or [])
+            ],
+            "minimum_price_override": (
+                float(contract.minimum_price_override)
+                if contract.minimum_price_override is not None
+                else None
+            ),
+            "maximum_discount_amount": (
+                float(contract.maximum_discount_amount)
+                if contract.maximum_discount_amount is not None
+                else None
+            ),
+            "minimum_purchase_amount": (
+                float(contract.minimum_purchase_amount)
+                if contract.minimum_purchase_amount is not None
+                else None
+            ),
+            "maximum_purchase_amount": (
+                float(contract.maximum_purchase_amount)
+                if contract.maximum_purchase_amount is not None
+                else None
+            ),
+            "applies_to_all_branches": contract.applies_to_all_branches,
+            "applicable_branch_ids": [
+                str(branch_id) for branch_id in (contract.applicable_branch_ids or [])
+            ],
+            "effective_from": contract.effective_from.isoformat(),
+            "effective_to": (
+                contract.effective_to.isoformat() if contract.effective_to else None
+            ),
+            "requires_verification": contract.requires_verification,
+            "requires_approval": contract.requires_approval,
+            "daily_usage_limit": contract.daily_usage_limit,
+            "per_customer_usage_limit": contract.per_customer_usage_limit,
+            "allowed_user_roles": [
+                str(role_id) for role_id in (contract.allowed_user_roles or [])
+            ],
+            "insurance_provider_id": (
+                str(contract.insurance_provider_id)
+                if contract.insurance_provider_id
+                else None
+            ),
+            "copay_amount": (
+                float(contract.copay_amount)
+                if contract.copay_amount is not None
+                else None
+            ),
+            "copay_percentage": (
+                float(contract.copay_percentage)
+                if contract.copay_percentage is not None
+                else None
+            ),
+            "requires_preauthorization": contract.requires_preauthorization,
+            "status": contract.status,
+            "is_active": contract.is_active,
+            "created_by": str(contract.created_by) if contract.created_by else None,
+            "approved_by": str(contract.approved_by) if contract.approved_by else None,
+            "approved_at": (
+                contract.approved_at.isoformat() if contract.approved_at else None
+            ),
+            "created_at": contract.created_at.isoformat(),
+            "updated_at": contract.updated_at.isoformat(),
         }

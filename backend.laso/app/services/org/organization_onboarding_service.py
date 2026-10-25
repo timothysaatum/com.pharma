@@ -21,6 +21,9 @@ from app.models.pricing.pricing_model import PriceContract
 from app.models.user.user_model import User, Role, UserRole, Permission
 from app.models.system_md.sys_models import AuditLog
 from app.schemas.branch_schemas import BranchCreate
+from app.schemas.event_envelope import AggregateType
+from app.services.contracts.price_contract_service import PriceContractService
+from app.services.sync.eventlog.server_emitter import ServerEventEmitter
 from app.utils.iso_dates import to_iso
 from app.core.security import SecurityUtils
 from datetime import date
@@ -177,7 +180,9 @@ class OrganizationOnboardingService:
             # could be processed until an admin manually created a
             # contract, live-discovered during deployment orchestration:
             # see docs/reviews/2026-08-05-live-deployment-orchestration-report.md.
-            await self._create_default_price_contract(organization.id, admin_user.id)
+            default_contract = await self._create_default_price_contract(
+                organization.id, admin_user.id
+            )
 
             # Initialize organization settings
             await self._initialize_organization_settings(organization)
@@ -205,6 +210,25 @@ class OrganizationOnboardingService:
             
             # Commit transaction
             await self.db.commit()
+            try:
+                await ServerEventEmitter.emit(
+                    db=self.db,
+                    org_id=organization.id,
+                    event_type="price_contract_created",
+                    aggregate_type=AggregateType.PRICE_CONTRACT,
+                    aggregate_id=default_contract.id,
+                    payload=PriceContractService.format_contract_event_payload(
+                        default_contract
+                    ),
+                    authored_by=admin_user.id,
+                )
+                await self.db.commit()
+            except Exception:
+                logger.exception(
+                    "Failed to emit default price contract for org %s",
+                    organization.id,
+                )
+                await self.db.rollback()
             await self.db.refresh(organization)
             # Re-fetch admin_user with roles eagerly loaded for serialization
             result = await self.db.execute(

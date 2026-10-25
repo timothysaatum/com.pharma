@@ -348,6 +348,7 @@ interface CartPanelProps {
      * contract". `kind: null` means there is nothing to report.
      */
     contractsIssue?: { kind: 'offline' | 'error' | 'empty' | null; message: string | null } | null;
+    allowMissingContract?: boolean;
     onRetryContracts?: () => void;
     customerName: string;
     customerId: string | null;
@@ -436,7 +437,7 @@ export function commitDraft(
 
 export function CartPanel({
     items, contract, contracts, contractsLoading,
-    contractsIssue, onRetryContracts,
+    contractsIssue, allowMissingContract = false, onRetryContracts,
     customerName, customerId, paymentMethod, amountPaid,
     prescriptionId, insuranceClaimNumber, insurancePreAuthNumber,
     insuranceVerified, notes, totals, validationErrors, checkoutError,
@@ -522,7 +523,10 @@ export function CartPanel({
      * error band stays, and Retry re-runs this once the list arrives.
      */
     useEffect(() => {
-        if (contracts.length === 0) return;
+        if (contracts.length === 0) {
+            if (contract) onSetContract(null);
+            return;
+        }
         // Compare by id, not by object identity: a reload hands back new objects
         // for the same contracts, and that must not read as "selection changed".
         const stillOffered =
@@ -931,7 +935,11 @@ export function CartPanel({
                                                   guarantees a value otherwise.
                                                 */}
                                                 {contracts.length === 0 && (
-                                                    <option value="">— Select contract —</option>
+                                                    <option value="">
+                                                        {allowMissingContract
+                                                            ? "No contract (offline sale)"
+                                                            : "— Select contract —"}
+                                                    </option>
                                                 )}
                                                 {contracts.map((c) => (
                                                     <option key={c.id} value={c.id}>{c.display}</option>

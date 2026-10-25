@@ -26,6 +26,7 @@ from app.schemas.event_envelope import (
     EventStatus,
     compute_hash_self,
 )
+from app.models.pricing.pricing_model import PriceContract
 from app.services.sync.eventlog import EventRouter
 
 # Registers CustomerProjector AND SaleProjector against the registry.
@@ -198,6 +199,11 @@ def _make_sale_created_envelope(
     payment_method: str = "cash",
     status: str = "completed",
     authored_at: datetime | None = None,
+    price_contract_id: uuid.UUID | None = None,
+    contract_resolution: str | None = None,
+    contract_name: str | None = None,
+    contract_type: str | None = None,
+    contract_discount_percentage: float | None = None,
 ) -> EventEnvelope:
     sid = sale_id or uuid.uuid4()
     item_id = uuid.uuid4()
@@ -224,6 +230,13 @@ def _make_sale_created_envelope(
             "total_amount": str(total),
             "amount_paid": str(total),
             "change_amount": "0.00",
+            "price_contract_id": (
+                str(price_contract_id) if price_contract_id else None
+            ),
+            "contract_resolution": contract_resolution,
+            "contract_name": contract_name,
+            "contract_type": contract_type,
+            "contract_discount_percentage": contract_discount_percentage,
             "items": [
                 {
                     "item_id": str(item_id),
@@ -293,6 +306,43 @@ def _make_sale_voided_envelope(
     )
     envelope.hash_self = compute_hash_self(envelope, hash_prev)
     return envelope
+
+
+async def _insert_contract(
+    db: AsyncSession,
+    *,
+    org_id: uuid.UUID,
+    user_id: uuid.UUID,
+    contract_name: str = "Standard Pricing",
+    contract_type: str = "standard",
+    discount_percentage: float = 15.0,
+    requires_verification: bool = False,
+    is_deleted: bool = False,
+    applies_to_all_branches: bool = True,
+    applicable_branch_ids: list[uuid.UUID] | None = None,
+    effective_from: date | None = None,
+    effective_to: date | None = None,
+) -> PriceContract:
+    contract = PriceContract(
+        id=uuid.uuid4(),
+        organization_id=org_id,
+        contract_code=f"TEST-{uuid.uuid4().hex[:8].upper()}",
+        contract_name=contract_name,
+        contract_type=contract_type,
+        discount_percentage=discount_percentage,
+        applies_to_all_branches=applies_to_all_branches,
+        applicable_branch_ids=applicable_branch_ids or [],
+        effective_from=effective_from or (date.today() - timedelta(days=1)),
+        effective_to=effective_to,
+        requires_verification=requires_verification,
+        status="active",
+        is_active=True,
+        is_deleted=is_deleted,
+        created_by=user_id,
+    )
+    db.add(contract)
+    await db.commit()
+    return contract
 
 
 # ── tests ─────────────────────────────────────────────────────────────────────
@@ -795,3 +845,327 @@ class TestSaleSyncProjector:
 
         assert results[0].status == EventStatus.REJECTED_PERMANENT
         assert "org_scope" in (results[0].error_code or "")
+
+    async def test_sale_without_contract_records_missing_offline(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+
+        row = (
+            await db.execute(
+                text(
+                    "SELECT price_contract_id, contract_resolution"
+                    " FROM sales WHERE id = :id"
+                ),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row.price_contract_id is None
+        assert row.contract_resolution == "missing_offline"
+
+    async def test_valid_client_contract_is_backfilled_and_recorded(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(
+            db,
+            org_id=org.id,
+            user_id=user.id,
+            contract_name="Standard Pricing",
+            contract_type="standard",
+            discount_percentage=15.0,
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=contract.id,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+
+        row = (
+            await db.execute(
+                text(
+                    "SELECT price_contract_id, contract_name, contract_type,"
+                    " contract_discount_percentage, contract_resolution"
+                    " FROM sales WHERE id = :id"
+                ),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row is not None
+        assert str(row.price_contract_id) == str(contract.id)
+        assert row.contract_name == "Standard Pricing"
+        assert row.contract_type == "standard"
+        assert float(row.contract_discount_percentage) == 15.0
+        assert row.contract_resolution == "client"
+
+    async def test_branch_mismatch_is_recorded_but_not_repriced(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(
+            db,
+            org_id=org.id,
+            user_id=user.id,
+            applies_to_all_branches=False,
+            applicable_branch_ids=[uuid.uuid4()],
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            quantity=5,
+            unit_price="50.00",
+            price_contract_id=contract.id,
+            contract_resolution="client",
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+        row = (
+            await db.execute(
+                text(
+                    "SELECT contract_resolution, total_amount"
+                    " FROM sales WHERE id = :id"
+                ),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row.contract_resolution == "invalid_client_snapshot"
+        assert float(row.total_amount) == 250.0
+
+    async def test_expired_contract_is_recorded_but_not_repriced(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(
+            db,
+            org_id=org.id,
+            user_id=user.id,
+            effective_from=date.today() - timedelta(days=10),
+            effective_to=date.today() - timedelta(days=1),
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            quantity=5,
+            unit_price="50.00",
+            price_contract_id=contract.id,
+            contract_resolution="client",
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+        row = (
+            await db.execute(
+                text(
+                    "SELECT contract_resolution, total_amount"
+                    " FROM sales WHERE id = :id"
+                ),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row.contract_resolution == "invalid_client_snapshot"
+        assert float(row.total_amount) == 250.0
+
+    async def test_client_marker_without_contract_is_rejected(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=None,
+            contract_resolution="client",
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+
+        assert results[0].status == EventStatus.REJECTED_PERMANENT
+        assert results[0].error_code == "contract_resolution_mismatch"
+
+    async def test_policy_violating_client_contract_is_recorded_but_not_repriced(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(
+            db,
+            org_id=org.id,
+            user_id=user.id,
+            requires_verification=True,
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=contract.id,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+
+        row = (
+            await db.execute(
+                text(
+                    "SELECT contract_resolution, total_amount"
+                    " FROM sales WHERE id = :id"
+                ),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row.contract_resolution == "invalid_client_snapshot"
+        assert float(row.total_amount) == 250.0
+
+    async def test_soft_deleted_contract_is_accepted(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(
+            db,
+            org_id=org.id,
+            user_id=user.id,
+            is_deleted=True,
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=contract.id,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.ACCEPTED, results[0]
+
+        row = (
+            await db.execute(
+                text("SELECT contract_resolution FROM sales WHERE id = :id"),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).fetchone()
+        assert row is not None
+        assert row.contract_resolution == "client"
+
+    async def test_contract_from_another_org_is_rejected(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        other_org_id = uuid.uuid4()
+        await db.execute(
+            text(
+                "INSERT INTO organizations (id, name, type, settings, is_active,"
+                " subscription_tier, sync_version, sync_status)"
+                " VALUES (CAST(:id AS UUID), :name, 'pharmacy', '{}'::jsonb, true,"
+                " 'basic', 1, 'synced')"
+            ),
+            {"id": str(other_org_id), "name": "Other Pharmacy"},
+        )
+        await db.commit()
+        contract = await _insert_contract(
+            db,
+            org_id=other_org_id,
+            user_id=user.id,
+        )
+
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=contract.id,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.REJECTED_PERMANENT
+        assert "contract" in (results[0].error_code or "")
+
+        sale_count = (
+            await db.execute(
+                text("SELECT COUNT(*) FROM sales WHERE id = :id"),
+                {"id": str(envelope.aggregate_id)},
+            )
+        ).scalar()
+        assert sale_count == 0
+
+    async def test_missing_offline_marker_cannot_carry_a_contract(
+        self, db: AsyncSession, sale_test_data, event_sync_tables
+    ):
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        contract = await _insert_contract(db, org_id=org.id, user_id=user.id)
+        envelope = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            price_contract_id=contract.id,
+            contract_resolution="missing_offline",
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [envelope])
+        await db.commit()
+        assert results[0].status == EventStatus.REJECTED_PERMANENT
+        assert results[0].error_code == "contract_resolution_mismatch"

@@ -130,6 +130,12 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
         nullable=True,
         comment="Snapshot of contract type (insurance, corporate, staff, etc.)"
     )
+
+    contract_resolution: Mapped[Optional[str]] = mapped_column(
+        String(32),
+        nullable=True,
+        comment="client, server_default, missing_offline, invalid_client_snapshot"
+    )
     
     # ==================== PAYMENT DETAILS ====================
     
@@ -369,6 +375,11 @@ class Sale(Base, TimestampMixin, SyncTrackingMixin):
         CheckConstraint("discount_amount <= subtotal", name='check_discount_not_exceed_subtotal'),
         CheckConstraint("tax_amount >= 0", name='check_tax'),
         CheckConstraint("total_amount >= 0", name='check_total'),
+        CheckConstraint(
+            "contract_resolution IS NULL OR contract_resolution IN "
+            "('client', 'server_default', 'missing_offline', 'invalid_client_snapshot')",
+            name='check_sale_contract_resolution',
+        ),
         
         # Indexes
         Index('idx_sale_org', 'organization_id'),

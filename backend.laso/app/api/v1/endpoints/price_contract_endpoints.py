@@ -6,12 +6,16 @@ from datetime import date
 from decimal import Decimal
 from fastapi import APIRouter, Depends, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List, Optional
+from typing import Dict, List, Optional
+import logging
 import uuid
 
-from app.core.deps import get_current_user, require_permission
+from app.core.deps import get_current_user, require_any_permission, require_permission
 from app.db.dependencies import get_db
+from app.models.pricing.pricing_model import PriceContract
 from app.models.user.user_model import User
+from app.schemas.event_envelope import AggregateType
+from app.services.sync.eventlog.server_emitter import ServerEventEmitter
 
 from app.schemas.price_contract_schemas import (
     PriceContractCreate,
@@ -31,6 +35,31 @@ from app.services.contracts.price_contract_service import PriceContractService
 
 
 router = APIRouter(prefix="/contracts", tags=["Price Contracts"])
+logger = logging.getLogger(__name__)
+
+
+async def _emit_contract_event(
+    db: AsyncSession,
+    contract: PriceContract,
+    event_type: str,
+    user: User,
+) -> None:
+    try:
+        await ServerEventEmitter.emit(
+            db=db,
+            org_id=contract.organization_id,
+            event_type=event_type,
+            aggregate_type=AggregateType.PRICE_CONTRACT,
+            aggregate_id=contract.id,
+            payload=PriceContractService.format_contract_event_payload(contract),
+            authored_by=user.id,
+        )
+        await db.commit()
+    except Exception:
+        logger.exception(
+            "Failed to emit %s for price contract %s", event_type, contract.id
+        )
+        await db.rollback()
 
 
 # ============================================
@@ -78,6 +107,7 @@ async def create_contract(
         contract_data=contract_data,
         user=current_user
     )
+    await _emit_contract_event(db, contract, "price_contract_created", current_user)
     
     return contract
 
@@ -370,6 +400,7 @@ async def update_contract(
         update_data=update_data,
         user=current_user
     )
+    await _emit_contract_event(db, contract, "price_contract_updated", current_user)
     
     return contract
 
@@ -403,11 +434,27 @@ async def delete_contract(
     **Returns:**
     - Success message
     """
+    contract = await PriceContractService.get_contract(db, contract_id, current_user)
+    payload_contract = PriceContractService.format_contract_event_payload(contract)
     result = await PriceContractService.delete_contract(
         db=db,
         contract_id=contract_id,
         user=current_user
     )
+    try:
+        await ServerEventEmitter.emit(
+            db=db,
+            org_id=current_user.organization_id,
+            event_type="price_contract_deleted",
+            aggregate_type=AggregateType.PRICE_CONTRACT,
+            aggregate_id=contract_id,
+            payload=payload_contract,
+            authored_by=current_user.id,
+        )
+        await db.commit()
+    except Exception:
+        logger.exception("Failed to emit price_contract_deleted for %s", contract_id)
+        await db.rollback()
     
     return result
 
@@ -443,6 +490,7 @@ async def approve_contract(
         user=current_user,
         notes=request.notes
     )
+    await _emit_contract_event(db, contract, "price_contract_updated", current_user)
     
     return contract
 
@@ -477,6 +525,7 @@ async def suspend_contract(
         user=current_user,
         reason=request.reason
     )
+    await _emit_contract_event(db, contract, "price_contract_updated", current_user)
     
     return contract
 
@@ -510,6 +559,7 @@ async def activate_contract(
         contract_id=contract_id,
         user=current_user
     )
+    await _emit_contract_event(db, contract, "price_contract_updated", current_user)
     
     return contract
 
@@ -526,7 +576,9 @@ async def activate_contract(
 async def get_available_contracts(
     branch_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(require_permission("manage_pricing"))
+    current_user: User = Depends(
+        require_any_permission("process_sales", "manage_pricing")
+    )
 ):
     """
     Get list of contracts available for selection at POS.
@@ -650,6 +702,7 @@ async def duplicate_contract(
         contract_data=new_contract_data,
         user=current_user
     )
+    await _emit_contract_event(db, new_contract, "price_contract_created", current_user)
     
     return new_contract
 

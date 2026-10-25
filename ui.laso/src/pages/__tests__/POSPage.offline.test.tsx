@@ -152,9 +152,18 @@ vi.mock("@/components/pos/DrugSearchPanel", () => ({
 }));
 
 vi.mock("@/components/pos/CartPanel", () => ({
-  CartPanel: ({ contracts, contractsLoading }: { contracts: typeof localContract[]; contractsLoading: boolean }) => (
+  CartPanel: ({
+    contracts,
+    contractsLoading,
+    allowMissingContract,
+  }: {
+    contracts: typeof localContract[];
+    contractsLoading: boolean;
+    allowMissingContract?: boolean;
+  }) => (
     <div>
       <div>{contractsLoading ? "contracts-loading" : "contracts-ready"}</div>
+      {allowMissingContract && <div>allow-missing-contract</div>}
       {contracts.map((contract) => (
         <div key={contract.id}>{contract.display}</div>
       ))}
@@ -185,8 +194,18 @@ describe("POSPage offline contracts", () => {
     await screen.findByText("Standard Price");
 
     await waitFor(() => {
-      expect(localRead.getAvailableContractsForPos).toHaveBeenCalledWith("branch-1", "org-abc");
+      expect(localRead.getAvailableContractsForPos).toHaveBeenCalledWith("branch-1", "org-abc", "user-1");
     });
     expect(contractsApi.getAvailableForPos).not.toHaveBeenCalled();
   });
+
+  it("allows a contractless sale when offline with no cached contract", async () => {
+    vi.mocked(localRead.getAvailableContractsForPos).mockResolvedValueOnce([]);
+
+    render(<POSPage />);
+
+    await screen.findByText("allow-missing-contract");
+    expect(screen.queryByText("Standard Price")).toBeNull();
+  });
+
 });
