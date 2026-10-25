@@ -101,8 +101,10 @@ The full backend run used a disposable PostgreSQL 16 cluster at `/tmp/com-pharma
 
 ### Restart after deploy
 
+From the repo root, restart the backend with the project script. It stops only its own listener, runs `alembic upgrade head`, and starts uvicorn:
+
 ```bash
-sudo systemctl restart com-pharma-backend
+./start_backend.sh
 ```
 
 Restart the desktop app so the new local schema v38 runs.
