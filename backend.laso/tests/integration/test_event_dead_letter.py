@@ -330,6 +330,73 @@ class TestEventDeadLetter:
         ).first()
         assert log is not None, "event_log row must be preserved after quarantine"
 
+    async def test_repushing_a_quarantined_event_stays_rejected(
+        self, db: AsyncSession, setup_test_data, spine_tables
+    ):
+        """A retry must not resurrect a quarantined event.
+
+        Before this guard, the retry hit _append_and_defer, saw
+        ALREADY_APPENDED, inserted a fresh pending_projections row with
+        attempts=1, and returned ACCEPTED_DEFERRED. The client would then
+        retry an event that an operator already has to resolve.
+        """
+        org, branch, user, _drugs, _c = setup_test_data
+        fake_dep = _new_ulid()
+
+        envelope = _make_customer_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            dependencies=[fake_dep],
+        )
+
+        r1 = (await EventRouter.process_batch(db, org.id, [envelope]))[0]
+        await db.commit()
+        assert r1.status == EventStatus.ACCEPTED_DEFERRED
+
+        await db.execute(
+            text(
+                "UPDATE pending_projections SET evaluation_attempts = :n "
+                "WHERE org_id = :org AND event_id = :eid"
+            ),
+            {"n": MAX_EVALUATION_ATTEMPTS - 1, "org": org.id, "eid": envelope.event_id},
+        )
+        await db.commit()
+
+        r2 = (await EventRouter.process_batch(db, org.id, [envelope]))[0]
+        await db.commit()
+        assert r2.status == EventStatus.REJECTED_PERMANENT
+        assert r2.error_code == "quarantined"
+
+        r3 = (await EventRouter.process_batch(db, org.id, [envelope]))[0]
+        await db.commit()
+        assert r3.status == EventStatus.REJECTED_PERMANENT, (
+            "a quarantined event must stay rejected on retry"
+        )
+        assert r3.error_code == "quarantined"
+
+        pending = (
+            await db.execute(
+                text(
+                    "SELECT 1 FROM pending_projections "
+                    "WHERE org_id = :org AND event_id = :eid"
+                ),
+                {"org": org.id, "eid": envelope.event_id},
+            )
+        ).first()
+        assert pending is None, "retry must not re-park a quarantined event"
+
+        dead_letters = (
+            await db.execute(
+                text(
+                    "SELECT COUNT(*) FROM event_dead_letter "
+                    "WHERE org_id = :org AND event_id = :eid"
+                ),
+                {"org": org.id, "eid": envelope.event_id},
+            )
+        ).scalar_one()
+        assert dead_letters == 1
+
     async def test_rejected_permanent_during_drain_quarantines(
         self, db: AsyncSession, setup_test_data, spine_tables
     ):

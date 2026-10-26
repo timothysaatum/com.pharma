@@ -113,6 +113,24 @@ async def db():
                         UNIQUE (org_id, seq)
                     )
                 """))
+                # The router now checks this table before every event so a
+                # quarantined event cannot be re-parked by a retry. Tests that
+                # build their own spine tables still get it from here.
+                await conn.execute(text("""
+                    CREATE TABLE IF NOT EXISTS event_dead_letter (
+                        org_id UUID NOT NULL,
+                        event_id TEXT NOT NULL,
+                        aggregate_type TEXT NOT NULL,
+                        event_type TEXT NOT NULL,
+                        evaluation_attempts INTEGER NOT NULL,
+                        quarantine_reason TEXT NOT NULL,
+                        error_code TEXT,
+                        error_message TEXT,
+                        first_deferred_at TIMESTAMPTZ,
+                        quarantined_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                        PRIMARY KEY (org_id, event_id)
+                    )
+                """))
     finally:
         for table, index in postgres_only_indexes:
             table.indexes.add(index)

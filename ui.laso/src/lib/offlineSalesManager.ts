@@ -20,6 +20,7 @@ import {
   buildLocalSalePayload,
   appendOutboxEvent,
   buildSaleCreatedEnvelope,
+  resolveSaleDependencies,
 } from "@/lib/localWrite";
 import { refreshSellableQuantity } from "@/lib/sellableQty";
 import {
@@ -95,6 +96,10 @@ export class OfflineSalesManager {
         };
       }
 
+    // Resolve create-event dependencies before the transaction. A missing
+    // dependency must fail the checkout before anything is written locally.
+    const dependencies = await resolveSaleDependencies(sale);
+
     // Pre-compute FEFO batch allocations before building transaction statements
     const batchAllocs = new Map<string, Array<{ batchId: string; allocatedQty: number }>>();
     for (const { drug_id, delta } of inventoryDeltas) {
@@ -141,7 +146,7 @@ export class OfflineSalesManager {
 
     // Append sale_created outbox event for sync engine FIFO shipping
     await appendOutboxEvent((hashPrev) =>
-      buildSaleCreatedEnvelope(sale, items, now, hashPrev)
+      buildSaleCreatedEnvelope(sale, items, now, hashPrev, dependencies)
     );
 
     console.info(

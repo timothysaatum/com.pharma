@@ -70,6 +70,15 @@ class AppendResult:
     seq: Optional[int]
     received_at: Optional[datetime]
     hash_prev: Optional[str]
+    hash_self: Optional[str] = None
+    """The hash the server actually stored.
+
+    On ``APPENDED`` this is the server-chain hash (``compute_hash_self`` against
+    the real tail), which may differ from ``envelope.hash_self`` when the client
+    built its chain from a different starting point. Callers advancing an
+    in-memory tail must use this value, never ``envelope.hash_self``.
+    """
+
     expected_hash_self: Optional[str] = None
     """Populated on HASH_MISMATCH so the caller can surface the diff."""
 
@@ -129,10 +138,12 @@ class AppendService:
             results.append(result)
             if result.status == AppendStatus.APPENDED:
                 assert result.seq is not None
+                assert result.hash_self is not None
                 # Advance the in-memory tail so subsequent events in this
-                # batch chain onto this event (rather than re-reading the
-                # tail from the DB each iteration).
-                tail_hash = envelope.hash_self
+                # batch chain onto what the server actually stored, not the
+                # client's hash. Those differ whenever the client's chain
+                # started from a different point than the server's.
+                tail_hash = result.hash_self
                 tail_seq = result.seq
 
         return results
@@ -193,7 +204,7 @@ class AppendService:
             await db.execute(
                 text(
                     """
-                    SELECT seq, received_at, hash_prev
+                    SELECT seq, received_at, hash_prev, hash_self
                       FROM event_log
                      WHERE org_id = :org_id AND event_id = :event_id
                     """
@@ -208,6 +219,7 @@ class AppendService:
                 seq=existing[0],
                 received_at=existing[1],
                 hash_prev=existing[2],
+                hash_self=existing[3],
             )
 
         # 2. Hash verification: re-compute expected hash_self from
@@ -240,59 +252,64 @@ class AppendService:
         received_at = datetime.now(timezone.utc)
         server_hash_self = expected_server_hash
         try:
-            await db.execute(
-                text(
-                    """
-                    INSERT INTO event_log (
-                        event_id, org_id, seq,
-                        aggregate_id, aggregate_type, event_type,
-                        schema_version, payload, dependencies,
-                        authored_at, authored_by, branch_id,
-                        hash_self, hash_prev, received_at
-                    ) VALUES (
-                        :event_id, :org_id, :seq,
-                        :aggregate_id, :aggregate_type, :event_type,
-                        :schema_version, CAST(:payload AS JSONB), :dependencies,
-                        :authored_at, :authored_by, :branch_id,
-                        :hash_self, :hash_prev, :received_at
-                    )
-                    """
-                ),
-                {
-                    "event_id": envelope.event_id,
-                    "org_id": str(org_id),
-                    "seq": seq,
-                    "aggregate_id": str(envelope.aggregate_id),
-                    "aggregate_type": (
-                        envelope.aggregate_type.value
-                        if hasattr(envelope.aggregate_type, "value")
-                        else envelope.aggregate_type
+            # Isolate the INSERT in a savepoint. The router already holds a
+            # savepoint per event; rolling back the whole session here would
+            # discard every earlier event accepted in the same batch. A
+            # savepoint keeps the caller's transaction usable and lets the
+            # re-read below distinguish "duplicate event_id" from any other
+            # integrity failure.
+            async with db.begin_nested():
+                await db.execute(
+                    text(
+                        """
+                        INSERT INTO event_log (
+                            event_id, org_id, seq,
+                            aggregate_id, aggregate_type, event_type,
+                            schema_version, payload, dependencies,
+                            authored_at, authored_by, branch_id,
+                            hash_self, hash_prev, received_at
+                        ) VALUES (
+                            :event_id, :org_id, :seq,
+                            :aggregate_id, :aggregate_type, :event_type,
+                            :schema_version, CAST(:payload AS JSONB), :dependencies,
+                            :authored_at, :authored_by, :branch_id,
+                            :hash_self, :hash_prev, :received_at
+                        )
+                        """
                     ),
-                    "event_type": envelope.event_type,
-                    "schema_version": envelope.schema_version,
-                    "payload": _payload_json(envelope.payload),
-                    "dependencies": envelope.dependencies,
-                    "authored_at": envelope.authored_at,
-                    "authored_by": str(envelope.authored_by) if envelope.authored_by is not None else None,
-                    "branch_id": str(envelope.branch_id),
-                    "hash_self": server_hash_self,
-                    "hash_prev": current_tail_hash,
-                    "received_at": received_at,
-                },
-            )
+                    {
+                        "event_id": envelope.event_id,
+                        "org_id": str(org_id),
+                        "seq": seq,
+                        "aggregate_id": str(envelope.aggregate_id),
+                        "aggregate_type": (
+                            envelope.aggregate_type.value
+                            if hasattr(envelope.aggregate_type, "value")
+                            else envelope.aggregate_type
+                        ),
+                        "event_type": envelope.event_type,
+                        "schema_version": envelope.schema_version,
+                        "payload": _payload_json(envelope.payload),
+                        "dependencies": envelope.dependencies,
+                        "authored_at": envelope.authored_at,
+                        "authored_by": str(envelope.authored_by) if envelope.authored_by is not None else None,
+                        "branch_id": str(envelope.branch_id),
+                        "hash_self": server_hash_self,
+                        "hash_prev": current_tail_hash,
+                        "received_at": received_at,
+                    },
+                )
         except IntegrityError:
             # A concurrent inserter beat us to this event_id. Because we
             # hold the advisory lock, this should be impossible unless
             # the lock was released early or the same envelope was
             # supplied twice within the same batch. Re-read and return
             # ALREADY_APPENDED — the previously-committed row wins.
-            await db.rollback()
-            await cls._acquire_org_lock(db, org_id)
             row = (
                 await db.execute(
                     text(
                         """
-                        SELECT seq, received_at, hash_prev
+                        SELECT seq, received_at, hash_prev, hash_self
                           FROM event_log
                          WHERE org_id = :org_id AND event_id = :event_id
                         """
@@ -308,6 +325,7 @@ class AppendService:
                 seq=row[0],
                 received_at=row[1],
                 hash_prev=row[2],
+                hash_self=row[3],
             )
 
         return AppendResult(
@@ -316,6 +334,7 @@ class AppendService:
             seq=seq,
             received_at=received_at,
             hash_prev=current_tail_hash,
+            hash_self=server_hash_self,
         )
 
 

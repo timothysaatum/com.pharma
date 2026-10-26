@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   executeTransaction: vi.fn(),
   appendOutboxEvent: vi.fn(),
   buildSaleCreatedEnvelope: vi.fn(),
+  resolveSaleDependencies: vi.fn(),
 }));
 
 vi.mock("@/lib/localDb", () => ({
@@ -33,6 +34,7 @@ vi.mock("@/lib/localWrite", () => ({
   })),
   appendOutboxEvent: mocks.appendOutboxEvent,
   buildSaleCreatedEnvelope: mocks.buildSaleCreatedEnvelope,
+  resolveSaleDependencies: mocks.resolveSaleDependencies,
 }));
 
 vi.mock("@/lib/leaseEngine", () => ({
@@ -90,6 +92,7 @@ describe("offlineSalesManager atomic checkout", () => {
     });
     mocks.executeTransaction.mockResolvedValue([]);
     mocks.appendOutboxEvent.mockResolvedValue(undefined);
+    mocks.resolveSaleDependencies.mockResolvedValue([]);
   });
 
   it("writes one stable protocol-v2 command and local projections", async () => {
@@ -166,6 +169,40 @@ describe("offlineSalesManager atomic checkout", () => {
       success: false,
       error: expect.stringContaining("Insufficient available local stock"),
     });
+    expect(mocks.appendOutboxEvent).not.toHaveBeenCalled();
+  });
+
+  it("resolves dependencies before touching SQLite", async () => {
+    mocks.resolveSaleDependencies.mockResolvedValue(["customer-created-event"]);
+
+    await offlineSalesManager.recordSaleTransaction(
+      sale(),
+      [item()],
+      [{ drug_id: drugId, delta: -2 }],
+      `sale:${saleId}`,
+    );
+
+    expect(mocks.resolveSaleDependencies).toHaveBeenCalledWith(
+      expect.objectContaining({ id: saleId }),
+    );
+    expect(mocks.executeTransaction).toHaveBeenCalledOnce();
+  });
+
+  it("fails the checkout before writing when a dependency cannot be resolved", async () => {
+    mocks.resolveSaleDependencies.mockRejectedValue(
+      new Error("Cannot queue a customer reference: no customer_created event is queued."),
+    );
+
+    const result = await offlineSalesManager.recordSaleTransaction(
+      sale(),
+      [item()],
+      [{ drug_id: drugId, delta: -2 }],
+      `sale:${saleId}`,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.success ? "" : result.error).toMatch(/no customer_created event is queued/);
+    expect(mocks.executeTransaction).not.toHaveBeenCalled();
     expect(mocks.appendOutboxEvent).not.toHaveBeenCalled();
   });
 

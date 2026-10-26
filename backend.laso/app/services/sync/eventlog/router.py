@@ -101,16 +101,25 @@ class EventRouter:
 
         org_id = str(org_id)
         await AppendService._acquire_org_lock(db, org_id)
-        tail_hash, tail_seq = await AppendService._load_log_tail(db, org_id)
 
         results: List[EventPushResult] = []
         for envelope in envelopes:
+            # Read the persisted tail for every envelope instead of caching
+            # it. A projector may append nested events inside apply() (the
+            # sale projector emits customer_loyalty_changed and
+            # prescription_refill_used through StockEventEmitter), and
+            # _drain_pending may apply more events after that. The DB tail is
+            # the only value that reflects all of them. Caching the outer
+            # envelope's hash/seq here makes the next envelope reuse a seq and
+            # collide on (org_id, seq).
+            tail_hash, tail_seq = await AppendService._load_log_tail(db, org_id)
+
             # Nested transaction per event so an unexpected projector
             # exception rolls back only that event's writes — the
             # advisory lock (held on the outer transaction) survives.
             try:
                 async with db.begin_nested():
-                    push_result, append_result = await cls._process_one(
+                    push_result, _append_result = await cls._process_one(
                         db, org_id, envelope, tail_hash, tail_seq
                     )
             except Exception:
@@ -134,12 +143,6 @@ class EventRouter:
                 continue
 
             results.append(push_result)
-            if append_result is not None and append_result.status == AppendStatus.APPENDED:
-                # Advance in-memory tail so subsequent events chain onto
-                # this one within the same batch.
-                tail_hash = envelope.hash_self
-                assert append_result.seq is not None
-                tail_seq = append_result.seq
 
         return results
 
@@ -156,6 +159,25 @@ class EventRouter:
         current_tail_hash: str,
         current_tail_seq: int,
     ) -> tuple[EventPushResult, AppendResult | None]:
+        # 0. A quarantined event stays quarantined. Without this check a
+        # re-push reaches _append_and_defer, which appends (ALREADY_APPENDED),
+        # re-parks it with a fresh attempt count, and reports
+        # ACCEPTED_DEFERRED. The client would then retry forever against an
+        # event an operator already has to resolve.
+        if await cls._is_dead_lettered(db, org_id, envelope.event_id):
+            return (
+                EventPushResult(
+                    event_id=envelope.event_id,
+                    status=EventStatus.REJECTED_PERMANENT,
+                    error_code="quarantined",
+                    error_message=(
+                        "Event is quarantined in event_dead_letter; "
+                        "operator action is required before it can be replayed."
+                    ),
+                ),
+                None,
+            )
+
         # 1. Projector lookup.
         projector = ProjectorRegistry.get(envelope.aggregate_type)
         if projector is None:
@@ -259,6 +281,27 @@ class EventRouter:
     # ------------------------------------------------------------------
     # Dependency check
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _is_dead_lettered(
+        db: AsyncSession,
+        org_id: str,
+        event_id: str,
+    ) -> bool:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT 1
+                      FROM event_dead_letter
+                     WHERE org_id = :org_id AND event_id = :event_id
+                     LIMIT 1
+                    """
+                ),
+                {"org_id": org_id, "event_id": event_id},
+            )
+        ).first()
+        return row is not None
 
     @staticmethod
     async def _check_dependencies(

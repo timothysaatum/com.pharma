@@ -193,6 +193,7 @@ def _make_sale_created_envelope(
     expiry_date: date,
     sale_id: uuid.UUID | None = None,
     sale_number: str = "TB001-20260813-0001",
+    customer_id: uuid.UUID | None = None,
     quantity: int = 5,
     unit_price: str = "50.00",
     hash_prev: str = GENESIS_HASH,
@@ -221,6 +222,8 @@ def _make_sale_created_envelope(
             "branch_id": str(branch_id),
             "cashier_id": str(authored_by),
             "sale_number": sale_number,
+            "customer_id": str(customer_id) if customer_id else None,
+            "customer_name": "Test Customer" if customer_id else "Walk-in Customer",
             "payment_method": payment_method,
             "payment_status": "completed",
             "status": status,
@@ -272,6 +275,7 @@ def _make_sale_created_envelope(
         authored_by=authored_by,
         branch_id=branch_id,
         org_id=org_id,
+        hash_prev=hash_prev,
         hash_self="0" * 64,
     )
     envelope.hash_self = compute_hash_self(envelope, hash_prev)
@@ -302,6 +306,7 @@ def _make_sale_voided_envelope(
         authored_by=authored_by,
         branch_id=branch_id,
         org_id=org_id,
+        hash_prev=hash_prev,
         hash_self="0" * 64,
     )
     envelope.hash_self = compute_hash_self(envelope, hash_prev)
@@ -462,6 +467,85 @@ class TestSaleSyncProjector:
             )
         ).scalar()
         assert adj_count == 1
+
+    async def test_batch_with_nested_loyalty_event_uses_persisted_tail(
+        self, db: AsyncSession, sale_test_data, setup_test_data, event_sync_tables
+    ):
+        """A projector may append its own event inside apply().
+
+        The sale projector emits customer_loyalty_changed through
+        StockEventEmitter. The second sale in the same batch must chain onto
+        that nested event's stored hash and use the next seq after it. Caching
+        the outer sale's seq/hash makes the second sale reuse seq 2 and collide
+        on (org_id, seq).
+        """
+        org, branch, user, drug, batch_id, batch_number, expiry_date = sale_test_data
+        _org, _branch, _user, _drugs, customer = setup_test_data
+
+        org.settings = {**(org.settings or {}), "enable_loyalty_program": True}
+        customer.customer_type = "registered"
+        await db.commit()
+
+        first = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            sale_number="TB001-20260813-0001",
+            customer_id=customer.id,
+            hash_prev=GENESIS_HASH,
+        )
+        second = _make_sale_created_envelope(
+            org_id=org.id,
+            branch_id=branch.id,
+            authored_by=user.id,
+            drug_id=drug.id,
+            batch_id=batch_id,
+            batch_number=batch_number,
+            expiry_date=expiry_date,
+            sale_number="TB001-20260813-0002",
+            customer_id=customer.id,
+            hash_prev=first.hash_self,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [first, second])
+        await db.commit()
+
+        assert [r.status for r in results] == [
+            EventStatus.ACCEPTED,
+            EventStatus.ACCEPTED,
+        ], results
+
+        rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT event_id, event_type, seq, hash_prev, hash_self
+                      FROM event_log
+                     WHERE org_id = :org_id
+                     ORDER BY seq
+                    """
+                ),
+                {"org_id": str(org.id)},
+            )
+        ).fetchall()
+
+        assert [row[1] for row in rows] == [
+            "sale_created",
+            "customer_loyalty_changed",
+            "sale_created",
+            "customer_loyalty_changed",
+        ]
+        assert [row[2] for row in rows] == [1, 2, 3, 4]
+        assert rows[0][3] == GENESIS_HASH
+        assert rows[1][3] == rows[0][4], "first loyalty event must chain onto first sale"
+        assert rows[2][3] == rows[1][4], "second sale must chain onto first loyalty event"
+        assert rows[3][3] == rows[2][4], "second loyalty event must chain onto second sale"
+        assert rows[2][0] == second.event_id
+        assert results[1].seq == 3
 
     async def test_sale_created_idempotent(
         self, db: AsyncSession, sale_test_data, event_sync_tables

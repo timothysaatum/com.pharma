@@ -202,12 +202,145 @@ let _outboxLock: Promise<void> = Promise.resolve();
 export async function appendOutboxEvent(
     build: (hashPrev: string) => Promise<OutboxEvent>
 ): Promise<void> {
-    _outboxLock = _outboxLock.then(async () => {
+    const run = _outboxLock.then(async () => {
         const hashPrev = (await getOutboxTailHash()) ?? GENESIS_HASH;
         const envelope = await build(hashPrev);
         await appendToOutbox(envelope);
     });
-    return _outboxLock;
+    // Keep the chain alive after a failed build. Without this, one rejected
+    // dependency lookup poisons every later append for the rest of the session.
+    _outboxLock = run.catch(() => {});
+    return run;
+}
+
+type DependencyAggregateType =
+    | "customer"
+    | "prescription"
+    | "purchase_order"
+    | "drug_batch";
+
+const CREATE_EVENT_BY_AGGREGATE: Record<
+    DependencyAggregateType,
+    { eventType: string; table: string }
+> = {
+    customer: { eventType: "customer_created", table: "customers" },
+    prescription: { eventType: "prescription_created", table: "prescriptions" },
+    purchase_order: { eventType: "purchase_order_created", table: "purchase_orders" },
+    drug_batch: { eventType: "drug_batch_created", table: "drug_batches" },
+};
+
+/**
+ * Resolve the outbox event that creates an aggregate, for use as a declared
+ * dependency on an event that references it.
+ *
+ * - A queued/accepted create event is always returned, even after the server
+ *   accepted it: event_outbox is never pruned, so this is the stable ID.
+ * - A permanently rejected create event throws. Queueing a dependent event
+ *   against it would only produce another server-side rejection.
+ * - A local row that is not synced and has no queued create event throws. That
+ *   is an unsyncable local-only row; the server cannot satisfy the FK.
+ * - A synced row (server origin) or a missing row returns null. The server
+ *   already owns the aggregate, or will validate the reference itself. Treating
+ *   a missing local cache row as an error would block valid server-origin
+ *   references the device never cached.
+ */
+export async function resolveCreateDependency(
+    aggregateType: DependencyAggregateType,
+    aggregateId: string | null | undefined,
+): Promise<string | null> {
+    if (!aggregateId) return null;
+
+    const spec = CREATE_EVENT_BY_AGGREGATE[aggregateType];
+    const db = await getDb();
+
+    const createRows = await db.select<Array<{ event_id: string; status: string }>>(
+        `SELECT event_id, status
+           FROM event_outbox
+          WHERE aggregate_type = $1
+            AND aggregate_id = $2
+            AND event_type = $3
+          ORDER BY created_at ASC, event_id ASC
+          LIMIT 1`,
+        [aggregateType, aggregateId, spec.eventType],
+    );
+    if (createRows.length > 0) {
+        const row = createRows[0];
+        if (row.status === "rejected_permanent") {
+            throw new Error(
+                `Cannot queue a ${aggregateType} reference to ${aggregateId}: ` +
+                `its ${spec.eventType} event was permanently rejected. ` +
+                `Resolve that rejected event before creating dependents.`,
+            );
+        }
+        return row.event_id;
+    }
+
+    const localRows = await db.select<Array<{ sync_status: string }>>(
+        `SELECT sync_status FROM ${spec.table} WHERE id = $1 LIMIT 1`,
+        [aggregateId],
+    );
+    if (localRows.length === 0) return null;
+    if (localRows[0].sync_status === "synced") return null;
+
+    throw new Error(
+        `Cannot queue a ${aggregateType} reference to ${aggregateId}: ` +
+        `the local row is '${localRows[0].sync_status}' but no ` +
+        `${spec.eventType} event is queued. Create or sync it first.`,
+    );
+}
+
+export async function resolveSaleDependencies(
+    sale: Pick<Sale, "customer_id" | "prescription_id">,
+): Promise<string[]> {
+    const deps = await Promise.all([
+        resolveCreateDependency("customer", sale.customer_id ?? null),
+        resolveCreateDependency("prescription", sale.prescription_id ?? null),
+    ]);
+    return deps.filter((id): id is string => Boolean(id));
+}
+
+async function resolvePrescriptionDependencies(
+    prescription: Pick<Prescription, "id" | "customer_id">,
+    operation: "create" | "update",
+): Promise<string[]> {
+    const deps = await Promise.all([
+        resolveCreateDependency("customer", prescription.customer_id ?? null),
+        operation === "update"
+            ? resolveCreateDependency("prescription", prescription.id)
+            : Promise.resolve(null),
+    ]);
+    return deps.filter((id): id is string => Boolean(id));
+}
+
+async function resolveCustomerDependencies(
+    customer: Pick<Customer, "id">,
+    operation: "create" | "update",
+): Promise<string[]> {
+    if (operation !== "update") return [];
+    const dependency = await resolveCreateDependency("customer", customer.id);
+    return dependency ? [dependency] : [];
+}
+
+async function resolveDrugBatchDependencies(
+    batch: Pick<DrugBatch, "id" | "purchase_order_id">,
+    operation: "create" | "update",
+): Promise<string[]> {
+    const deps = await Promise.all([
+        operation === "update"
+            ? resolveCreateDependency("drug_batch", batch.id)
+            : Promise.resolve(null),
+        resolveCreateDependency("purchase_order", batch.purchase_order_id ?? null),
+    ]);
+    return deps.filter((id): id is string => Boolean(id));
+}
+
+async function resolvePurchaseOrderDependencies(
+    po: Pick<PurchaseOrder, "id">,
+    operation: "create" | "update",
+): Promise<string[]> {
+    if (operation !== "update") return [];
+    const dependency = await resolveCreateDependency("purchase_order", po.id);
+    return dependency ? [dependency] : [];
 }
 
 export async function buildSaleCreatedEnvelope(
@@ -215,6 +348,7 @@ export async function buildSaleCreatedEnvelope(
     items: Sale["items"],
     now: string,
     hashPrev: string,
+    dependencies: string[] = [],
 ): Promise<OutboxEvent> {
     const eventId = generateUlid();
 
@@ -273,7 +407,7 @@ export async function buildSaleCreatedEnvelope(
         {
             event_id: eventId, aggregate_id: sale.id, aggregate_type: "sale",
             event_type: "sale_created", schema_version: 1, payload,
-            dependencies: [], authored_at: now, authored_by: sale.cashier_id,
+            dependencies, authored_at: now, authored_by: sale.cashier_id,
             branch_id: sale.branch_id, org_id: sale.organization_id,
         },
         hashPrev,
@@ -286,7 +420,7 @@ export async function buildSaleCreatedEnvelope(
         event_type: "sale_created",
         schema_version: 1,
         payload,
-        dependencies: [],
+        dependencies,
         authored_at: now,
         authored_by: sale.cashier_id,
         branch_id: sale.branch_id,
@@ -305,6 +439,7 @@ async function buildPrescriptionEnvelope(
     operation: "create" | "update",
     now: string,
     hashPrev: string,
+    dependencies: string[] = [],
 ): Promise<OutboxEvent> {
     const eventId = generateUlid();
     const eventType = operation === "create" ? "prescription_created" : "prescription_updated";
@@ -337,7 +472,7 @@ async function buildPrescriptionEnvelope(
         {
             event_id: eventId, aggregate_id: prescription.id, aggregate_type: "prescription",
             event_type: eventType, schema_version: 1, payload,
-            dependencies: [], authored_at: now, authored_by: authoredBy,
+            dependencies, authored_at: now, authored_by: authoredBy,
             branch_id: prescription.branch_id, org_id: prescription.organization_id,
         },
         hashPrev,
@@ -350,7 +485,7 @@ async function buildPrescriptionEnvelope(
         event_type: eventType,
         schema_version: 1,
         payload,
-        dependencies: [],
+        dependencies,
         authored_at: now,
         authored_by: authoredBy,
         branch_id: prescription.branch_id,
@@ -370,6 +505,7 @@ async function buildCustomerEnvelope(
     now: string,
     operation: "create" | "update",
     hashPrev: string,
+    dependencies: string[] = [],
 ): Promise<OutboxEvent> {
     const eventId = generateUlid();
     const eventType = operation === "create" ? "customer_created" : "customer_updated";
@@ -403,7 +539,7 @@ async function buildCustomerEnvelope(
         {
             event_id: eventId, aggregate_id: customer.id, aggregate_type: "customer",
             event_type: eventType, schema_version: 1, payload,
-            dependencies: [], authored_at: now, authored_by: customer.organization_id,
+            dependencies, authored_at: now, authored_by: customer.organization_id,
             branch_id: branchId, org_id: customer.organization_id,
         },
         hashPrev,
@@ -416,7 +552,7 @@ async function buildCustomerEnvelope(
         event_type: eventType,
         schema_version: 1,
         payload,
-        dependencies: [],
+        dependencies,
         authored_at: now,
         authored_by: customer.organization_id,
         branch_id: branchId,
@@ -483,6 +619,7 @@ async function buildDrugBatchEnvelope(
     operation: "create" | "update",
     now: string,
     hashPrev: string,
+    dependencies: string[] = [],
 ): Promise<OutboxEvent> {
     const eventId = generateUlid();
     const eventType = operation === "create" ? "drug_batch_created" : "drug_batch_updated";
@@ -508,7 +645,7 @@ async function buildDrugBatchEnvelope(
         {
             event_id: eventId, aggregate_id: batch.id, aggregate_type: "drug_batch",
             event_type: eventType, schema_version: 1, payload,
-            dependencies: [], authored_at: now, authored_by: batch.branch_id, // fallback
+            dependencies, authored_at: now, authored_by: batch.branch_id, // fallback
             branch_id: batch.branch_id, org_id: payload.org_id as string,
         },
         hashPrev,
@@ -521,7 +658,7 @@ async function buildDrugBatchEnvelope(
         event_type: eventType,
         schema_version: 1,
         payload,
-        dependencies: [],
+        dependencies,
         authored_at: now,
         authored_by: batch.branch_id,
         branch_id: batch.branch_id,
@@ -591,6 +728,7 @@ async function buildPurchaseOrderEnvelope(
     operation: "create" | "update",
     now: string,
     hashPrev: string,
+    dependencies: string[] = [],
 ): Promise<OutboxEvent> {
     const eventId = generateUlid();
     const eventType = operation === "create" ? "purchase_order_created" : "purchase_order_updated";
@@ -620,7 +758,7 @@ async function buildPurchaseOrderEnvelope(
         {
             event_id: eventId, aggregate_id: po.id, aggregate_type: "purchase_order",
             event_type: eventType, schema_version: 1, payload,
-            dependencies: [], authored_at: now, authored_by: po.ordered_by,
+            dependencies, authored_at: now, authored_by: po.ordered_by,
             branch_id: po.branch_id, org_id: po.organization_id,
         },
         hashPrev,
@@ -633,7 +771,7 @@ async function buildPurchaseOrderEnvelope(
         event_type: eventType,
         schema_version: 1,
         payload,
-        dependencies: [],
+        dependencies,
         authored_at: now,
         authored_by: po.ordered_by,
         branch_id: po.branch_id,
@@ -767,10 +905,13 @@ export const writeLocal = {
     ): Promise<void> => {
         const items = sale.items ?? [];
         const now = new Date().toISOString();
+        const dependencies = await resolveSaleDependencies(sale);
         const payload = buildLocalSalePayload(sale, items, now);
         await upsertLocal("sales", payload as Record<string, unknown>);
 
-        await appendOutboxEvent((hashPrev) => buildSaleCreatedEnvelope(sale, items, now, hashPrev));
+        await appendOutboxEvent((hashPrev) =>
+            buildSaleCreatedEnvelope(sale, items, now, hashPrev, dependencies)
+        );
         await writeLocal.auditLog({
             organization_id: sale.organization_id,
             action: "create_sale_offline",
@@ -799,7 +940,10 @@ export const writeLocal = {
     ): Promise<void> => {
         const { days_until_expiry, is_expired, is_expiring_soon, ...batchData } = batch;
         const now = new Date().toISOString();
-        await appendOutboxEvent((hashPrev) => buildDrugBatchEnvelope(batch, operation, now, hashPrev));
+        const dependencies = await resolveDrugBatchDependencies(batch, operation);
+        await appendOutboxEvent((hashPrev) =>
+            buildDrugBatchEnvelope(batch, operation, now, hashPrev, dependencies)
+        );
         await upsertLocal("drug_batches", batchData as Record<string, unknown>);
     },
 
@@ -939,7 +1083,10 @@ export const writeLocal = {
             items_json: JSON.stringify(items ?? []),
         };
         const now = new Date().toISOString();
-        await appendOutboxEvent((hashPrev) => buildPurchaseOrderEnvelope(po, operation, now, hashPrev));
+        const dependencies = await resolvePurchaseOrderDependencies(po, operation);
+        await appendOutboxEvent((hashPrev) =>
+            buildPurchaseOrderEnvelope(po, operation, now, hashPrev, dependencies)
+        );
         await upsertLocal("purchase_orders", payload as Record<string, unknown>);
     },
 
@@ -1031,6 +1178,7 @@ export const writeLocal = {
         operation: "create" | "update" = "create"
     ): Promise<void> => {
         const now = new Date().toISOString();
+        const dependencies = await resolvePrescriptionDependencies(prescription, operation);
         const payload = pickColumns(
             {
                 ...prescription,
@@ -1045,7 +1193,9 @@ export const writeLocal = {
 
         await upsertLocal("prescriptions", payload);
 
-        await appendOutboxEvent((hashPrev) => buildPrescriptionEnvelope(prescription, operation, now, hashPrev));
+        await appendOutboxEvent((hashPrev) =>
+            buildPrescriptionEnvelope(prescription, operation, now, hashPrev, dependencies)
+        );
     },
 
     /**
@@ -1079,6 +1229,10 @@ export const writeLocal = {
             ...customerData
         } = customer;
 
+        const dependencies = branchId
+            ? await resolveCustomerDependencies(customer, operation)
+            : [];
+
         const payload = pickColumns(
             {
                 ...customerData,
@@ -1091,7 +1245,9 @@ export const writeLocal = {
         await upsertLocal("customers", payload);
 
         if (branchId) {
-            await appendOutboxEvent((hashPrev) => buildCustomerEnvelope(customer, branchId, now, operation, hashPrev));
+            await appendOutboxEvent((hashPrev) =>
+                buildCustomerEnvelope(customer, branchId, now, operation, hashPrev, dependencies)
+            );
         }
 
         await writeLocal.auditLog({

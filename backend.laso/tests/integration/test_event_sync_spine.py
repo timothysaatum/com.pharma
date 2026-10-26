@@ -30,6 +30,7 @@ from app.schemas.event_envelope import (
     compute_hash_self,
 )
 from app.services.sync.eventlog import EventRouter
+from app.services.sync.eventlog.append_service import AppendService, AppendStatus
 
 # Import the projectors package so CustomerProjector registers itself.
 import app.services.sync.eventlog.projectors  # noqa: F401
@@ -152,6 +153,7 @@ def _make_customer_created_envelope(
         authored_by=authored_by,
         branch_id=branch_id,
         org_id=org_id,
+        hash_prev=hash_prev,
         hash_self="0" * 64,  # placeholder — overwritten below
     )
     envelope.hash_self = compute_hash_self(envelope, hash_prev)
@@ -250,6 +252,112 @@ class TestEventSyncSpine:
         assert rows[0][2] == GENESIS_HASH
         assert rows[1][2] == e1.hash_self
         assert rows[2][2] == e2.hash_self
+
+    async def test_batch_chains_onto_stored_server_hash_when_client_chain_diverges(
+        self, db: AsyncSession, setup_test_data, event_sync_tables
+    ):
+        """REGRESSION for sync-log cfa1d31b seq 10.
+
+        The client built its chain from a different starting point than the
+        server's log tail. The server stores a recomputed hash for each event,
+        but the router used the client's hash when advancing its in-memory
+        tail, so the next event in the batch recorded the wrong hash_prev.
+        """
+        org, branch, user, _drugs, _c = setup_test_data
+
+        seed = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="Seed",
+        )
+        seeded = await EventRouter.process_batch(db, org.id, [seed])
+        await db.commit()
+        assert seeded[0].status == EventStatus.ACCEPTED
+
+        # Client chain starts at GENESIS, not at the server's existing tail.
+        e1 = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="One", hash_prev=GENESIS_HASH,
+        )
+        e2 = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="Two", hash_prev=e1.hash_self,
+        )
+        e3 = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="Three", hash_prev=e2.hash_self,
+        )
+
+        results = await EventRouter.process_batch(db, org.id, [e1, e2, e3])
+        await db.commit()
+        assert all(r.status == EventStatus.ACCEPTED for r in results), results
+
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT event_id, seq, hash_prev, hash_self "
+                    "FROM event_log WHERE org_id = :org_id ORDER BY seq"
+                ),
+                {"org_id": str(org.id)},
+            )
+        ).fetchall()
+
+        assert [row[0] for row in rows] == [
+            seed.event_id, e1.event_id, e2.event_id, e3.event_id
+        ]
+        assert [row[1] for row in rows] == [1, 2, 3, 4]
+        assert rows[1][2] == rows[0][3]
+        assert rows[1][3] != e1.hash_self, (
+            "server must store its own recomputed hash, not the client's"
+        )
+        assert rows[2][2] == rows[1][3], (
+            "second event must chain onto the hash the server stored for the first"
+        )
+        assert rows[3][2] == rows[2][3]
+
+    async def test_append_batch_advances_to_stored_server_hash(
+        self, db: AsyncSession, setup_test_data, event_sync_tables
+    ):
+        """append_batch had the same client-hash tail bug as the router."""
+        org, branch, user, _drugs, _c = setup_test_data
+
+        seed = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="Seed",
+        )
+        seeded = await EventRouter.process_batch(db, org.id, [seed])
+        await db.commit()
+        assert seeded[0].status == EventStatus.ACCEPTED
+
+        e1 = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="One", hash_prev=GENESIS_HASH,
+        )
+        e2 = _make_customer_created_envelope(
+            org_id=org.id, branch_id=branch.id, authored_by=user.id,
+            first_name="Two", hash_prev=e1.hash_self,
+        )
+
+        results = await AppendService.append_batch(db, org.id, [e1, e2])
+        await db.commit()
+
+        assert [r.status for r in results] == [
+            AppendStatus.APPENDED, AppendStatus.APPENDED
+        ]
+        assert results[0].hash_self is not None
+        assert results[1].hash_prev == results[0].hash_self
+
+        rows = (
+            await db.execute(
+                text(
+                    "SELECT event_id, seq, hash_prev, hash_self "
+                    "FROM event_log WHERE org_id = :org_id ORDER BY seq"
+                ),
+                {"org_id": str(org.id)},
+            )
+        ).fetchall()
+        assert [row[1] for row in rows] == [1, 2, 3]
+        assert rows[2][2] == rows[1][3]
+        assert rows[2][3] == results[1].hash_self
 
     async def test_duplicate_event_is_idempotent(
         self, db: AsyncSession, setup_test_data, event_sync_tables
